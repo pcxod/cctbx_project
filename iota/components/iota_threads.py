@@ -17,7 +17,7 @@ from libtbx.easy_mp import parallel_map
 from libtbx import easy_pickle as ep
 from libtbx import easy_run
 
-from dxtbx.datablock import DataBlockFactory
+from dxtbx.model.experiment_list import ExperimentListFactory
 import multiprocessing
 
 import subprocess
@@ -668,8 +668,8 @@ class SpotFinderDIALSThread():
         sg = None
         uc = None
         try:
-          datablock = DataBlockFactory.from_filenames([img])[0]
-          observed = self.processor.find_spots(datablock=datablock)
+          experiments = ExperimentListFactory.from_filenames([img])
+          observed = self.processor.find_spots(experiments=experiments)
         except Exception:
           fail = True
           observed = []
@@ -680,7 +680,7 @@ class SpotFinderDIALSThread():
           if not fail:
             try:
               experiments, indexed = self.processor.index(
-                datablock=datablock, reflections=observed)
+                experiments=experiments, reflections=observed)
             except Exception:
               fail = True
               pass
@@ -846,7 +846,7 @@ class SpotFinderThread(Thread):
     if self.backend == 'dials':
       # Modify default DIALS parameters
       # These parameters will be set no matter what
-      proc_params.output.datablock_filename = None
+      proc_params.output.experiments_filename = None
       proc_params.output.indexed_filename = None
       proc_params.output.strong_filename = None
       proc_params.output.refined_experiments_filename = None
@@ -1047,7 +1047,7 @@ class InterceptorThread(Thread):
     if self.backend == 'dials':
       # Modify default DIALS parameters
       # These parameters will be set no matter what
-      proc_params.output.datablock_filename = None
+      proc_params.output.experiments_filename = None
       proc_params.output.indexed_filename = None
       proc_params.output.strong_filename = None
       proc_params.output.refined_experiments_filename = None

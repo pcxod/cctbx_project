@@ -274,7 +274,7 @@ class Integrator():
     self.img_object = None
 
   def prep_script(self, img_object):
-    ''' Prepare all the settings and parameters; if no datablock is given,
+    ''' Prepare all the settings and parameters; if no experiment list is given,
     generate one from file.
 
     :param img_object: A Python object with image info (including data)
@@ -294,7 +294,7 @@ class Integrator():
     self.phil = current_phil.extract()
 
     # Turn off all peripheral output (may need to revisit this later...)
-    self.phil.output.datablock_filename = None
+    self.phil.output.experiments_filename = None
     self.phil.output.indexed_filename = None
     self.phil.output.strong_filename = None
     self.phil.output.refined_experiments_filename = None
@@ -340,9 +340,9 @@ class Integrator():
         self.phil.significance_filter.enable = True
         self.phil.significance_filter.isigi_cutoff = sigma
 
-    if not self.img_object.datablock:
-      from dxtbx.datablock import DataBlockFactory as db
-      self.img_object.datablock = db.from_filenames([self.img_object.img_path])[0]
+    if not self.img_object.experiments:
+      from dxtbx.model.experiment_list import ExperimentListFactory
+      self.img_object.experiments = ExperimentListFactory.from_filenames([self.img_object.img_path])
 
     # Auto-set threshold and gain (not saved for target.phil)
     if self.params.cctbx_xfel.auto_threshold:
@@ -354,12 +354,12 @@ class Integrator():
   def find_spots(self):
     # Perform spotfinding
     self.observed = self.processor.find_spots(
-      datablock=self.img_object.datablock)
+      experiments=self.img_object.experiments)
 
   def index(self):
     # Run indexing
     self.experiments, self.indexed = self.processor.index(
-      datablock=self.img_object.datablock, reflections=self.observed)
+      experiments=self.img_object.experiments, reflections=self.observed)
 
   def refine_bravais_settings_and_reindex(self):
     # Find highest-symmetry Bravais lattice

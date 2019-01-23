@@ -21,7 +21,7 @@ from scitbx.array_family import flex
 import numpy as np
 
 from iotbx import phil as ip
-from dxtbx.datablock import DataBlockFactory
+from dxtbx.model.experiment_list import ExperimentListFactory
 from xfel.command_line.frame_extractor import ConstructFrame
 
 from threading import Thread
@@ -125,7 +125,7 @@ class DIALSSpfIdx(Thread):
 
     # Modify default DIALS parameters
     # These parameters will be set no matter what
-    self.params.output.datablock_filename = None
+    self.params.output.experiments_filename = None
     self.params.output.indexed_filename = None
     self.params.output.strong_filename = None
     self.params.output.refined_experiments_filename = None
@@ -157,8 +157,8 @@ class DIALSSpfIdx(Thread):
         status = None
         score = 0
         try:
-          datablock = DataBlockFactory.from_filenames([self.img])[0]
-          observed = self.processor.find_spots(datablock=datablock)
+          experiments = ExperimentListFactory.from_filenames([self.img])
+          observed = self.processor.find_spots(experiments)
           status = 'spots found'
         except Exception, e:
           fail = True
@@ -171,7 +171,7 @@ class DIALSSpfIdx(Thread):
           if not fail:
             try:
               experiments, indexed = self.processor.index(
-                datablock=datablock, reflections=observed)
+                experiments=experiments, reflections=observed)
               score = len(indexed)
             except Exception, e:
               fail = True
@@ -229,8 +229,8 @@ class DIALSSpfIdx(Thread):
       if status == 'integrated':
         res = frame['observations'][0].d_max_min()
       else:
-        detector = datablock.unique_detectors()[0]
-        beam = datablock.unique_beams()[0]
+        detector = experiments.detectors()[0]
+        beam = experiments.beams()[0]
 
         s1 = flex.vec3_double()
         for i in xrange(len(observed)):

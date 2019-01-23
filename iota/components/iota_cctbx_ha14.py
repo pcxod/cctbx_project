@@ -1169,7 +1169,7 @@ class ImageImporter(ImageImporterBase):
     self.img_object, error = self.import_image(input_entry)
 
     # Triage image and generate grid search parameters
-    if self.img_object.datablock:
+    if self.img_object.experiments:
       if self.params.image_import.image_triage:
         hmed, amed = self.image_triage()
       else:
