@@ -14,7 +14,7 @@ try:  # for Py3 compatibility
 except ImportError:
     pass
 
-from dxtbx.model.experiment_list import ExperimentListFactory
+from dxtbx.model.experiment_list import ExperimentListFactory, ExperimentListDumper
 from libtbx.easy_mp import parallel_map
 
 from threading import Thread
@@ -107,7 +107,7 @@ class ImageImporterBase():
 
     # Load image infromation from experiment list
     try:
-      imgset = experiments.imagesets()
+      imgset = experiments.imagesets()[0]
       beam = imgset.get_beam()
       s0 = beam.get_s0()
       detector = imgset.get_detector()[0]
