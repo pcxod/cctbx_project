@@ -371,12 +371,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
         using namespace adptbx;
         using namespace scitbx::constants;
 
-        // factor from centring translation group
-        float_type f_iso = hr_ht.ltr_factor;
-
-        // factor from special position
-        float_type w = scatterer.weight_without_occupancy();
-        if (w != 1) f_iso *= w;
+        // factor from centring translation group * factor from special position
+        float_type f_iso = hr_ht.ltr_factor * scatterer.weight_without_occupancy();
 
         // isotropic Debye-Waller
         if (scatterer.flags.use_u_iso()) {
@@ -404,7 +400,9 @@ namespace smtbx { namespace structure_factors { namespace direct {
           grad_u_iso = -two_pi_sq * d_star_sq * structure_factor;
         }
         if (scatterer.flags.grad_site()) {
-          for (int j=0; j<3; ++j) grad_site[j] *= ff_iso;
+          for (int j=0; j<3; ++j) {
+            grad_site[j] *= ff_iso;
+          }
         }
         if (scatterer.flags.grad_u_aniso()) {
           for (int j = 0; j < 6; ++j) {
@@ -635,12 +633,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
         // factor from inversion
         float_type f_iso = 2.;
 
-        // factor from centring translation group
-        f_iso *= hr_ht.ltr_factor;
-
-        // factor from special position
-        float_type w = scatterer.weight_without_occupancy();
-        if (w != 1) f_iso *= w;
+        // factor from centring translation group * factor from special position
+        f_iso *= hr_ht.ltr_factor * scatterer.weight_without_occupancy();
 
         // isotropic Debye-Waller
         if (scatterer.flags.use_u_iso()) {
@@ -695,12 +689,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
         // factor from inversion
         float_type f_iso = 2.;
 
-        // factor from centring translation group
-        f_iso *= hr_ht.ltr_factor;
-
-        // factor from special position
-        float_type w = scatterer.weight_without_occupancy();
-        if (w != 1) f_iso *= w;
+        // factor from centring translation group * factor from special position
+        f_iso *= hr_ht.ltr_factor * scatterer.weight_without_occupancy();
 
         // isotropic Debye-Waller
         if (scatterer.flags.use_u_iso()) {
@@ -1112,7 +1102,9 @@ namespace smtbx { namespace structure_factors { namespace direct {
             *grad_f_calc_cursor++ = l.grad_occ;
           }
         }
-        if (f_mask) f_calc += *f_mask;
+        if (f_mask) {
+          f_calc += *f_mask;
+        }
         observable_type::compute(origin_centric_case,
                                  f_calc, grad_f_calc,
                                  observable, grad_observable,

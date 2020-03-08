@@ -44,7 +44,9 @@ namespace smtbx { namespace refinement { namespace constraints {
   }
 
   void extinction_parameter::validate() {
-    if (exti->get_value() < 0) exti->get_value() = 0;
+    if (exti->get_value() < 0) {
+      exti->get_value() = 0;
+    }
   }
   // single_scatterer_parameter
 

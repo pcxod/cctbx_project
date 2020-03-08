@@ -370,7 +370,7 @@ namespace boost_python {
     static void wrap() {
       using namespace boost::python;
       class_<wt,
-        bases<asu_u_star_parameter>,
+        bases<asu_anharmonic_adp_parameter>,
         std::auto_ptr<wt> >("independent_anharmonic_adp_parameter", no_init)
         .def(init<asu_parameter::scatterer_type *>(arg("scatterer")))
         ;
