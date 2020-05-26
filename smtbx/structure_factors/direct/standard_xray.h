@@ -255,6 +255,11 @@ namespace smtbx { namespace structure_factors { namespace direct {
           }
         }
 
+        // This balances the extra (conditional) curly brace that follows
+        #if (0)
+        {
+        #endif
+
         #if (   defined(__linux__) && defined(__GNUC__) \
              && __GNUC__ == 4 && __GNUC_MINOR__ == 0 && __GNUC_PATCHLEVEL__ == 0)
         /** Careful analysis with valgrind showed that the compiler seems to
@@ -373,6 +378,11 @@ namespace smtbx { namespace structure_factors { namespace direct {
             }
           }
         }
+
+        // This balances the extra (conditional) curly brace that follows
+        #if (0)
+        {
+        #endif
 
 #if (defined(__linux__) && defined(__GNUC__) \
              && __GNUC__ == 4 && __GNUC_MINOR__ == 0 && __GNUC_PATCHLEVEL__ == 0)
