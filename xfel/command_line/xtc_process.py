@@ -182,6 +182,11 @@ xtc_phil_str = '''
       .help = Folder with previous processing results including crystal orientations. \
               If specified, images will not be re-indexed, but instead the known \
               orientations will be used.
+    ignore_gain_mismatch = False
+      .type = bool
+      .expert_level = 3
+      .help = Detector gain should be set on the detector models loaded from the images or in the \
+              processing parameters, not both. Override the check that this is true with this flag. \
  }
   format {
     file_format = *cbf pickle
@@ -465,6 +470,8 @@ class InMemScript(DialsProcessScript, DialsProcessorWithLogging):
     self.reference_detector = None
 
     self.composite_tag = None
+    self.all_imported_experiments = None
+    self.all_strong_reflections = None
     self.all_indexed_experiments = None
     self.all_indexed_reflections = None
     self.all_integrated_experiments = None
@@ -581,7 +588,8 @@ class InMemScript(DialsProcessScript, DialsProcessorWithLogging):
     self.load_reference_geometry()
 
     if params.output.composite_output:
-      #self.all_strong_reflections = flex.reflection_table() # no composite strong pickles yet
+      self.all_imported_experiments = ExperimentList()
+      self.all_strong_reflections = flex.reflection_table()
       self.all_indexed_experiments = ExperimentList()
       self.all_indexed_reflections = flex.reflection_table()
       self.all_integrated_experiments = ExperimentList()

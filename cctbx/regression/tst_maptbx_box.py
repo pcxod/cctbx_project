@@ -50,6 +50,26 @@ def get_random_structure_and_map(
   return group_args(model = model, mm = mm)
 
 def exercise_around_model():
+
+  from cctbx.maptbx.box import make_list_symmetric
+  a=[3,4,5,3,9,1,6,3,2,5,6,6]
+  new_a=make_list_symmetric(a)
+  from scitbx.array_family import flex
+  aa=flex.double(a)
+  new_aa=flex.double(new_a)
+  assert (aa.size(),new_aa.size())== (12, 12)
+  assert aa.min_max_mean().mean == new_aa.min_max_mean().mean
+  print (a,new_a)
+
+  a=[3,4,5,3,8,1,6,7,3,2,5,6,6]
+  new_a=make_list_symmetric(a)
+  from scitbx.array_family import flex
+  aa=flex.double(a)
+  new_aa=flex.double(new_a)
+  print (a,new_a)
+  assert (aa.size(),new_aa.size())== (13, 13)
+  assert aa.min_max_mean().mean == new_aa.min_max_mean().mean
+
   mam = get_random_structure_and_map(use_static_structure = True)
 
   map_data_orig   = mam.mm.map_data().deep_copy()
@@ -60,7 +80,7 @@ def exercise_around_model():
   box = cctbx.maptbx.box.around_model(
     map_manager = mam.mm,
     model       = mam.model.deep_copy(),
-    cushion     = 10,
+    box_cushion     = 10,
     wrapping    = True)
   new_mm1 = box.map_manager()
   new_mm2 = box.apply_to_map(map_manager = mam.mm.deep_copy())
@@ -110,7 +130,7 @@ def exercise_around_model():
   small_box = cctbx.maptbx.box.around_model(
     map_manager = mam.mm,
     model       = mam.model.deep_copy(),
-    cushion     = 5,
+    box_cushion     = 5,
     wrapping    = True)
 
   # Make sure nothing was zeroed out in this map (wrapping = True)
@@ -120,7 +140,7 @@ def exercise_around_model():
   box = cctbx.maptbx.box.around_model(
     map_manager = mam.mm,
     model       = mam.model.deep_copy(),
-    cushion     = 10,
+    box_cushion     = 10,
     wrapping    = False)
 
   # make sure things are changed in-place and are therefore different from start
@@ -179,7 +199,7 @@ def exercise_around_model():
 
   assert box.map_manager().map_data().as_1d().count(0) == 81264
 
-  # Extract using extract_unique
+  # Extract using around_unique
 
   data_dir = os.path.dirname(os.path.abspath(__file__))
   data_ccp4 = os.path.join(data_dir, 'data', 'D7.ccp4')
@@ -197,19 +217,29 @@ def exercise_around_model():
   sequence = dm.get_sequence(data_seq)
   sequence_as_text = sequence[0].sequence
 
+  map_model_mgr=map_model_manager(map_manager=mm,ncs_object=ncs_obj)
+  mm=map_model_mgr.map_manager()
   mm.show_summary()
 
-  box = cctbx.maptbx.box.extract_unique(
+  box = cctbx.maptbx.box.around_unique(
     map_manager = mm.deep_copy(),
     resolution = 3,
-    box_buffer = 1,
+    box_cushion = 1,
     sequence = sequence_as_text,
-    ncs_object = ncs_obj,
+    soft_mask = True,
     wrapping    = False,
    )
 
   box.map_manager().write_map('new_box.ccp4')
 
+  # run again from map_manager
+
+  map_model_mgr.box_all_maps_around_unique_and_shift_origin(
+    resolution = 3,
+    box_cushion= 1,
+    sequence = sequence_as_text,
+    soft_mask = True,
+   )
 
   # Get bounds around density
   box = cctbx.maptbx.box.around_density(
@@ -230,7 +260,7 @@ def exercise_around_model():
   assert approx_equal(
      (mask_mm.map_data().count(0), mask_mm.map_data().count(1),
       mask_mm.map_data().size()),
-     (19214, 19186, 38400))
+     (19184, 19216, 38400))
 
   # Box around the mask
   box = cctbx.maptbx.box.around_mask(
@@ -248,9 +278,13 @@ def exercise_around_model():
   #
   import inspect
   r = inspect.getargspec(cctbx.maptbx.box.around_model.__init__)
-  assert r.args  ==  ['self', 'map_manager', 'model', 'cushion', 'wrapping', 'ncs_object', 'log'], r.args
+  assert r.args  ==  ['self', 'map_manager', 'model', 'box_cushion', 'wrapping',
+      'model_can_be_outside_bounds','stay_inside_current_map', 'log'], r.args
   r = inspect.getargspec(cctbx.maptbx.box.with_bounds.__init__)
-  assert r.args  ==  ['self', 'map_manager', 'lower_bounds', 'upper_bounds', 'wrapping', 'model', 'ncs_object', 'log'], r.args
+  assert r.args  ==  ['self', 'map_manager', 'lower_bounds', 'upper_bounds', 'model',
+    'wrapping', 'model_can_be_outside_bounds', 'log'], r.args
+
+  print ("OK")
 
 if (__name__  ==  "__main__"):
   if libtbx.env.has_module('phenix'):

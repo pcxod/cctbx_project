@@ -245,8 +245,7 @@ class SettingsDialog(BaseDialog):
       self.params.db.user     = creds.db_user.ctr.GetValue()
       self.params.db.password = creds.db_password.ctr.GetValue()
       if self.params.facility.name == 'lcls':
-        self.params.facility.lcls.web.user     = creds.web_user.ctr.GetValue()
-        self.params.facility.lcls.web.password = creds.web_password.ctr.GetValue()
+        self.params.facility.lcls.web.location = creds.web_location.ctr.GetValue()
 
       self.drop_tables = creds.chk_drop_tables.GetValue()
 
@@ -328,23 +327,13 @@ class DBCredentialsDialog(BaseDialog):
     if params.facility.name == 'lcls':
       self.main_sizer.Add(wx.StaticLine(self), flag=wx.EXPAND | wx.ALL, border=10)
       # LCLS user name
-      self.web_user = gctr.TextButtonCtrl(self,
-                                         label='LCLS user name',
-                                         label_style='bold',
-                                         label_size=(150, -1),
-                                         big_button_size=(130, -1),
-                                         value=params.facility.lcls.web.user)
-      self.main_sizer.Add(self.web_user, flag=wx.EXPAND | wx.ALL, border=10)
-
-      # LCLS password
-      self.web_password = gctr.TextButtonCtrl(self,
-                                             label='LCLS Password',
-                                             label_style='bold',
-                                             label_size=(150, -1),
-                                             text_style=wx.TE_PASSWORD,
-                                             big_button_size=(130, -1),
-                                             value=params.facility.lcls.web.password)
-      self.main_sizer.Add(self.web_password, flag=wx.EXPAND | wx.ALL, border=10)
+      self.web_location = gctr.TextButtonCtrl(self,
+                                              label='XTC stream location\n(SLAC or NERSC)',
+                                              label_style='bold',
+                                              label_size=(150, -1),
+                                              big_button_size=(130, -1),
+                                              value=params.facility.lcls.web.location)
+      self.main_sizer.Add(self.web_location, flag=wx.EXPAND | wx.ALL, border=10)
 
     # Dialog control
     dialog_box = self.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
@@ -592,7 +581,7 @@ class AdvancedSettingsDialog(BaseDialog):
     mp_box = wx.StaticBox(self, label='Multiprocessing Options')
     self.mp_sizer = wx.StaticBoxSizer(mp_box, wx.VERTICAL)
 
-    choices = ['local', 'lsf', 'slurm', 'sge', 'pbs', 'htcondor', 'custom']
+    choices = ['local', 'lsf', 'slurm', 'shifter', 'sge', 'pbs', 'htcondor', 'custom']
     self.mp_option = gctr.ChoiceCtrl(self,
                                      label='Multiprocessing:',
                                      label_size=(200, -1),
@@ -605,7 +594,7 @@ class AdvancedSettingsDialog(BaseDialog):
       pass
     self.Bind(wx.EVT_CHOICE, self.onMultiprocessingChoice, self.mp_option.ctr)
 
-    if params.facility.name == 'lcls':
+    if params.facility.name == 'lcls' and params.mp.method == 'lsf':
       # Queue
       queues = ['psanaq', 'psanaq', 'psdebugq','psanaidleq', 'psnehhiprioq',
                 'psnehprioq', 'psnehq', 'psfehhiprioq', 'psfehprioq', 'psfehq']
@@ -621,15 +610,6 @@ class AdvancedSettingsDialog(BaseDialog):
       except ValueError:
         pass
 
-      self.nproc = gctr.SpinCtrl(self,
-                                 label='Number of processors:',
-                                 label_size=(200, -1),
-                                 label_style='normal',
-                                 ctrl_size=(100, -1),
-                                 ctrl_value='%d'%params.mp.nproc,
-                                 ctrl_min=1,
-                                 ctrl_max=1000)
-      self.mp_sizer.Add(self.nproc, flag=wx.EXPAND | wx.ALL, border=10)
     else:
       # Queue
       self.queue = gctr.TextButtonCtrl(self,
@@ -640,15 +620,25 @@ class AdvancedSettingsDialog(BaseDialog):
                                              if params.mp.queue is not None else '')
       self.mp_sizer.Add(self.queue, flag=wx.EXPAND | wx.ALL, border=10)
 
-      self.nproc = gctr.SpinCtrl(self,
-                                 label='Total number of processors:',
-                                 label_size=(240, -1),
-                                 label_style='normal',
-                                 ctrl_size=(100, -1),
-                                 ctrl_value='%d'%params.mp.nproc,
-                                 ctrl_min=1,
-                                 ctrl_max=1000)
-      self.mp_sizer.Add(self.nproc, flag=wx.EXPAND | wx.ALL, border=10)
+    self.nproc = gctr.SpinCtrl(self,
+                               label='Total number of processors:',
+                               label_size=(240, -1),
+                               label_style='normal',
+                               ctrl_size=(100, -1),
+                               ctrl_value='%d'%params.mp.nproc,
+                               ctrl_min=1,
+                               ctrl_max=1000)
+    self.mp_sizer.Add(self.nproc, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.nnodes = gctr.SpinCtrl(self,
+                                label='Total number of nodes:',
+                                label_size=(240, -1),
+                                label_style='normal',
+                                ctrl_size=(100, -1),
+                                ctrl_value='%d'%params.mp.nnodes,
+                                ctrl_min=1,
+                                ctrl_max=1000)
+    self.mp_sizer.Add(self.nnodes, flag=wx.EXPAND | wx.ALL, border=10)
 
     self.nproc_per_node = gctr.SpinCtrl(self,
                                         label='Number of processors per node:',
@@ -659,6 +649,16 @@ class AdvancedSettingsDialog(BaseDialog):
                                         ctrl_min=1,
                                         ctrl_max=1000)
     self.mp_sizer.Add(self.nproc_per_node, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.wall_time = gctr.SpinCtrl(self,
+                                   label='Max Walltime (mins):',
+                                   label_size=(240, -1),
+                                   label_style='normal',
+                                   ctrl_size=(100, -1),
+                                   ctrl_value='%d'%params.mp.wall_time if params.mp.wall_time is not None else 1,
+                                   ctrl_min=1,
+                                   ctrl_max=2880)
+    self.mp_sizer.Add(self.wall_time, flag=wx.EXPAND | wx.ALL, border=10)
 
     self.env_script = gctr.TextButtonCtrl(self,
                                      label='Environment setup script:',
@@ -686,6 +686,82 @@ class AdvancedSettingsDialog(BaseDialog):
     self.mp_sizer.Add(self.htcondor_filesystemdomain, flag=wx.EXPAND | wx.ALL, border=10)
 
     self.main_sizer.Add(self.mp_sizer, flag=wx.EXPAND | wx.ALL, border=10)
+
+    # Shifter-specific settings
+    self.shifter_image = gctr.TextButtonCtrl(self,
+                                             label='Shifter image:',
+                                             label_style='bold',
+                                             label_size=(200, -1),
+                                             value=params.mp.shifter.shifter_image \
+                                             if params.mp.shifter.shifter_image is not None else '')
+    self.mp_sizer.Add(self.shifter_image, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.shifter_srun_template = gctr.TextButtonCtrl(self,
+                                                     label='Srun Script Template Path:',
+                                                     label_style='bold',
+                                                     label_size=(200, -1),
+                                                     value=params.mp.shifter.srun_script_template \
+                                                     if params.mp.shifter.srun_script_template is not None else '')
+    self.mp_sizer.Add(self.shifter_srun_template, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.shifter_sbatch_template = gctr.TextButtonCtrl(self,
+                                                       label='Sbatch Script Template Path:',
+                                                       label_style='bold',
+                                                       label_size=(200, -1),
+                                                       value=params.mp.shifter.sbatch_script_template \
+                                                       if params.mp.shifter.sbatch_script_template is not None else '')
+    self.mp_sizer.Add(self.shifter_sbatch_template, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.shifter_jobname = gctr.TextButtonCtrl(self,
+                                               label='Job Name:',
+                                               label_style='bold',
+                                               label_size=(200, -1),
+                                               value=params.mp.shifter.jobname \
+                                               if params.mp.shifter.jobname is not None else '')
+    self.mp_sizer.Add(self.shifter_jobname, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.shifter_project = gctr.TextButtonCtrl(self,
+                                               label='NERSC Project (-A):',
+                                               label_style='bold',
+                                               label_size=(200, -1),
+                                               value=params.mp.shifter.project \
+                                               if params.mp.shifter.project is not None else '')
+    self.mp_sizer.Add(self.shifter_project, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.shifter_reservation = gctr.TextButtonCtrl(self,
+                                                   label='NERSC Reservation:',
+                                                   label_style='bold',
+                                                   label_size=(200, -1),
+                                                   value=params.mp.shifter.reservation \
+                                                   if params.mp.shifter.reservation is not None else '')
+    self.mp_sizer.Add(self.shifter_reservation, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.shifter_constraint = gctr.TextButtonCtrl(self,
+                                                  label='Job Constraint:',
+                                                  label_style='bold',
+                                                  label_size=(200, -1),
+                                                  value=params.mp.shifter.constraint \
+                                                  if params.mp.shifter.constraint is not None else '')
+    self.mp_sizer.Add(self.shifter_constraint, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.staging_methods = ["DataWarp", "None"]
+    self.staging_descriptions = [
+        'Stage logs to the DataWarp burst buffer. WARNING: Only when writing to Cori cscratch. Otherwise logs will be lost.',
+        'Write logs directly to disk.']
+    self.log_staging = gctr.ChoiceCtrl(self,
+                                       label="Log staging",
+                                       label_size=(240, -1),
+                                       label_style='bold',
+                                       ctrl_size=(-1, -1),
+                                       choices=self.staging_methods)
+    self.log_staging.ctr.SetSelection(
+        self.staging_methods.index(params.mp.shifter.staging))
+    self.Bind(wx.EVT_CHOICE, self.onStagingChoice, self.log_staging.ctr)
+    self.mp_sizer.Add(self.log_staging, flag=wx.EXPAND | wx.ALL, border=10)
+    self.staging_help = wx.StaticText(self, label=self.staging_descriptions[self.log_staging.ctr.GetSelection()], size=(600,30))
+    self.staging_help.Wrap(600)
+    self.mp_sizer.Add(self.staging_help, flag=wx.EXPAND | wx.ALL, border=10)
+
 
     # Data analysis settings
     analysis_box = wx.StaticBox(self, label='Data Analysis Options')
@@ -749,22 +825,77 @@ class AdvancedSettingsDialog(BaseDialog):
   def updateMultiprocessing(self):
     if self.mp_option.ctr.GetStringSelection() == 'local':
       self.queue.Hide()
+      self.nnodes.Hide()
+      self.nproc.Show()
       self.nproc_per_node.Hide()
+      self.wall_time.Hide()
       self.env_script.Hide()
       self.htcondor_executable_path.Hide()
       self.htcondor_filesystemdomain.Hide()
+      self.shifter_image.Hide()
+      self.shifter_srun_template.Hide()
+      self.shifter_sbatch_template.Hide()
+      self.shifter_jobname.Hide()
+      self.shifter_project.Hide()
+      self.shifter_reservation.Hide()
+      self.shifter_constraint.Hide()
+      self.log_staging.Hide()
+      self.staging_help.Hide()
+    elif self.mp_option.ctr.GetStringSelection() == 'shifter':
+      self.queue.Show()
+      self.nproc.Hide()
+      self.nnodes.Show()
+      self.nproc_per_node.Show()
+      self.wall_time.Show()
+      self.env_script.Hide()
+      self.htcondor_executable_path.Hide()
+      self.htcondor_filesystemdomain.Hide()
+      self.shifter_image.Show()
+      self.shifter_srun_template.Show()
+      self.shifter_sbatch_template.Show()
+      self.shifter_jobname.Show()
+      self.shifter_project.Show()
+      self.shifter_reservation.Show()
+      self.shifter_constraint.Show()
+      self.log_staging.Show()
+      self.staging_help.Show()
     elif self.mp_option.ctr.GetStringSelection() == 'htcondor':
       self.queue.Hide()
+      self.nproc.Show()
+      self.nnodes.Hide()
       self.nproc_per_node.Hide()
+      self.wall_time.Hide()
       self.env_script.Show()
       self.htcondor_executable_path.Show()
       self.htcondor_filesystemdomain.Show()
+      self.shifter_image.Hide()
+      self.shifter_srun_template.Hide()
+      self.shifter_sbatch_template.Hide()
+      self.shifter_jobname.Hide()
+      self.shifter_project.Hide()
+      self.shifter_reservation.Hide()
+      self.shifter_constraint.Hide()
+      self.log_staging.Hide()
+      self.staging_help.Hide()
     else:
       self.queue.Show()
-      self.nproc_per_node.Show()
+      self.nproc.Show()
+      self.nnodes.Hide()
+      self.nproc_per_node.Hide()
+      self.wall_time.Hide()
       self.env_script.Show()
       self.htcondor_executable_path.Hide()
       self.htcondor_filesystemdomain.Hide()
+      self.shifter_image.Hide()
+      self.shifter_srun_template.Hide()
+      self.shifter_sbatch_template.Hide()
+      self.shifter_jobname.Hide()
+      self.shifter_project.Hide()
+      self.shifter_reservation.Hide()
+      self.shifter_constraint.Hide()
+      self.log_staging.Hide()
+      self.staging_help.Hide()
+
     self.Layout()
     self.Fit()
 
@@ -780,6 +911,12 @@ class AdvancedSettingsDialog(BaseDialog):
       self.nproc.ctr.SetValue(1)
       self.nproc.ctr.SetIncrement(1)
 
+  def onStagingChoice(self, e):
+    self.params.mp.shifter.staging = self.staging_methods[self.log_staging.ctr.GetSelection()]
+    self.staging_help.SetLabel(self.staging_descriptions[self.log_staging.ctr.GetSelection()])
+    self.staging_help.Wrap(600)
+
+
   def onBackendChoice(self, e):
     self.params.dispatcher = self.dispatchers[self.back_end.ctr.GetSelection()]
     self.dispatcher_help.SetLabel(self.dispatcher_descriptions[self.back_end.ctr.GetSelection()])
@@ -791,23 +928,55 @@ class AdvancedSettingsDialog(BaseDialog):
       self.custom_dispatcher.Hide()
       self.Layout()
 
+
   def onOK(self, e):
     self.params.dispatcher = self.dispatchers[self.back_end.ctr.GetSelection()]
+
     if self.params.dispatcher == 'custom':
       self.params.dispatcher = self.custom_dispatcher.ctr.GetValue()
+
     self.params.mp.method = self.mp_option.ctr.GetStringSelection()
-    if self.params.facility.name == 'lcls':
+    self.params.mp.nproc = int(self.nproc.ctr.GetValue())
+
+    if self.params.facility.name == 'lcls' and self.params.mp.method == "lsf":
       self.params.mp.queue = self.queue.ctr.GetStringSelection()
     else:
-      self.params.mp.queue = self.queue.ctr.GetValue()
-      self.params.mp.nproc_per_node = int(self.nproc_per_node.ctr.GetValue())
-      self.params.mp.env_script = [self.env_script.ctr.GetValue()]
-    self.params.mp.nproc = int(self.nproc.ctr.GetValue())
+      if self.mp_option.ctr.GetStringSelection() == 'shifter':
+        self.params.mp.queue = self.queue.ctr.GetValue()
+        self.params.mp.nnodes = int(self.nnodes.ctr.GetValue())
+        self.params.mp.nproc_per_node = int(self.nproc_per_node.ctr.GetValue())
+        self.params.mp.wall_time = int(self.wall_time.ctr.GetValue())
+      else:
+        self.params.mp.queue = self.queue.ctr.GetValue()
+        self.params.mp.nproc_per_node = int(self.nproc_per_node.ctr.GetValue())
+        self.params.mp.env_script = [self.env_script.ctr.GetValue()]
+        self.params.mp.nproc = int(self.nproc.ctr.GetValue())
+
+    # Copy htcondor settings into the htcondor phil
     self.params.mp.htcondor.executable_path = self.htcondor_executable_path.ctr.GetValue() \
       if len(self.htcondor_executable_path.ctr.GetValue()) > 0 else None
     self.params.mp.htcondor.filesystemdomain = self.htcondor_filesystemdomain.ctr.GetValue() \
       if len(self.htcondor_filesystemdomain.ctr.GetValue()) > 0 else None
+
+    # Copy shfiter settings into the shifter phil
+    self.params.mp.shifter.sbatch_script_template = self.shifter_sbatch_template.ctr.GetValue() \
+      if len(self.shifter_sbatch_template.ctr.GetValue()) > 0 else None
+
+    self.params.mp.shifter.shifter_image = self.shifter_image.ctr.GetValue() \
+      if len(self.shifter_image.ctr.GetValue()) > 0 else None
+    self.params.mp.shifter.srun_script_template = self.shifter_srun_template.ctr.GetValue() \
+      if len(self.shifter_srun_template.ctr.GetValue()) > 0 else None
+    self.params.mp.shifter.jobname=self.shifter_jobname.ctr.GetValue() \
+      if len(self.shifter_jobname.ctr.GetValue()) > 0 else None
+    self.params.mp.shifter.project=self.shifter_project.ctr.GetValue() \
+      if len(self.shifter_project.ctr.GetValue()) > 0 else None
+    self.params.mp.shifter.reservation=self.shifter_reservation.ctr.GetValue() \
+      if len(self.shifter_reservation.ctr.GetValue()) > 0 else None
+    self.params.mp.shifter.constraint =self.shifter_constraint.ctr.GetValue() \
+      if len(self.shifter_constraint.ctr.GetValue()) > 0 else None
+
     e.Skip()
+
 
 class CalibrationDialog(BaseDialog):
   def __init__(self, parent,
@@ -993,7 +1162,8 @@ class CalibrationDialog(BaseDialog):
     self.trial_runs.ctr.Clear()
     trial = self.db.get_all_trials()[self.trial_number.ctr.GetSelection()]
     runs = [str(i.run) for i in trial.runs]
-    self.trial_runs.ctr.InsertItems(items=runs, pos=0)
+    if runs:
+      self.trial_runs.ctr.InsertItems(items=runs, pos=0)
 
   def onBrowse(self, e):
     ''' Open dialog for selecting PHIL file '''
@@ -1002,7 +1172,7 @@ class CalibrationDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*.phil",
                              wildcard="*.phil",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
     if load_dlg.ShowModal() == wx.ID_OK:
       target_file = load_dlg.GetPaths()[0]
@@ -1120,7 +1290,8 @@ class TrialTagSelectionDialog(BaseDialog):
           tag_ids.append(tag.id)
           self.tag_names.append(tag.name)
 
-    self.trial_tags.ctr.InsertItems(items=self.tag_names, pos=0)
+    if self.tag_names:
+      self.trial_tags.ctr.InsertItems(items=self.tag_names, pos=0)
 
   def onOK(self, e):
     from xfel.ui.db import get_run_path
@@ -1345,8 +1516,8 @@ class TagDialog(BaseDialog):
     # Populate tags with current values from db
     if len(self.db_tags) > 0:
       for tag in self.db_tags:
-        self.tag_list.InsertStringItem(self.index, str(tag.name))
-        self.tag_list.SetStringItem(self.index, 1, str(tag.comment))
+        self.tag_list.InsertItem(self.index, str(tag.name))
+        self.tag_list.SetItem(self.index, 1, str(tag.comment))
         self.tag_list.SetItemData(self.index, tag.tag_id)
         self.index += 1
 
@@ -1378,8 +1549,8 @@ class TagDialog(BaseDialog):
     ''' Add a string item to list; focus on item & provide default tag name'''
     new_tag = ('default tag {}'.format(self.index), '', self.index)
     self.new_tags.append(new_tag)
-    self.tag_list.InsertStringItem(self.index, new_tag[0])
-    self.tag_list.SetStringItem(self.index, 1, new_tag[1])
+    self.tag_list.InsertItem(self.index, new_tag[0])
+    self.tag_list.SetItem(self.index, 1, new_tag[1])
     self.tag_list.SetItemData(self.index, -1)
     #self.tag_list.Select(self.index)
     #self.tag_list.Focus(self.index)
@@ -1414,13 +1585,13 @@ class TagDialog(BaseDialog):
 
       # Update names for edited tags
       all_items = [(self.tag_list.GetItemData(i),
-                    self.tag_list.GetItem(itemId=i, col=0),
-                    self.tag_list.GetItem(itemId=i, col=1))
+                    self.tag_list.GetItem(itemIdx=i, col=0),
+                    self.tag_list.GetItem(itemIdx=i, col=1))
                     for i in range(self.tag_list.GetItemCount())]
 
       self.db_tags = self.db.get_all_tags()
       tag_ids = [i.tag_id for i in self.db_tags]
-      new_tag_names = [i[1].m_text for i in all_items]
+      new_tag_names = [i[1].GetText() for i in all_items]
 
       if len([i for i in new_tag_names if new_tag_names.count(i) > 1]) != 0:
         wx.MessageBox('Need a unique tag name!', 'Warning',
@@ -1429,10 +1600,10 @@ class TagDialog(BaseDialog):
         for item in all_items:
           if item[0] in tag_ids:
             tag = self.db.get_tag(tag_id=item[0])
-            tag.name = item[1].m_text
-            tag.comment = item[2].m_text
+            tag.name = item[1].GetText()
+            tag.comment = item[2].GetText()
           elif item[0] == -1:
-            self.db.create_tag(name=item[1].m_text, comment=item[2].m_text)
+            self.db.create_tag(name=item[1].GetText(), comment=item[2].GetText())
 
     except Exception as exception:
       print(str(exception))
@@ -1470,7 +1641,7 @@ class RunBlockDialog(BaseDialog):
       if self.use_ids:
         run_numbers = [r.id for r in runs]
       else:
-        run_numbers = [int(r.run) for r in runs]
+        run_numbers = list(sorted([int(r.run) for r in runs]))
       assert len(set(run_numbers)) == len(run_numbers)
 
       if trial is not None:
@@ -1497,7 +1668,8 @@ class RunBlockDialog(BaseDialog):
             return 22.8 # Defaults are from kapton tape experiments (this is water ring)
           elif item in ["extra_phil_str", "calib_dir", "dark_avg_path", "dark_stddev_path",
             "gain_map_path", "beamx", "beamy", "gain_mask_level", "untrusted_pixel_mask_path",
-            "binning", "energy", "comment", "config_str"]:
+            "binning", "energy", "wavelength_offset", "spectrum_eV_per_pixel", "spectrum_eV_offset",
+            "comment", "config_str"]:
             return None
           else:
             raise AttributeError(item)
@@ -1532,6 +1704,7 @@ class RunBlockDialog(BaseDialog):
       config_box = wx.StaticBox(self.config_panel, label='Configuration')
       self.config_sizer = wx.StaticBoxSizer(config_box)
       self.config_panel.SetSizer(self.config_sizer)
+      self.config_panel.Hide()
 
     self.phil_panel = wx.Panel(self)
     phil_box = wx.StaticBox(self.phil_panel, label='Extra phil parameters')
@@ -1568,7 +1741,8 @@ class RunBlockDialog(BaseDialog):
     self.phil_sizer.Add(self.phil, 1, flag=wx.EXPAND | wx.ALL, border=10)
 
     # Image format choice
-    if self.is_lcls:
+    if self.is_lcls and self.parent.trial.app.params.dispatcher in \
+        ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
       if self.parent.trial.app.params.dispatcher == "cxi.xtc_process":
         image_choices = ['pickle']
       else:
@@ -1578,10 +1752,14 @@ class RunBlockDialog(BaseDialog):
                                         label_size=(100, -1),
                                         ctrl_size=(150, -1),
                                         choices=image_choices)
-      try:
-        self.img_format.ctr.SetSelection(image_choices.index(block.format))
-      except Exception:
-        pass #in case of selecting an unavailable default
+      if block.format:
+        try:
+          format_idx = image_choices.index(block.format)
+        except ValueError:
+          format_idx = 0 #in case of selecting an unavailable default
+      else:
+        format_idx = 0
+      self.img_format.ctr.SetSelection(format_idx)
       self.runblock_sizer.Add(self.img_format, flag=wx.TOP | wx.LEFT, border=10)
 
     self.start_stop_sizer = wx.FlexGridSizer(1, 3, 60, 20)
@@ -1641,6 +1819,15 @@ class RunBlockDialog(BaseDialog):
                                                  ('energy', block.energy),
                                                  ('gain_mask_level', block.gain_mask_level)])
       self.runblock_sizer.Add(self.bin_nrg_gain, flag=wx.EXPAND | wx.ALL, border=10)
+      self.wavelength_offset = gctr.OptionCtrl(self.runblock_panel,
+                                               ctrl_size=(80, -1),
+                                               items=[('wavelength_offset', block.wavelength_offset)])
+      self.runblock_sizer.Add(self.wavelength_offset, flag=wx.EXPAND | wx.ALL, border=10)
+      self.spectrum_calibration = gctr.OptionCtrl(self.runblock_panel,
+                                          ctrl_size=(80, -1),
+                                          items=[('spectrum_eV_per_pixel', block.spectrum_eV_per_pixel),
+                                                 ('spectrum_eV_offset', block.spectrum_eV_offset)])
+      self.runblock_sizer.Add(self.spectrum_calibration, flag=wx.EXPAND | wx.ALL, border=10)
     else:
       self.energy = gctr.TextButtonCtrl(self.runblock_panel,
                                         label='Energy override',
@@ -1666,7 +1853,8 @@ class RunBlockDialog(BaseDialog):
     self.runblock_sizer.Add(self.untrusted_path, flag=wx.EXPAND | wx.ALL,
                             border=10)
 
-    if self.is_lcls:
+    if self.is_lcls and self.parent.trial.app.params.dispatcher in \
+        ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
       # Calibration folder
       self.calib_dir = gctr.TextButtonCtrl(self.runblock_panel,
                                            label='Calibration:',
@@ -1734,7 +1922,8 @@ class RunBlockDialog(BaseDialog):
     self.Bind(wx.EVT_BUTTON, self.onImportPhil, self.phil.btn_import)
     self.Bind(wx.EVT_BUTTON, self.onUntrustedBrowse,
               id=self.untrusted_path.btn_big.GetId())
-    if self.is_lcls:
+    if self.is_lcls and self.parent.trial.app.params.dispatcher in \
+        ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
       self.Bind(wx.EVT_BUTTON, self.onDarkAvgBrowse,
                 id=self.dark_avg_path.btn_big.GetId())
       self.Bind(wx.EVT_BUTTON, self.onImportConfig, self.config.btn_import)
@@ -1767,7 +1956,7 @@ class RunBlockDialog(BaseDialog):
                             defaultDir=os.curdir,
                             defaultFile="*",
                             wildcard="*",
-                            style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                            style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                             )
     if cfg_dlg.ShowModal() == wx.ID_OK:
       config_file = cfg_dlg.GetPaths()[0]
@@ -1782,7 +1971,7 @@ class RunBlockDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*",
                              wildcard="*.phil",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
     if phil_dlg.ShowModal() == wx.ID_OK:
       phil_file = phil_dlg.GetPaths()[0]
@@ -1829,16 +2018,21 @@ class RunBlockDialog(BaseDialog):
       rg_dict['detz_parameter']=self.beam_xyz.DetZ.GetValue()
       rg_dict['beamx']=self.beam_xyz.X.GetValue()
       rg_dict['beamy']=self.beam_xyz.Y.GetValue()
-      rg_dict['format']=self.img_format.ctr.GetStringSelection()
       rg_dict['energy']=self.bin_nrg_gain.energy.GetValue()
-      rg_dict['dark_avg_path']=self.dark_avg_path.ctr.GetValue()
-      rg_dict['dark_stddev_path']=self.dark_stddev_path.ctr.GetValue()
-      rg_dict['gain_map_path']=self.gain_map_path.ctr.GetValue()
-      rg_dict['gain_mask_level']=self.bin_nrg_gain.gain_mask_level.GetValue()
-      rg_dict['calib_dir']=self.calib_dir.ctr.GetValue()
+      rg_dict['wavelength_offset']=self.wavelength_offset.wavelength_offset.GetValue()
+      if self.parent.trial.app.params.dispatcher in \
+          ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
+        rg_dict['format']=self.img_format.ctr.GetStringSelection()
+        rg_dict['dark_avg_path']=self.dark_avg_path.ctr.GetValue()
+        rg_dict['dark_stddev_path']=self.dark_stddev_path.ctr.GetValue()
+        rg_dict['gain_map_path']=self.gain_map_path.ctr.GetValue()
+        rg_dict['gain_mask_level']=self.bin_nrg_gain.gain_mask_level.GetValue()
+        rg_dict['calib_dir']=self.calib_dir.ctr.GetValue()
       rg_dict['binning']=self.bin_nrg_gain.binning.GetValue()
       rg_dict['detector_address']=self.address.ctr.GetValue()
       rg_dict['config_str']=self.config.ctr.GetValue()
+      rg_dict['spectrum_eV_per_pixel']=self.spectrum_calibration.spectrum_eV_per_pixel.GetValue()
+      rg_dict['spectrum_eV_offset']=self.spectrum_calibration.spectrum_eV_offset.GetValue()
     else:
       rg_dict['energy']=self.energy.ctr.GetValue()
 
@@ -1854,12 +2048,12 @@ class RunBlockDialog(BaseDialog):
       self.parent.trial.add_rungroup(self.block)
     else:
       # if all the parameters are unchanged, do nothing
-      all_the_same = [str(rg_dict[key]) == str(getattr(self.block, key)) for key in rg_dict].count(False) == 0
+      all_the_same = [str(rg_dict[key]).strip() == str(getattr(self.block, key)).strip() for key in rg_dict].count(False) == 0
       all_the_same &= self.first_run == self.orig_first_run and self.last_run == self.orig_last_run
       if not all_the_same:
         # if all the parameters except open and comment are the same,
         # only update those fields
-        keep_old_run_group = [str(rg_dict[key]) == str(getattr(self.block, key)) for key in rg_dict \
+        keep_old_run_group = [str(rg_dict[key]).strip() == str(getattr(self.block, key)).strip() for key in rg_dict \
                               if key not in ['open', 'comment']].count(False) == 0
         if keep_old_run_group:
           main = self.parent.parent.GetParent().main
@@ -1897,10 +2091,15 @@ class RunBlockDialog(BaseDialog):
         self.bin_nrg_gain.binning.SetValue(str(last.binning))
         self.bin_nrg_gain.energy.SetValue(str(last.energy))
         self.bin_nrg_gain.gain_mask_level.SetValue(str(last.gain_mask_level))
-        self.dark_avg_path.ctr.SetValue(str(last.dark_avg_path))
-        self.dark_stddev_path.ctr.SetValue(str(last.dark_stddev_path))
-        self.gain_map_path.ctr.SetValue(str(last.gain_map_path))
-        self.calib_dir.ctr.SetValue(str(last.calib_dir))
+        self.wavelength_offset.wavelength_offset.SetValue(str(last.wavelength_offset))
+        self.spectrum_calibration.spectrum_eV_per_pixel.SetValue(str(last.spectrum_eV_per_pixel))
+        self.spectrum_calibration.spectrum_eV_offset.SetValue(str(last.spectrum_eV_offset))
+        if self.parent.trial.app.params.dispatcher in \
+            ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
+          self.dark_avg_path.ctr.SetValue(str(last.dark_avg_path))
+          self.dark_stddev_path.ctr.SetValue(str(last.dark_stddev_path))
+          self.gain_map_path.ctr.SetValue(str(last.gain_map_path))
+          self.calib_dir.ctr.SetValue(str(last.calib_dir))
       self.two_thetas.two_theta_low.SetValue(str(last.two_theta_low))
       self.two_thetas.two_theta_high.SetValue(str(last.two_theta_high))
       self.untrusted_path.ctr.SetValue(str(last.untrusted_pixel_mask_path))
@@ -1920,7 +2119,7 @@ class RunBlockDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*.cbf",
                              wildcard="*.cbf",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
 
     if dark_dlg.ShowModal() == wx.ID_OK:
@@ -1933,7 +2132,7 @@ class RunBlockDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*.cbf",
                              wildcard="*.cbf",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
 
     if dark_dlg.ShowModal() == wx.ID_OK:
@@ -1946,7 +2145,7 @@ class RunBlockDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*.cbf",
                              wildcard="*.cbf",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
 
     if dark_dlg.ShowModal() == wx.ID_OK:
@@ -1959,7 +2158,7 @@ class RunBlockDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*.mask",
                              wildcard="*.mask",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
 
     if dlg.ShowModal() == wx.ID_OK:
@@ -2000,6 +2199,7 @@ class SelectRunBlocksDialog(BaseDialog):
     self.all_rungroups = self.db.get_all_rungroups()
     choices = []
     selected = []
+    use_ids = db.params.facility.name not in ['lcls']
     for rungroup in self.all_rungroups:
       selected.append(rungroup.id in self.trial_rungroups)
       first_run, last_run = rungroup.get_first_and_last_runs()
@@ -2007,9 +2207,10 @@ class SelectRunBlocksDialog(BaseDialog):
         if first_run is None:
           desc = "[%d]"%(rungroup.id)
         else:
-          desc = "[%d] %d+"%(rungroup.id, int(first_run.id))
+          desc = "[%d] %d+"%(rungroup.id, int(first_run.id) if use_ids else int(first_run.run))
       else:
-        desc = "[%d] %d-%d"%(rungroup.id, int(first_run.id), int(last_run.id))
+        desc = "[%d] %d-%d"%(rungroup.id, int(first_run.id) if use_ids else int(first_run.run), \
+                                          int(last_run.id) if use_ids else int(last_run.run))
       if rungroup.comment is not None:
         desc += " " + rungroup.comment
 
@@ -2234,7 +2435,7 @@ class TrialDialog(BaseDialog):
                              defaultDir=os.curdir,
                              defaultFile="*.phil",
                              wildcard="*.phil",
-                             style=wx.OPEN | wx.FD_FILE_MUST_EXIST,
+                             style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST,
                              )
     if load_dlg.ShowModal() == wx.ID_OK:
       target_file = load_dlg.GetPaths()[0]
@@ -2412,7 +2613,7 @@ class DatasetDialog(BaseDialog):
     if tag_names:
       self.tag_checklist.ctr.InsertItems(items=tag_names, pos=0)
       checked = [tag_idx for tag_idx, tag_name in enumerate(tag_names) if tag_name in self.dataset_tagnames]
-      self.tag_checklist.ctr.SetChecked(checked)
+      self.tag_checklist.ctr.SetCheckedItems(checked)
 
   def onOK(self, e):
     name = self.name.ctr.GetValue()
@@ -2431,7 +2632,7 @@ class DatasetDialog(BaseDialog):
       self.dataset.name = name
       self.dataset.comment = comment
 
-    checked = self.tag_checklist.ctr.GetChecked()
+    checked = self.tag_checklist.ctr.GetCheckedItems()
     for tag_idx, tag in enumerate(self.all_tags):
       if tag_idx in checked:
         if tag.name not in self.dataset_tagnames:
@@ -2557,5 +2758,83 @@ class TaskDialog(BaseDialog):
       self.task.type = task_type
       self.task.trial_id = trial.id
       self.task.parameters = parameters
+
+    e.Skip()
+
+class SelectTasksDialog(BaseDialog):
+  def __init__(self, parent, dataset,
+               label_style='bold',
+               content_style='normal',
+               db=None,
+               *args, **kwargs):
+    BaseDialog.__init__(self, parent, label_style=label_style,
+                        content_style=content_style, *args, **kwargs)
+
+    self.db = db
+    self.dataset = dataset
+
+    self.top_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
+    self.button_panel = wx.Panel(self)
+    self.button_sizer = wx.BoxSizer(wx.VERTICAL)
+    self.button_panel.SetSizer(self.button_sizer)
+
+    self.tasks_panel = ScrolledPanel(self, size=(500, 400))
+
+    # Populate tasks with current values from db
+    self.dataset_tasks = [t for t in dataset.tasks]
+    self.dataset_task_ids = [t.id for t in self.dataset_tasks]
+    self.all_tasks = self.db.get_all_tasks()
+    choices = []
+    selected = []
+    for task in self.all_tasks:
+      selected.append(task.id in self.dataset_task_ids)
+      desc = "[%d] %s"%(task.id, task.type)
+      if task.trial is not None:
+        desc += " (trial %d)"%task.trial.trial
+
+      choices.append(desc)
+
+    self.tasks_list = gctr.CheckListCtrl(self.tasks_panel,
+                                         label='Select tasks',
+                                         label_size=(40, -1),
+                                         label_style='normal',
+                                         ctrl_size=(450, 350),
+                                         direction='vertical',
+                                         choices=choices)
+    for i in range(len(selected)):
+      self.tasks_list.ctr.Check(i, selected[i])
+
+    self.tasks_sizer = wx.BoxSizer(wx.VERTICAL)
+    self.tasks_panel.SetSizer(self.tasks_sizer)
+
+    self.tasks_sizer.Add(self.tasks_list, 1, flag=wx.EXPAND)
+
+    # Add panels to main sizer
+    self.top_sizer.Add(self.button_panel,
+                       flag=wx.LEFT, border=10)
+    self.top_sizer.Add(self.tasks_panel,
+                       flag=wx.EXPAND | wx.RIGHT | wx.LEFT, border=10)
+    self.main_sizer.Add(self.top_sizer,
+                        flag=wx.EXPAND| wx.TOP | wx.BOTTOM, border=10)
+    # Dialog control
+    dialog_box = self.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
+    self.main_sizer.Add(dialog_box,
+                   flag=wx.EXPAND | wx.ALIGN_RIGHT | wx.ALL,
+                   border=10)
+
+    self.Layout()
+    self.SetTitle('Select tasks')
+
+    # Button bindings
+    self.Bind(wx.EVT_BUTTON, self.onOK, id=wx.ID_OK)
+
+  def onOK(self, e):
+    for task in self.dataset_tasks:
+      self.dataset.remove_task(task)
+
+    for i, task in enumerate(self.all_tasks):
+      if self.tasks_list.ctr.IsChecked(i):
+        self.dataset.add_task(task)
 
     e.Skip()

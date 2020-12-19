@@ -5,19 +5,22 @@ import traceback
 from cctbx.miller import display2 as display
 from cctbx.array_family import flex
 from cctbx import miller
+from crys3d.hklview import HKLJavaScripts
 from scitbx import graphics_utils
 from scitbx import matrix
 import scitbx.math
 from libtbx.utils import Sorry, to_str
-from websocket_server import WebsocketServer
 import threading, math, sys, cmath
+if sys.version_info[0] > 2: # using websockets which is superior to websocket_server
+  from crys3d.hklview.WebBrowserMessengerPy3 import WBmessenger
+else: # using websocket_server
+  from crys3d.hklview.WebBrowserMessengerPy2 import WBmessenger
+
 from time import sleep
 import os.path, time, copy
 import libtbx
 import webbrowser, tempfile
 from six.moves import range
-import base64
-
 
 
 def has_phil_path(philobj, *paths): # variable number of arguments
@@ -33,10 +36,13 @@ class ArrayInfo:
     if (millarr.unit_cell() is None) or (millarr.space_group() is None) :
       raise Sorry("No space group info is present in data")
     data = millarr.data()
+    self.datatype = ""
     if (isinstance(data, flex.int)):
       data = flex.double([e for e in data if e!= display.inanval])
+      self.datatype = "isint"
     if millarr.is_complex_array():
       data = flex.abs(millarr.data())
+      self.datatype = "iscomplex"
     #data = [e for e in data if not math.isnan(e)]
     data = graphics_utils.NoNansArray( data, data[0] ) # assuming data[0] isn't NaN
     self.maxdata = flex.max( data )
@@ -44,6 +50,7 @@ class ArrayInfo:
     self.maxsigmas = self.minsigmas = None
     if millarr.sigmas() is not None:
       data = millarr.sigmas()
+      self.datatype = "hassigmas"
       #data = [e for e in data if not math.isnan(e)]
       data = graphics_utils.NoNansArray( data, data[0] ) # assuming data[0] isn't NaN
       self.maxsigmas = flex.max( data )
@@ -53,9 +60,11 @@ class ArrayInfo:
     self.labels = self.desc = ""
     #import code, traceback; code.interact(local=locals(), banner="".join( traceback.format_stack(limit=10) ) )
     if millarr.info():
-      self.labels = millarr.info().label_string()
+      #self.labels = millarr.info().label_string()
+      self.labels = millarr.info().labels
       if fomlabel:
-        self.labels = millarr.info().label_string() + " + " + fomlabel
+        self.labels = [ millarr.info().label_string() + " + " + fomlabel ]
+        self.datatype = "iscomplex_fom"
       self.desc = get_array_description(millarr)
     self.span = ("?" , "?")
     self.spginf = millarr.space_group_info().symbol_and_number()
@@ -69,7 +78,7 @@ class ArrayInfo:
       mprint(to_str(e))
     issymunique = millarr.is_unique_set_under_symmetry()
     isanomalous = millarr.anomalous_flag()
-    self.infotpl = ( self.labels, self.desc, self.spginf, millarr.indices().size(), self.span,
+    self.infotpl = ( ",".join(self.labels), self.desc, self.spginf, millarr.indices().size(), self.span,
      self.minmaxdata, self.minmaxsigs, (roundoff(dmin), roundoff(dmax)), issymunique, isanomalous )
     self.infostr = "%s (%s), space group: %s, %s HKLs: %s, MinMax: %s, MinMaxSigs: %s, d_minmax: %s, SymUnique: %d, Anomalous: %d" %self.infotpl
 
@@ -97,6 +106,7 @@ def MakeHKLscene( proc_array, pidx, setts, mapcoef_fom_dict, merge, mprint=sys.s
   if (settings.inbrowser==True):
     settings.expand_anomalous = False
     settings.expand_to_p1 = False
+
   for (fomsarray, fidx) in fomsarrays_idx:
     hklscene = display.scene(miller_array=proc_array, merge=merge,
       settings=settings, foms_array=fomsarray, fullprocessarray=True )
@@ -122,7 +132,7 @@ def MakeHKLscene( proc_array, pidx, setts, mapcoef_fom_dict, merge, mprint=sys.s
       scenemindata.append( ainf.mindata )
       scenemaxsigmas.append(ainf.maxsigmas)
       sceneminsigmas.append(ainf.minsigmas)
-      scenearrayinfos.append((ainf.infostr, pidx, fidx, ainf.labels))
+      scenearrayinfos.append([ainf.infostr, pidx, fidx, ainf.labels, ainf.datatype])
       #self.mprint("%d, %s" %(i, infostr) )
       #i +=1
   return (hklscenes, scenemaxdata, scenemindata, scenemaxsigmas, sceneminsigmas, scenearrayinfos)
@@ -187,7 +197,7 @@ class hklview_3d:
     self.camera_type = "orthographic"
     self.primitivetype = "SphereBuffer"
     self.url = ""
-    self.binscenelabel = "Resolution"
+    self.bin_labels_type_idx = ("Resolution",  "", -1, -1)
     self.colour_scene_id = None
     self.radii_scene_id = None
     #self.scene_id = None
@@ -229,6 +239,7 @@ class hklview_3d:
     self.colstraliases = ""
     self.binvals = []
     self.binvalsboundaries = []
+    self.oldnbinvalsboundaries = None
     self.proc_arrays = []
     self.HKLscene = []
     self.HKLscenes = []
@@ -244,7 +255,6 @@ class hklview_3d:
     self.sceneisdirty = True
     self.imagename = None
     self.imgdatastr = ""
-    self.imgcount = 0
     self.hkl_scenes_info = []
     self.match_valarrays = []
     self.array_infostrs = []
@@ -254,32 +264,35 @@ class hklview_3d:
     self.bin_infotpls = []
     self.mapcoef_fom_dict = {}
     self.sceneid_from_arrayid = []
-    self.was_disconnected = False
     self.parent = None
     if 'parent' in kwds:
       self.parent = kwds['parent']
     self.verbose = 0
     if 'verbose' in kwds:
       self.verbose = eval(kwds['verbose'])
+    self.debug = None
+    if 'debug' in kwds:
+      self.debug = kwds['debug']
     self.mprint = sys.stdout.write
     if 'mprint' in kwds:
       self.mprint = kwds['mprint']
     self.nbinvalsboundaries = 0
+    self.websockport = 7894
+    if 'websockport' in kwds:
+      self.websockport = kwds['websockport']
     tempdir = tempfile.gettempdir()
-    self.hklfname = os.path.join(tempdir, "hkl.htm" )
+    # ensure unique file name by including port number in filename
+    self.hklfname = os.path.join(tempdir, "hkl_%d.htm" %self.websockport )
     if os.path.isfile(self.hklfname):
       os.remove(self.hklfname)
     if 'htmlfname' in kwds and kwds['htmlfname']:
       self.hklfname = kwds['htmlfname']
     self.hklfname = os.path.abspath( self.hklfname )
-    self.jscriptfname = os.path.join(tempdir, "hkljstr.js")
+    self.jscriptfname = os.path.join(tempdir, "hkljstr_%d.js" %self.websockport)
     if os.path.isfile(self.jscriptfname):
       os.remove(self.jscriptfname)
     if 'jscriptfname' in kwds and kwds['jscriptfname'] != "":
       self.jscriptfname = kwds['jscriptfname']
-    self.websockport = 7894
-    if 'websockport' in kwds:
-      self.websockport = kwds['websockport']
     self.send_info_to_gui = None
     if 'send_info_to_gui' in kwds:
       self.send_info_to_gui = kwds['send_info_to_gui']
@@ -307,23 +320,21 @@ class hklview_3d:
     self.colourgradientvalues = []
     self.isinjected = False
     self.UseOSBrowser = ""
+    ldic=locals()
     if 'UseOSBrowser' in kwds:
-      exec("self.UseOSBrowser = kwds['UseOSBrowser']")
+      exec("UseOSBrowser = kwds['UseOSBrowser']", globals(), ldic)
+      self.UseOSBrowser = ldic["UseOSBrowser"]
     self.viewmtrx = None
     self.lastviewmtrx = None
     self.currentRotmx = matrix.identity(3)
     self.HKLsceneKey = ( 0, False, self.viewerparams.expand_anomalous, self.viewerparams.expand_to_p1  )
-    self.msgqueue = []
-    self.websockclient = None
     self.handshakewait = 5
     if 'handshakewait' in kwds:
       self.handshakewait = eval(kwds['handshakewait'])
     self.lastmsg = "" # "Ready"
-    self.browserisopen = False
-    self.msgdelim = ":\n"
-    self.msgqueuethrd = None
-    self.StartWebsocket()
-    self.isterminating = False
+    self.WBmessenger = WBmessenger(self)
+    self.AddToBrowserMsgQueue = self.WBmessenger.AddToBrowserMsgQueue
+    self.WBmessenger.StartWebsocket()
     self.javascriptcleaned = False
 
 
@@ -331,11 +342,14 @@ class hklview_3d:
     # not called unless instantiated with a "with hklview_3d ... " statement
     self.JavaScriptCleanUp()
     nwait = 0
-    while not self.isterminating and nwait < 5:
-      sleep(self.sleeptime)
+    while not self.WBmessenger.isterminating and nwait < 5:
+      #sleep(self.sleeptime)
+      self.WBmessenger.Sleep(self.sleeptime)
       nwait += self.sleeptime
     if os.path.isfile(self.hklfname):
       os.remove(self.hklfname)
+    if os.path.isfile(self.jscriptfname):
+      os.remove(self.jscriptfname)
     self.mprint("Destroying hklview_3d", 1)
 
 
@@ -367,6 +381,9 @@ class hklview_3d:
                        "slice_axis",
                        "slice_mode",
                        "slice_index",
+                       "sigma_color",
+                       "sigma_radius",
+                       "fontsize",
                        "scene_id",
                        "scale",
                        "nth_power_scale_radii"
@@ -392,11 +409,11 @@ class hklview_3d:
                       "show_only_missing",
                       "show_systematic_absences",
                       "scene_bin_thresholds",
-                      "bin_scene_label",
+                      "bin_labels_type_idx",
                       "nbins"
                       )
        ):
-      self.binvals, self.nuniqueval = self.calc_bin_thresholds(curphilparam.bin_scene_label, curphilparam.nbins)
+      self.binvals, self.nuniqueval = self.calc_bin_thresholds(curphilparam.bin_labels_type_idx, curphilparam.nbins)
       self.sceneisdirty = True
 
     if has_phil_path(diff_phil, "camera_type"):
@@ -405,21 +422,23 @@ class hklview_3d:
     if has_phil_path(diff_phil, "miller_array_operations"):
       self.viewerparams.scene_id = len(self.HKLscenedict)-1
       self.set_scene(self.viewerparams.scene_id)
+      self.params.miller_array_operations = ""
 
     if self.viewerparams.scene_id is not None:
       if not self.isinjected:
         self.scene = self.HKLscene_from_dict(self.viewerparams.scene_id)
       self.DrawNGLJavaScript()
-      msg = "Rendered %d reflections\n" % self.scene.points.size()
-      msg += self.set_volatile_params()
-    return msg, curphilparam
+      self.mprint( "Rendered %d reflections" % self.scene.points.size(), verbose=1)
+      self.set_volatile_params()
+    else:
+      self.DrawNGLJavaScript(blankscene=True)
+    return curphilparam
 
 
   def set_volatile_params(self):
-    msg = ""
     if self.viewerparams.scene_id is not None:
       if has_phil_path(self.diff_phil, "angle_around_vector"): # no need to redraw any clip plane
-        return msg
+        return
       self.fix_orientation(self.viewerparams.NGL.fixorientation)
       self.SetMouseSpeed(self.viewerparams.NGL.mouse_sensitivity)
       R = flex.vec3_double( [(0,0,0)])
@@ -438,28 +457,25 @@ class hklview_3d:
         R = flex.vec3_double( [(self.params.clip_plane.h, self.params.clip_plane.k, self.params.clip_plane.l)])
         if self.params.clip_plane.fractional_vector == "realspace" or self.params.clip_plane.fractional_vector == "tncs":
           isreciprocal = False
-
       self.clip_plane_vector(R[0][0], R[0][1], R[0][2], hkldist,
           clipwidth, self.viewerparams.NGL.fixorientation, self.params.clip_plane.is_parallel,
           isreciprocal)
       if self.viewerparams.inbrowser and not self.viewerparams.slice_mode:
-        msg += self.ExpandInBrowser(P1= self.viewerparams.expand_to_p1,
+        self.ExpandInBrowser(P1= self.viewerparams.expand_to_p1,
                               friedel_mate= self.viewerparams.expand_anomalous)
-      msg += self.SetOpacities(self.viewerparams.NGL.bin_opacities )
+      self.SetOpacities(self.viewerparams.NGL.bin_opacities )
       if self.params.real_space_unit_cell_scale_fraction is None:
         scale = None
       else:
         scale = (self.realspace_scale - 1.0)*self.params.real_space_unit_cell_scale_fraction + 1.0
-      msg += self.DrawUnitCell(scale )
+      self.DrawUnitCell(scale )
       if self.params.reciprocal_unit_cell_scale_fraction is None:
         scale = None
       else:
         scale = (self.reciproc_scale - 1.0)*self.params.reciprocal_unit_cell_scale_fraction + 1.0
-      msg += self.DrawReciprocalUnitCell(scale )
+      self.DrawReciprocalUnitCell(scale )
       self.set_tooltip_opacity()
       self.set_show_tooltips()
-      #self.SetAutoView()
-    return msg
 
 
   def set_scene(self, scene_id):
@@ -537,32 +553,36 @@ class hklview_3d:
     for hklscene in self.HKLscenes:
       if hklscene.isUsingFOMs():
         continue # already have tooltips for the scene without the associated fom
+      sigvals = None
+      if hklscene.work_array.sigmas() is not None:
+        sigvals = list( hklscene.work_array.select(hklscene.work_array.indices() == hkl).sigmas() )
       datval = None
       if hkl in hklscene.work_array.indices():
-        datval = hklscene.work_array.data_at_first_index(hkl)
+        datvals = list( hklscene.work_array.select(hklscene.work_array.indices() == hkl).data() )
       else:
         if id >= hklscene.data.size():
           continue
-        datval = hklscene.data[id]
-      if datval is not None and (not (math.isnan( abs(datval) ) or datval == display.inanval)):
-        if hklscene.work_array.is_complex_array():
-          ampl = abs(datval)
-          phase = cmath.phase(datval) * 180.0/math.pi
-          # purge nan values from array to avoid crash in fmod_positive()
-          # and replace the nan values with an arbitrary float value
-          if math.isnan(phase):
-            phase = 42.4242
-          # Cast negative degrees to equivalent positive degrees
-          phase = phase % 360.0
-        spbufttip +="\\n" + hklscene.work_array.info().label_string() + ': '
-        if hklscene.work_array.is_complex_array():
-          spbufttip += str(roundoff(ampl, 2)) + ", " + str(roundoff(phase, 1)) + \
-            "\'+ String.fromCharCode(176) +\'" # degree character
-        elif hklscene.work_array.sigmas() is not None:
-          sigma = hklscene.work_array.sigma_at_first_index(hkl)
-          spbufttip += str(roundoff(datval, 2)) + ", " + str(roundoff(sigma, 2))
-        else:
-          spbufttip += str(roundoff(datval, 2))
+        datvals = [ hklscene.data[id] ]
+      for i,datval in enumerate(datvals):
+        if not (math.isnan( abs(datval) ) or datval == display.inanval):
+          if hklscene.work_array.is_complex_array():
+            ampl = abs(datval)
+            phase = cmath.phase(datval) * 180.0/math.pi
+            # purge nan values from array to avoid crash in fmod_positive()
+            # and replace the nan values with an arbitrary float value
+            if math.isnan(phase):
+              phase = 42.4242
+            # Cast negative degrees to equivalent positive degrees
+            phase = phase % 360.0
+          spbufttip +="\\n" + hklscene.work_array.info().label_string() + ': '
+          if hklscene.work_array.is_complex_array():
+            spbufttip += str(roundoff(ampl, 2)) + ", " + str(roundoff(phase, 1)) + \
+              "\'+ String.fromCharCode(176) +\'" # degree character
+          elif sigvals:
+            sigma = sigvals[i]
+            spbufttip += str(roundoff(datval, 2)) + ", " + str(roundoff(sigma, 2))
+          else:
+            spbufttip += str(roundoff(datval, 2))
     spbufttip += '\\n\\n%d,%d,%d' %(id, sym_id, anomalous) # compared by the javascript
     spbufttip += '\''
     return spbufttip
@@ -574,6 +594,40 @@ class hklview_3d:
     return self.HKLInfo_from_dict(idx)[6], self.HKLInfo_from_dict(idx)[7]
 
 
+  def SupersetMillerArrays(self):
+    self.match_valarrays = []
+    # First loop over all miller arrays to make a superset of hkls of all
+    # miller arrays. Then loop over all miller arrays and extend them with NaNs
+    # as to contain the same hkls as the superset
+    self.mprint("Gathering superset of miller indices...")
+    superset_array = self.proc_arrays[0].deep_copy()
+    set_of_indices = set([])
+    for i,procarray in enumerate(self.proc_arrays):
+      set_of_indices |= set( list(procarray.indices()) )
+    self.mprint("Extending miller arrays to match superset of miller indices...")
+    indiceslst = flex.miller_index( list( set_of_indices ) )
+    for i,procarray in enumerate(self.proc_arrays):
+      # first match indices in currently selected miller array with indices in the other miller arrays
+      matchindices = miller.match_indices(indiceslst, procarray.indices() )
+      #matchindices = miller.match_indices( procarray.indices(), indiceslst )
+      valarray = procarray.select( matchindices.pairs().column(1) )
+      #if valarray.anomalous_flag() != superset_array.anomalous_flag():
+      #  superset_array._anomalous_flag = valarray._anomalous_flag
+      #missing = indiceslst.lone_set( valarray.indices() )
+
+      missing = indiceslst.select( miller.match_indices(valarray.indices(), indiceslst ).singles(1))
+
+      # insert NAN values for reflections in self.miller_array not found in procarray
+      valarray = display.ExtendMillerArray(valarray, missing.size(), missing )
+      #match_valarray = valarray
+      match_valindices = miller.match_indices(superset_array.indices(), valarray.indices() )
+      match_valarray = valarray.select( match_valindices.pairs().column(1) )
+      match_valarray.sort(by_value="packed_indices")
+      match_valarray.set_info(procarray.info() )
+      self.match_valarrays.append( match_valarray )
+    self.mprint("Done making superset")
+
+  """
   def SupersetMillerArrays(self):
     self.match_valarrays = []
     # First loop over all miller arrays to make a superset of hkls of all
@@ -607,7 +661,7 @@ class hklview_3d:
       match_valarray.set_info(procarray.info() )
       self.match_valarrays.append( match_valarray )
     self.mprint("Done making superset")
-
+  """
 
   def ConstructReciprocalSpace(self, curphilparam, scene_id=None):
     sceneid = scene_id
@@ -625,6 +679,8 @@ class hklview_3d:
                          self.viewerparams.show_missing,
                          self.viewerparams.show_only_missing,
                          self.viewerparams.show_systematic_absences,
+                         self.viewerparams.sigma_radius,
+                         self.viewerparams.sigma_color,
                          self.viewerparams.scene_id,
                          self.viewerparams.scale,
                          self.viewerparams.nth_power_scale_radii
@@ -634,6 +690,8 @@ class hklview_3d:
       if self.HKLscene:
         self.mprint("Using cached HKL scene", verbose=1)
         return True
+    if self.has_new_miller_array:
+      self.identify_suitable_fomsarrays()
     self.mprint("Constructing HKL scenes", verbose=0)
     assert(self.proc_arrays)
     if scene_id is None:
@@ -660,6 +718,8 @@ class hklview_3d:
                                 self.viewerparams.show_missing,
                                 self.viewerparams.show_only_missing,
                                 self.viewerparams.show_systematic_absences,
+                                self.viewerparams.sigma_radius,
+                                self.viewerparams.sigma_color,
                                 sceneid,
                                 self.viewerparams.scale,
                                 self.viewerparams.nth_power_scale_radii
@@ -683,11 +743,14 @@ class hklview_3d:
                               self.viewerparams.show_missing,
                               self.viewerparams.show_only_missing,
                               self.viewerparams.show_systematic_absences,
+                              self.viewerparams.sigma_radius,
+                              self.viewerparams.sigma_color,
                               self.viewerparams.scene_id,
                               self.viewerparams.scale,
                               self.viewerparams.nth_power_scale_radii
                               )
-      self.SendInfoToGUI({ "hklscenes_arrays": hkl_scenes_info, "NewHKLscenes" : True })
+      scenearraylabeltypes = [ (e[3], e[4], e[1], sceneid) for sceneid,e in enumerate(hkl_scenes_info) ]
+      self.SendInfoToGUI({ "scene_array_label_types": scenearraylabeltypes, "NewHKLscenes" : True })
     else:
       idx = self.scene_id_to_array_id(scene_id)
       (hklscenes, scenemaxdata,
@@ -708,6 +771,8 @@ class hklview_3d:
                               self.viewerparams.show_missing,
                               self.viewerparams.show_only_missing,
                               self.viewerparams.show_systematic_absences,
+                              self.viewerparams.sigma_radius,
+                              self.viewerparams.sigma_color,
                               scene_id,
                               self.viewerparams.scale,
                               self.viewerparams.nth_power_scale_radii
@@ -740,6 +805,8 @@ class hklview_3d:
                       self.viewerparams.show_missing,
                       self.viewerparams.show_only_missing,
                       self.viewerparams.show_systematic_absences,
+                      self.viewerparams.sigma_radius,
+                      self.viewerparams.sigma_color,
                       sceneid,
                       self.viewerparams.scale,
                       self.viewerparams.nth_power_scale_radii
@@ -817,9 +884,10 @@ class hklview_3d:
     return None
 
 
-  def calc_bin_thresholds(self, bin_scene_label, nbins):
-    self.binscenelabel = bin_scene_label
-    if self.binscenelabel=="Resolution":
+  def calc_bin_thresholds(self, bin_labels_type_idx, nbins):
+    self.bin_labels_type_idx = eval(bin_labels_type_idx)
+    binscenelabel = self.bin_labels_type_idx[0]
+    if binscenelabel=="Resolution":
       warray = self.HKLscene_from_dict(int(self.viewerparams.scene_id)).work_array
       dres = self.HKLscene_from_dict(int(self.viewerparams.scene_id)).dres
       uc = warray.unit_cell()
@@ -829,10 +897,11 @@ class hklview_3d:
       binvals = [ e for e in binvals if e != -1.0] # delete dummy limit
       binvals = list( 1.0/flex.double(binvals) )
       nuniquevalues = len(set(list(dres)))
+    elif binscenelabel=="Singletons":
+        binvals = [ -1.5, -0.5, 0.5, 1.5 ]
+        nuniquevalues = len(binvals)
     else:
-      bindata = self.HKLscene_from_dict(int(self.binscenelabel)).data.deep_copy()
-      if isinstance(bindata, flex.complex_double):
-        raise Sorry("Cannot order complex data values for binning.")
+      bindata, dummy = self.get_matched_binarray()
       selection = flex.sort_permutation( bindata )
       bindata_sorted = bindata.select(selection)
       # get binvals by dividing bindata_sorted with nbins
@@ -855,14 +924,36 @@ class hklview_3d:
     self.nuniqueval = nuniquevalues
 
 
-  def MatchBinArrayToSceneArray(self, ibinarray):
-    # match bindata with data(scene_id)
-    if self.binscenelabel=="Resolution":
+  def get_matched_binarray(self):
+    sceneid = self.bin_labels_type_idx[3]
+    datatype = self.bin_labels_type_idx[1]
+    binscenelabel = self.bin_labels_type_idx[0]
+    label = self.HKLscene_from_dict(sceneid).work_array.info().label_string()
+    if datatype == "hassigmas" and binscenelabel == "Sigmas of " + label:
+      bindata = self.HKLscene_from_dict(sceneid).sigmas.deep_copy()
+      binvalsboundaries = [ self.HKLMinSigmas_from_dict(sceneid) - 0.1 , self.HKLMaxSigmas_from_dict(sceneid) + 0.1 ]
+    elif datatype == "iscomplex" and "Phases of " + label in binscenelabel:
+      bindata = self.HKLscene_from_dict(sceneid).phases.deep_copy()
+      # preselect centric reflections, i.e. those with phi = 0 or 180
+      binvalsboundaries = [-0.01, 0.01, 179.99, 180.01, 359.99, 360]
+    elif datatype == "iscomplex" and "Amplitudes of " + label in binscenelabel:
+      bindata = self.HKLscene_from_dict(sceneid).ampl.deep_copy()
+      binvalsboundaries = [ self.HKLMinData_from_dict(sceneid) - 0.1 , self.HKLMaxData_from_dict(sceneid) + 0.1 ]
+    else:
+      bindata = self.HKLscene_from_dict(sceneid).data.deep_copy()
+      binvalsboundaries = [ self.HKLMinData_from_dict(sceneid) - 0.1 , self.HKLMaxData_from_dict(sceneid) + 0.1 ]
+    return bindata, binvalsboundaries
+
+
+  def MatchBinArrayToSceneArray(self):
+    # match bindata with data or sigmas
+    if self.bin_labels_type_idx[0] == "Resolution":
       return 1.0/self.scene.dres
-    # get the array id that is mapped through an HKLscene id
-    binarraydata = self.HKLscene_from_dict(ibinarray).data
+    binarraydata, dummy = self.get_matched_binarray()
     scenearraydata = self.HKLscene_from_dict(self.viewerparams.scene_id).data
-    matchindices = miller.match_indices(self.HKLscene_from_dict(self.viewerparams.scene_id).indices, self.HKLscene_from_dict(ibinarray).indices )
+    ibinarray = self.bin_labels_type_idx[3]
+    matchindices = miller.match_indices(self.HKLscene_from_dict(self.viewerparams.scene_id).indices,
+                                        self.HKLscene_from_dict(ibinarray).indices )
     matched_binarray = binarraydata.select( matchindices.pairs().column(1) )
     #valarray.sort(by_value="packed_indices")
     #import code, traceback; code.interact(local=locals(), banner="".join( traceback.format_stack(limit=10) ) )
@@ -887,16 +978,19 @@ class hklview_3d:
 
   def OperateOn1MillerArray(self, millarr, operation):
     # lets user specify a one line python expression operating on data, sigmas
-    data = millarr.data()
-    sigmas = millarr.sigmas()
-    dres = millarr.unit_cell().d( millarr.indices() )
     newarray = millarr.deep_copy()
+    data = newarray.data()
+    sigmas = newarray.sigmas()
+    dres = newarray.unit_cell().d( newarray.indices() )
     self.mprint("Creating new miller array through the operation: %s" %operation)
     try:
       newdata = None
       newsigmas = None
-      exec(operation)
+      ldic= {'data': data, 'sigmas': sigmas, 'dres': dres }
+      exec(operation, globals(), ldic)
+      newdata = ldic.get("newdata", None)
       newarray._data = newdata
+      newsigmas = ldic.get("newsigmas", None)
       newarray._sigmas = newsigmas
       return newarray
     except Exception as e:
@@ -907,8 +1001,8 @@ class hklview_3d:
   def OperateOn2MillerArrays(self, millarr1, millarr2, operation):
     # lets user specify a one line python expression operating on data1 and data2
     matchindices = miller.match_indices(millarr1.indices(), millarr2.indices() )
-    matcharr1 = millarr1.select( matchindices.pairs().column(0) )
-    matcharr2 = millarr2.select( matchindices.pairs().column(1) )
+    matcharr1 = millarr1.select( matchindices.pairs().column(0) ).deep_copy()
+    matcharr2 = millarr2.select( matchindices.pairs().column(1) ).deep_copy()
     data1 = matcharr1.data()
     data2 = matcharr2.data()
     sigmas1 = matcharr1.sigmas()
@@ -920,8 +1014,11 @@ class hklview_3d:
     try:
       newdata = None
       newsigmas = None
-      exec(operation)
+      ldic= {'data1': data1, 'sigmas1': sigmas1, 'data2': data2, 'sigmas2': sigmas2, 'dres': dres }
+      exec(operation, globals(), ldic)
+      newdata = ldic.get("newdata", None)
       newarray._data = newdata
+      newsigmas = ldic.get("newsigmas", None)
       newarray._sigmas = newsigmas
       return newarray
     except Exception as e:
@@ -933,9 +1030,11 @@ class hklview_3d:
     if not self.scene or not self.sceneisdirty:
       return
     if self.miller_array is None :
-      self.mprint( "Select an HKL scene to display reflections" )
-      return
-    self.mprint("Composing JavaScript...")
+      self.mprint( "Select a data set to display reflections" )
+      blankscene = True
+      #return
+    else:
+      self.mprint("Composing JavaScript...")
 
     h_axis = flex.vec3_double([self.scene.axes[0]])
     k_axis = flex.vec3_double([self.scene.axes[1]])
@@ -965,9 +1064,11 @@ class hklview_3d:
     # make arrow font size roughly proportional to radius of highest resolution shell
     #fontsize = str(1.0 + roundoff(math.pow( max(self.miller_array.index_span().max()), 1.0/3.0)))
     if not self.miller_array:
-      fontsize = str(1.0)
+      fontsize = 1.0
     else:
-      fontsize = str(1.0 + roundoff(math.pow( max(self.miller_array.index_span().max()), 1.0/2.0)))
+      fontsize = 1.0 + roundoff(math.pow( max(self.miller_array.index_span().max()), 1.0/2.0))
+    #fontsize *= self.viewerparams.NGL.fontsize/7.0
+    fontsize = str(self.viewerparams.NGL.fontsize)
 
     if blankscene:
       axisfuncstr = "\nvar MakeHKL_Axis = function() { };\n"
@@ -989,7 +1090,8 @@ function MakeHKL_Axis(mshape)
   mshape.addText( %s, [ 0, 1, 0 ], fontsize, 'k');
   mshape.addText( %s, [ 1, 0, 0 ], fontsize, 'l');
 };
-    """ %(fontsize, str(Hstararrowstart), str(Hstararrowend), str(Kstararrowstart),
+    """ %(fontsize, str(Hstararrowstart), str(Hstararrowend),
+          str(Kstararrowstart),
           str(Kstararrowend), str(Lstararrowstart), str(Lstararrowend), Hstararrowtxt,
           Kstararrowtxt, Lstararrowtxt)
     if not blankscene:
@@ -1052,18 +1154,20 @@ function MakeHKL_Axis(mshape)
       points = flex.vec3_double( [ ] )
       colors = flex.vec3_double( [ ] )
       radii = flex.double( [ ] )
-      self.binscenelabel = "Resolution"
+      self.bin_labels_type_idx = ("Resolution",  "", -1, -1)
     else:
       points = self.scene.points
 
     nrefls = points.size()
     hkls = self.scene.indices
     dres = self.scene.dres
-    if self.binscenelabel=="Resolution":
+    if self.bin_labels_type_idx[0] =="Resolution":
       colstr = "dres"
+    elif self.bin_labels_type_idx[0] =="Singletons":
+      colstr = "Singleton"
     else:
       if not blankscene:
-        colstr = self.HKLscene_from_dict(int(self.binscenelabel)).work_array.info().label_string()
+        colstr = self.HKLscene_from_dict(self.bin_labels_type_idx[3]).work_array.info().label_string()
     data = self.scene.data
     if not blankscene:
       colourlabel = self.HKLscene_from_dict(self.colour_scene_id).colourlabel
@@ -1077,23 +1181,27 @@ function MakeHKL_Axis(mshape)
 
     self.binvalsboundaries = []
     if not blankscene:
-      if self.binscenelabel=="Resolution":
+      if self.bin_labels_type_idx[0] =="Resolution":
         self.binvalsboundaries = self.binvals
         self.bindata = 1.0/self.scene.dres
+      elif self.bin_labels_type_idx[0] =="Singletons":
+        self.binvalsboundaries = self.binvals
+        self.bindata = self.scene.singletonsiness
       else:
-        ibinarray= int(self.binscenelabel)
-        self.binvalsboundaries = [ self.HKLMinData_from_dict(ibinarray) - 0.1 , self.HKLMaxData_from_dict(ibinarray) + 0.1 ]
+        dummy, self.binvalsboundaries = self.get_matched_binarray()
         self.binvalsboundaries.extend( self.binvals )
         self.binvalsboundaries.sort()
         if self.binvalsboundaries[0] < 0.0:
           self.binvalsboundaries.append(0.0)
           self.binvalsboundaries.sort()
-        self.bindata = self.MatchBinArrayToSceneArray(ibinarray)
-        if self.HKLscene_from_dict(ibinarray).work_array.is_complex_array():
-          self.bindata = self.HKLscene_from_dict(ibinarray).ampl
+        self.bindata = self.MatchBinArrayToSceneArray()
 
     self.nbinvalsboundaries = len(self.binvalsboundaries)
-    # Un-binnable data is scene data values where there's no matching reflection in the bin data
+    # avoid resetting opacities of bins unless we change the number of bins
+    if self.oldnbinvalsboundaries != self.nbinvalsboundaries:
+      self.ngl_settings.bin_opacities = str([ (1.0, e) for e in range(self.nbinvalsboundaries + 1) ])
+    self.oldnbinvalsboundaries = self.nbinvalsboundaries
+    # Un-binnable data are scene data values where there are no matching reflections in the bin data
     # Put these in a separate bin and be diligent with the book keeping!
     for ibin in range(self.nbinvalsboundaries+1): # adding the extra bin for un-binnable data
       colours.append([]) # colours and positions are 3 x size of data()
@@ -1121,7 +1229,6 @@ function MakeHKL_Axis(mshape)
     if nrefls > 0 and self.bindata.size() != points.size():
       raise Sorry("Not the same number of reflections in bin-data and displayed data")
 
-    flexbinvalsboundaries = flex.double(self.binvalsboundaries)
     start_time = time.time()
     for i, hklstars in enumerate(points):
       # bin currently displayed data according to the values of another miller array
@@ -1213,110 +1320,17 @@ function MakeHKL_Axis(mshape)
   """
       spherebufferstr += "shape.addBuffer(shapebufs[%d]);\n  alphas.push(1.0);\n" %cntbin
 
-      if ibin <self.nbinvalsboundaries and self.binvalsboundaries[ibin] < 0.0:
-        negativeradiistr += "shapebufs[%d].setParameters({metalness: 1});\n" %cntbin
       cntbin += 1
 
-    #self.ngl_settings.bin_opacities = str([ "1.0, %d"%e for e in range(cntbin) ])
-    self.ngl_settings.bin_opacities = str([ (1.0, e) for e in range(cntbin) ])
+    if self.ngl_settings.bin_opacities == "":
+      self.ngl_settings.bin_opacities = str([ (1.0, e) for e in range(cntbin) ])
+
     self.SendInfoToGUI( { "bin_opacities": self.ngl_settings.bin_opacities,
                           "bin_infotpls": self.bin_infotpls,
-                          "bin_data_label": colstr,
+                          "bin_data_label": self.bin_labels_type_idx[0],
                           "tooltip_opacity": self.ngl_settings.tooltip_alpha
                          } )
 
-    spherebufferstr += """
-// create tooltip element and add to the viewer canvas
-  stage.viewer.container.appendChild(tooltip);
-
-
-  stage.signals.clicked.add(
-    PickingProxyfunc
-  );
-
-
-  stage.mouseObserver.signals.dragged.add(
-    function ( deltaX, deltaY)
-    {
-      if (clipFixToCamPosZ === true)
-      {
-        stage.viewer.parameters.clipNear = origclipnear + (origcameraZpos -stage.viewer.camera.position.z);
-        stage.viewer.parameters.clipFar = origclipfar + (origcameraZpos -stage.viewer.camera.position.z);
-        stage.viewer.requestRender();
-      }
-      msg = getOrientMsg();
-      rightnow = timefunc();
-      if (rightnow - timenow > 250)
-      { // only post every 250 milli second as not to overwhelm python
-        postrotmxflag = true;
-        WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-        timenow = timefunc();
-      }
-    }
-  );
-
-
-  stage.mouseObserver.signals.clicked.add(
-    function (x, y)
-    {
-      msg = getOrientMsg();
-      WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-    }
-  );
-
-
-  stage.mouseObserver.signals.scrolled.add(
-    function (delta)
-    {
-      if (clipFixToCamPosZ === true)
-      {
-        stage.viewer.parameters.clipNear = origclipnear + (origcameraZpos -stage.viewer.camera.position.z);
-        stage.viewer.parameters.clipFar = origclipfar + (origcameraZpos -stage.viewer.camera.position.z);
-        stage.viewer.requestRender();
-      }
-      msg = getOrientMsg();
-      rightnow = timefunc();
-      if (rightnow - timenow > 250)
-      { // only post every 250 milli second as not to overwhelm python
-        WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-        timenow = timefunc();
-      }
-    }
-  );
-
-
-  stage.viewer.signals.rendered.add(
-    function()
-    {
-      if (postrotmxflag === true)
-      {
-        msg = getOrientMsg();
-        WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-        postrotmxflag = false;
-      }
-    }
-  );
-
-
-  stage.viewerControls.signals.changed.add(
-    function()
-    {
-      msg = getOrientMsg();
-      rightnow = timefunc();
-      if (rightnow - timenow > 250)
-      { // only post every 250 milli second as not to overwhelm python
-        WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-        //ReturnClipPlaneDistances();
-        sleep(250).then(()=> {
-            ReturnClipPlaneDistances();
-          }
-        );
-        timenow = timefunc();
-      }
-    }
-  );
-
-    """
     if not blankscene:
       colourgradstrs = "colourgradvalarray = new Array(%s);\n" %fomln
       # if displaying phases from map coefficients together with fom values then
@@ -1346,11 +1360,6 @@ function MakeHKL_Axis(mshape)
 
     """ % (colourgradstrs, colourlabel, fomlabel)
 
-
-    #negativeradiistr = ""
-    #for ibin in range(self.nbinvalsboundaries):
-    #  if self.binvalsboundaries[ibin] < 0.0:
-    #    negativeradiistr += "shapebufs[%d].setParameters({metalness: 1})\n" %ibin
     qualitystr = """ , { disableImpostor: true
                   , sphereDetail: 0 } // rather than default value of 2 icosahedral subdivisions
             """
@@ -1359,1229 +1368,12 @@ function MakeHKL_Axis(mshape)
 
     self.NGLscriptstr = ""
     if not blankscene:
-      self.NGLscriptstr = """
-
-
-function timefunc() {
-  var d = new Date();
-  var now = d.getTime();
-  return now
-}
-
-var timenow = timefunc();
-var rightnow = timefunc();
-
-
-window.addEventListener( 'resize',
-  function( event ){
-      stage.handleResize();
-  },
-  false
-);
-
-
-if (isdebug)
-{
-  var script=document.createElement('script');
-  script.src='https://rawgit.com/paulirish/memory-stats.js/master/bookmarklet.js';
-  document.head.appendChild(script);
-}
-
-
-// define tooltip element
-var tooltip = document.createElement("div");
-Object.assign(tooltip.style, {
-  display: "none",
-  position: "absolute",
-  zIndex: 10,
-  pointerEvents: "none",
-  backgroundColor: "rgba(255, 255, 255, %s )",
-  color: "black",
-  padding: "0.1em",
-  fontFamily: "sans-serif"
-});
-
-
-%s
-
-
-function getOrientMsg()
-{
-  cvorientmx = stage.viewerControls.getOrientation();
-  if (cvorientmx.determinant() == 0)
-      return oldmsg; // don't return invalid matrix
-
-  cvorient = cvorientmx.elements;
-  for (j=0; j<16; j++)
-  {
-    if (Number.isNaN( cvorient[j]) )
-      return oldmsg; // don't return invalid matrix
-  }
-
-  if (stage.viewer.cDist != 0
-        && stage.viewer.parameters.clipFar > stage.viewer.cDist
-        && stage.viewer.cDist > stage.viewer.parameters.clipNear)
-    cameradist = stage.viewer.cDist;
-  else if (stage.viewer.camera.position.z != 0
-        && stage.viewer.parameters.clipFar > -stage.viewer.camera.position.z
-        && -stage.viewer.camera.position.z > stage.viewer.parameters.clipNear)
-    cameradist = -stage.viewer.camera.position.z;
-  else
-    cameradist = cvorient[14]; // fall back if stage.viewer.camera.position.z is corrupted
-  cvorient.push( cameradist );
-  msg = String(cvorient);
-  oldmsg = msg;
-  return msg;
-}
-
-
-  // listen to `hovered` signal to move tooltip around and change its text
-PickingProxyfunc = function(pickingProxy)
-{
-  if (pickingProxy
-        && (Object.prototype.toString.call(pickingProxy.picker["ids"]) === '[object Array]' )
-        && displaytooltips )
-  {
-    var cp = pickingProxy.canvasPosition;
-    var sym_id = -1;
-    var hkl_id = -1;
-    var ttipid = "";
-    if (pickingProxy.picker["ids"].length > 0)
-    { // get stored id number of symmetry operator applied to this hkl
-      sym_id = pickingProxy.picker["ids"][0];
-      var ids = pickingProxy.picker["ids"].slice(1);
-      var is_friedel_mate = 0;
-      hkl_id = ids[ pickingProxy.pid %% ids.length ];
-      if (pickingProxy.pid >= ids.length)
-        is_friedel_mate = 1;
-    }
-    // tell python the id of the hkl and id number of the symmetry operator
-    rightnow = timefunc();
-    if (rightnow - timenow > tdelay)
-    { // only post every 50 milli second as not to overwhelm python
-      ttipid = String([hkl_id, sym_id, is_friedel_mate]);
-      WebsockSendMsg( 'tooltip_id: [' + ttipid + ']' );
-      timenow = timefunc();
-    }
-
-    if (isdebug)
-      console.log( "current_ttip_ids: " + String(current_ttip_ids) + ", ttipid: " + String(ttipid) );
-    if (current_ttip !== "" && current_ttip_ids == ttipid )
-    {
-      tooltip.innerText = current_ttip;
-      tooltip.style.bottom = cp.y + 7 + "px";
-      tooltip.style.left = cp.x + 8 + "px";
-      tooltip.style.fontSize = "smaller";
-      tooltip.style.display = "block";
-    }
-  }
-  else
-  {
-    tooltip.style.display = "none";
-    current_ttip = "";
-  }
-};
-
-
-function ColourChart(millerlabel, fomlabel)
-{
-  var ih = 3,
-  topr = 35,
-  topr2 = 10,
-  lp = 10,
-  wp = 60,
-  lp2 = lp + wp,
-  gl = 3,
-  wp2 = gl,
-  fomlabelheight = 25;
-  if (colourgradvalarray.length === 1)
-  {
-    wp2 = 15;
-    fomlabelheight = 0;
-  }
-
-  var wp3 = wp + colourgradvalarray.length * wp2 + 2;
-
-  totalheight = ih*colourgradvalarray[0].length + 35 + fomlabelheight;
-  // make a white box on top of which boxes with transparent background are placed
-  // containing the colour values at regular intervals as well as label legend of
-  // the displayed miller array
-  addDivBox("", topr2, lp, wp3, totalheight, 'rgba(255, 255, 255, 1.0)');
-
-  // print label of the miller array used for colouring
-  addDivBox(millerlabel, topr2, lp, wp, 20);
-
-  if (colourgradvalarray.length > 1)
-  {
-    // print FOM label, 1, 0.5 and 0.0 values below colour chart
-    fomtop = topr2 + totalheight - 18;
-    fomlp = lp + wp;
-    fomwp = wp3;
-    fomtop2 = fomtop - 13;
-    // print the 1 number
-    addDivBox("1", fomtop2, fomlp, fomwp, 20);
-    // print the 0.5 number
-    leftp = fomlp + 0.48 * gl * colourgradvalarray.length;
-    addDivBox("0.5", fomtop2, leftp, fomwp, 20);
-    // print the FOM label
-    addDivBox(fomlabel, fomtop, fomlp, fomwp, 20);
-    // print the 0 number
-    leftp = fomlp + 0.96 * gl * colourgradvalarray.length;
-    addDivBox("0", fomtop2, leftp, fomwp, 20);
-  }
-
-  for (j = 0; j < colourgradvalarray[0].length; j++)
-  {
-    rgbcol = colourgradvalarray[0][j][1];
-    val = colourgradvalarray[0][j][0];
-    topv = j*ih + topr;
-    toptxt = topv - 5;
-    // print value of miller array if present in colourgradvalarray[0][j][0]
-    addDivBox(val, toptxt, lp, wp, ih);
-  }
-
-  // draw the colour gradient
-  for (g = 0; g < colourgradvalarray.length; g++)
-  {
-    leftp = g*gl + lp + wp;
-    // if FOM values are supplied draw colour gradients with decreasing
-    // saturation values as stored in the colourgradvalarray[g] arrays
-    for (j = 0; j < colourgradvalarray[g].length; j++)
-    {
-      rgbcol = colourgradvalarray[g][j][1];
-      val = colourgradvalarray[g][j][0];
-      topv = j*ih + topr;
-      addDivBox("", topv, leftp, wp2, ih, rgbcol);
-    }
-  }
-}
-
-
-function HKLscene()
-{
-  shape = new NGL.Shape('shape');
-  //vectorshape = new NGL.Shape('vectorshape');
-  stage = new NGL.Stage('viewport', {  backgroundColor: "rgb(128, 128, 128)",
-                                      tooltip:false, // create our own tooltip from a div element
-                                      fogNear: 100, fogFar: 100 });
-  stage.setParameters( { cameraType: "%s" } );
-
-  /*
-  canvas = stage.viewer.renderer.domElement;
-  const ctx = canvas.getContext('webgl', {
-    desynchronized: true,
-    preserveDrawingBuffer: true
-  });
-  */
-
-  MakeHKL_Axis(shape);
-
-  %s
-
-  shapeComp = stage.addComponentFromObject(shape);
-  repr = shapeComp.addRepresentation('buffer');
-  shapeComp.autoView();
-  repr.update();
-
-  // if some radii are negative draw them with wireframe
-  %s
-  %s
-
-  if (isdebug)
-    stage.viewer.container.appendChild(debugmessage);
-
-  // avoid NGL zoomFocus messing up clipplanes positions. So reassign those signals to zoomDrag
-  stage.mouseControls.remove("drag-shift-right");
-  stage.mouseControls.add("drag-shift-right", NGL.MouseActions.zoomDrag);
-  stage.mouseControls.remove("drag-middle");
-  stage.mouseControls.add("drag-middle", NGL.MouseActions.zoomDrag);
-  stage.mouseControls.remove('clickPick-left'); // avoid undefined move-pick when clicking on a sphere
-
-  stage.viewer.requestRender();
-  if (isdebug)
-    debugmessage.innerText = dbgmsg;
-}
-
-
-function OnUpdateOrientation()
-{
-  msg = getOrientMsg();
-  WebsockSendMsg('MouseMovedOrientation:\\n' + msg );
-}
-
-
-try
-{
-  document.addEventListener('DOMContentLoaded', function() { HKLscene() }, false );
-  document.addEventListener('mouseup', function() { OnUpdateOrientation() }, false );
-  document.addEventListener('wheel', function(e) { OnUpdateOrientation() }, false );
-  document.addEventListener('scroll', function(e) { OnUpdateOrientation() }, false );
-  // mitigate flickering on some PCs when resizing
-  document.addEventListener('resize', function() { RenderRequest() }, false );
-}
-catch(err)
-{
-  WebsockSendMsg('JavaScriptError: ' + err.stack );
-}
-
-    """ % ( self.ngl_settings.tooltip_alpha, axisfuncstr, self.camera_type, spherebufferstr, \
-           negativeradiistr, colourscriptstr)
-
-    WebsockMsgHandlestr = """
-
-
-function createElement(name, properties, style)
-{
-// utility function used in for loop over colourgradvalarray
-  var el = document.createElement(name);
-  Object.assign(el, properties);
-  Object.assign(el.style, style);
-  Object.assign(el.style,
-  {
-      display: "block",
-      position: "absolute",
-      fontFamily: "sans-serif",
-      //fontSize: "smaller",
-      fontSize: "12px",
-  }
-  );
-  return el;
-}
-
-
-function addElement(el)
-{
-// utility function used in for loop over colourgradvalarray
-  Object.assign(el.style,
-  {
-    position: "absolute",
-    zIndex: 10
-  }
-  );
-  stage.viewer.container.appendChild(el);
-}
-
-
-function addDivBox(txt, t, l, w, h, bgcolour="rgba(255, 255, 255, 0.0)")
-{
-  divbox = createElement("div",
-  {
-    innerText: txt
-  },
-  {
-    backgroundColor: bgcolour,
-    color:  "rgba(0, 0, 0, 1.0)",
-    top: t.toString() + "px",
-    left: l.toString() + "px",
-    width: w.toString() + "px",
-    height: h.toString() + "px",
-  }
-  );
-  addElement(divbox);
-}
-
-
-// Microsoft Edge users follow instructions on
-// https://stackoverflow.com/questions/31772564/websocket-to-localhost-not-working-on-microsoft-edge
-// to enable websocket connection
-
-var pagename = location.pathname.substring(1);
-var mysocket;
-
-try
-{
-  mysocket = new WebSocket('ws://127.0.0.1:%s/');
-  //mysocket.binaryType = "blob"; //"arraybuffer";
-}
-catch(err)
-{
-  alert('JavaScriptError: ' + err.stack );
-  addDivBox("Error!", window.innerHeight - 50, 20, 40, 20, rgba(100, 100, 100, 0.0));
-}
-
-
-var stage = null;
-var shape;
-var shapeComp;
-var vectorshape = null;
-var repr;
-var AA = String.fromCharCode(197); // short for angstrom
-var DGR = String.fromCharCode(176); // short for degree symbol
-var current_ttip = "";
-var ttips = [];
-var vectorreprs = [];
-var vectorshapeComps = [];
-var positions = [];
-var br_positions = [];
-var br_colours = [];
-var br_radii = [];
-var br_ttips = [];
-var colours = [];
-var alphas = [];
-var radii = [];
-var shapebufs = [];
-var br_shapebufs = [];
-var nrots = 0;
-var postrotmxflag = false;
-var cvorient = new NGL.Matrix4();
-var oldmsg = "";
-var clipFixToCamPosZ = false;
-var origclipnear;
-var origclipfar;
-var origcameraZpos;
-var nbins = %s;
-var rerendered = false;
-var expstate = "";
-var current_ttip_ids;
-var isdebug = %s;
-var tdelay = 100;
-var displaytooltips = true;
-var link = document.createElement('a');
-
-
-function WebsockSendMsg(msg)
-{
-  try
-  {
-    // Avoid "WebSocket is already in CLOSING or CLOSED state" errors when using QWebEngineView
-    // See https://stackoverflow.com/questions/48472977/how-to-catch-and-deal-with-websocket-is-already-in-closing-or-closed-state-in
-    if (mysocket.readyState === mysocket.OPEN)
-    {
-      mysocket.send(msg);
-      mysocket.send( 'Ready ' + pagename + '\\n' );
-    }
-  }
-  catch(err)
-  {
-    alert('JavaScriptError: ' + err.stack );
-    addDivBox("Error!", window.innerHeight - 50, 20, 40, 20, rgba(100, 100, 100, 0.0));
-  }
-}
-
-
-var dbgmsg = "";
-// debug message window
-var debugmessage = document.createElement("div");
-Object.assign(debugmessage.style, {
-  position: "absolute",
-  zIndex: 10,
-  pointerEvents: "none",
-  backgroundColor: "rgba(255, 255, 255, 0.8 )",
-  color: "black",
-  padding: "0.1em",
-  fontFamily: "sans-serif",
-  bottom: "10px",
-  left: "10px",
-  fontSize: "smaller",
-  display: "block"
-});
-
-
-function ReturnClipPlaneDistances()
-{
-  if (stage.viewer.parameters.clipScale == 'relative')
-    cameradist = stage.viewer.cDist;
-  if (stage.viewer.parameters.clipScale == 'absolute')
-    if (stage.viewer.cDist != 0
-         && stage.viewer.parameters.clipFar > stage.viewer.cDist
-         && stage.viewer.cDist > stage.viewer.parameters.clipNear)
-      cameradist = stage.viewer.cDist;
-    else if (stage.viewer.camera.position.z != 0
-         && stage.viewer.parameters.clipFar > -stage.viewer.camera.position.z
-         && -stage.viewer.camera.position.z > stage.viewer.parameters.clipNear)
-      cameradist = stage.viewer.camera.position.z;
-    else if (stage.viewer.camera.position.z == -stage.viewer.cDist)
-      cameradist = stage.viewer.cDist;
-    else
-      return;
-
-  msg = String( [stage.viewer.parameters.clipNear,
-                  stage.viewer.parameters.clipFar,
-                  cameradist ] )
-  WebsockSendMsg('ReturnClipPlaneDistances:\\n' + msg );
-}
-
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-
-function download(filename, text) {
-  var element = document.createElement('a');
-  element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(text));
-  element.setAttribute('download', filename);
-  //element.style.display = 'none';
-  document.body.appendChild(element);
-  element.click();
-  document.body.removeChild(element);
-}
-
-
-function syncsleep(ms) {
-  const date = Date.now();
-  let currentDate = null;
-  do {
-    currentDate = Date.now();
-  } while (currentDate - date < ms);
-}
-
-
-async function ReRender()
-{
-  await sleep(500);
-  if (shapeComp != null && rerendered==false) // workaround for QTWebEngine bug sometimes failing to render scene
-  {
-    shapeComp.autoView();
-    rerendered = true;
-    WebsockSendMsg( 'AutoViewSet ' + pagename );
-  }
-}
-
-
-async function RenderRequest()
-{
-  await sleep(100);
-  stage.viewer.requestRender();
-  WebsockSendMsg( 'RenderRequest ' + pagename );
-}
-
-// Log errors to debugger of your browser
-mysocket.onerror = function(error)
-{
-  msg = 'WebSocket Error ' + error;
-  console.log(msg);
-  dbgmsg =msg;
-};
-
-
-mysocket.onopen = function(e)
-{
-  msg = '%s now connected via websocket to ' + pagename + '\\n';
-  WebsockSendMsg(msg);
-  dbgmsg =msg;
-  rerendered = false;
-  //ReRender();
-};
-
-
-mysocket.onclose = function(e)
-{
-  msg = '%s now disconnecting from websocket ' + pagename + '\\n';
-  WebsockSendMsg(msg);
-  dbgmsg =msg;
-};
-
-
-mysocket.onmessage = function(e)
-{
-  var c,
-  si;
-  WebsockSendMsg('\\n    Browser: Got ' + e.data ); // tell server what it sent us
-  try
-  {
-    var datval = e.data.split(":\\n");
-    var msgtype = datval[0];
-    var val = datval[1].split(",");
-
-    if (msgtype === "alpha")
-    {
-      bin = parseInt(val[0]);
-      alphas[bin] = parseFloat(val[1]);
-      shapebufs[bin].setParameters({opacity: alphas[bin]});
-      for (var g=0; g < nrots; g++ )
-        br_shapebufs[bin][g].setParameters({opacity: alphas[bin]});
-      //stage.viewer.requestRender();
-      RenderRequest();
-    }
-
-    if (msgtype === "colour")
-    {
-      bin = parseInt(val[0]);
-      si =  parseInt(val[1]);
-      colours[bin][3*si] = parseFloat(val[2]);
-      colours[bin][3*si+1] = parseFloat(val[3]);
-      colours[bin][3*si+2] = parseFloat(val[4]);
-      shapebufs[bin].setAttributes({ color: colours[bin] });
-
-      for (var g=0; g < nrots; g++ )
-      {
-        br_colours[bin][3*si] = parseFloat(val[2]);
-        br_colours[bin][3*si+1] = parseFloat(val[3]);
-        br_colours[bin][3*si+2] = parseFloat(val[4]);
-        br_shapebufs[bin][g].setAttributes({ color: br_colours[bin] });
-      }
-      //stage.viewer.requestRender();
-      RenderRequest();
-    }
-
-    if (msgtype === "DisplayTooltips")
-    {
-      displaytooltips = val[0];
-      stage.signals.hovered.removeAll();
-      stage.signals.clicked.removeAll();
-      if (displaytooltips == "click")
-        stage.signals.clicked.add( PickingProxyfunc );
-      if (displaytooltips == "hover")
-        stage.signals.hovered.add( PickingProxyfunc );
-    }
-
-    if (msgtype === "ShowThisTooltip")
-    {
-      current_ttip = eval(datval[1]).split("\\n\\n")[0];
-      current_ttip_ids = eval(datval[1]).split("\\n\\n")[1];
-    }
-
-    if (msgtype === "TooltipOpacity")
-    {
-      Object.assign(tooltip.style, {
-        backgroundColor: "rgba(255, 255, 255, " + val[0] + " )",
-      });
-    }
-
-    if (msgtype === "Redraw")
-    {
-      //stage.viewer.requestRender();
-      RenderRequest();
-    }
-
-    if (msgtype === "ReOrient")
-    {
-      WebsockSendMsg( 'Reorienting ' + pagename );
-      sm = new Float32Array(16);
-      for (j=0; j<16; j++)
-      {
-        sm[j] = parseFloat(val[j]);
-        if (isNaN( sm[j] ))
-          return; // do nothing just in case
-      }
-
-      var m = new NGL.Matrix4();
-      m.fromArray(sm);
-      stage.viewerControls.orient(m);
-      //stage.viewer.renderer.setClearColor( 0xffffff, 0.01);
-      //stage.viewer.requestRender();
-      RenderRequest();
-      msg = getOrientMsg();
-      WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-    }
-
-    if (msgtype === "Reload")
-    {
-    // refresh browser with the javascript file
-      if (stage != null)
-      {
-        msg = getOrientMsg();
-        WebsockSendMsg('OrientationBeforeReload:\\n' + msg );
-      }
-      WebsockSendMsg( 'Refreshing ' + pagename );
-      window.location.reload(true);
-      // Now we are gone. A new javascript file has been loaded in the browser
-    }
-
-    if (msgtype.includes("Expand") )
-    {
-      WebsockSendMsg( 'Expanding data...' );
-
-      if (msgtype == "Expand" && expstate == "")
-        return;
-
-      if (msgtype == "ExpandP1" && expstate == "isP1Expanded")
-        return;
-
-      if (msgtype == "ExpandFriedel" && expstate == "isFriedelExpanded")
-        return;
-
-      if (msgtype == "ExpandP1Friedel" && expstate == "isP1FriedelExpanded")
-        return;
-
-      // delete the shapebufs[] that holds the positions[] arrays
-      shapeComp.removeRepresentation(repr);
-      // remove shapecomp from stage first
-      stage.removeComponent(shapeComp);
-
-      br_positions = [];
-      br_colours = [];
-      br_radii = [];
-      br_ttips = [];
-      br_shapebufs = [];
-      var nexpandrefls = 0;
-
-      //alert('rotations:\\n' + val);
-      // Rotation matrices are concatenated to a string of floats
-      // separated by line breaks between each roation matrix
-      rotationstrs = datval[1].split("\\n");
-      var Rotmats = [];
-      var r = new NGL.Vector3();
-
-      for (var rotmxidx=0; rotmxidx < rotationstrs.length; rotmxidx++ )
-      {
-        Rotmats.push( new NGL.Matrix3() );
-        // convert string of rotation matrix elements into a Matrix3
-        var elmstrs = rotationstrs[rotmxidx].split(",");
-        for (j=0; j<9; j++)
-          Rotmats[rotmxidx].elements[j] = parseFloat(elmstrs[j]);
-      }
-
-      var Imx = new NGL.Matrix3();
-      Imx.identity(); // for testing
-      if ( !(msgtype.includes("P1")) && rotationstrs.length == 1 && Rotmats[0].equals(Imx) )
-        throw "Only the identity matrix is provided. That means no P1 expansion of reflections!";
-
-      for (var bin=0; bin<nbins; bin++)
-      {
-        var nsize = positions[bin].length/3; // number of reflections in each bin
-        var csize = nsize*3;
-        var nsize3 = nsize*3;
-        var anoexp = false;
-
-        if (msgtype.includes("Friedel") )
-        {
-          anoexp = true;
-          csize = nsize*6;
-        }
-        br_positions.push( [] );
-        br_shapebufs.push( [] );
-        br_colours.push( [] );
-        br_radii.push( [] );
-        br_ttips.push( [] );
-
-        br_colours[bin] = colours[bin];
-        br_radii[bin] = radii[bin];
-        if (anoexp)
-        {
-          var colarr = [];
-          var cl = colours[bin].length;
-          for (var i=0; i<cl; i++)
-          {
-            colarr[i] = colours[bin][i];
-            colarr[i+cl] = colours[bin][i];
-          }
-          br_colours[bin] = new Float32Array(colarr);
-
-          var radiiarr = [];
-          var rl = radii[bin].length;
-          for (var i=0; i<rl; i++)
-          {
-            radiiarr[i] = radii[bin][i];
-            radiiarr[i+rl] = radii[bin][i];
-          }
-          br_radii[bin] = new Float32Array(radiiarr);
-        }
-
-        nrots = 0;
-        nexpandrefls = 0;
-        for (var rotmxidx=0; rotmxidx < rotationstrs.length; rotmxidx++ )
-        {
-          if (rotationstrs[rotmxidx].length < 1 )
-            continue;
-          nrots++;
-
-          br_positions[bin].push( [] );
-          br_shapebufs[bin].push( [] );
-          br_ttips[bin].push( [] );
-          Object.assign(br_ttips[bin][rotmxidx], ttips[bin]); // deep copy the ttips[bin] object
-          br_ttips[bin][rotmxidx][0] = rotmxidx;
-          br_positions[bin][rotmxidx] = new Float32Array( csize );
-          nexpandrefls += csize;
-
-          for (var i=0; i<nsize; i++)
-          {
-            idx= i*3;
-            r.x = positions[bin][idx];
-            r.y = positions[bin][idx+1];
-            r.z = positions[bin][idx+2];
-
-            r.applyMatrix3(Rotmats[rotmxidx])
-
-            br_positions[bin][rotmxidx][idx] = r.x;
-            br_positions[bin][rotmxidx][idx + 1] = r.y;
-            br_positions[bin][rotmxidx][idx + 2] = r.z;
-
-            if (anoexp)
-            {
-              r.negate(); // inversion for anomalous pair
-              br_positions[bin][rotmxidx][nsize3 + idx] = r.x;
-              br_positions[bin][rotmxidx][nsize3 + idx + 1] = r.y;
-              br_positions[bin][rotmxidx][nsize3 + idx + 2] = r.z;
-            }
-          }
-
-          br_shapebufs[bin][rotmxidx] = new NGL.SphereBuffer({
-              position: br_positions[bin][rotmxidx],
-              color: br_colours[bin],
-              radius: br_radii[bin],
-              // rotmxidx works as the id of the rotation of applied symmetry operator when creating tooltip for an hkl
-              picking: br_ttips[bin][rotmxidx],
-              } %s  );
-          shape.addBuffer(br_shapebufs[bin][rotmxidx]);
-          //WebsockSendMsg( 'Memory usage: ' + String(window.performance.memory.totalJSHeapSize) +
-          //        ', ' + String(window.performance.memory.totalJSHeapSize) );
-        }
-        if (nexpandrefls == nsize*3)
-          expstate = "";
-        if (nexpandrefls == nsize*6)
-          expstate = "isFriedelExpanded";
-        if (nexpandrefls == nsize*3*nrots && nrots > 1)
-          expstate = "isP1Expanded";
-        if (nexpandrefls == nsize*6*nrots && nrots > 1)
-          expstate = "isP1FriedelExpanded";
-      }
-      MakeHKL_Axis(shape);
-
-      shapeComp = stage.addComponentFromObject(shape);
-      repr = shapeComp.addRepresentation('buffer');
-
-      for (var bin=0; bin<nbins; bin++)
-      {
-        for (var rotmxidx=0; rotmxidx < nrots; rotmxidx++ )
-        {
-          br_shapebufs[bin][rotmxidx].setParameters({opacity: alphas[bin]});
-        }
-      }
-
-      //stage.viewer.requestRender();
-      RenderRequest();
-      WebsockSendMsg( 'Done ' + msgtype );
-    }
-
-    if (msgtype === "DisableMouseRotation")
-    {
-      WebsockSendMsg( 'Fix mouse rotation' + pagename );
-      stage.mouseControls.remove("drag-left");
-      stage.mouseControls.remove("scroll-ctrl");
-      stage.mouseControls.remove("scroll-shift");
-    }
-
-    if (msgtype === "EnableMouseRotation")
-    {
-      WebsockSendMsg( 'Can mouse rotate ' + pagename );
-      stage.mouseControls.add("drag-left", NGL.MouseActions.rotateDrag);
-      stage.mouseControls.add("scroll-ctrl", NGL.MouseActions.scrollCtrl);
-      stage.mouseControls.add("scroll-shift", NGL.MouseActions.scrollShift);
-    }
-
-    if (msgtype === "RotateStage")
-    {
-      WebsockSendMsg( 'Rotating stage ' + pagename );
-
-      var sm = new Float32Array(9);
-      var m4 = new NGL.Matrix4();
-
-      for (j=0; j<9; j++)
-        sm[j] = parseFloat(val[j]);
-
-      // GL matrices are the transpose of conventional rotation matrices
-      m4.set( sm[0], sm[3], sm[6], 0.0,
-              sm[1], sm[4], sm[7], 0.0,
-              sm[2], sm[5], sm[8], 0.0,
-              0.0,   0.0,   0.0,   1.0
-      );
-      stage.viewerControls.orient(m4);
-      if (val[9]=="verbose")
-        postrotmxflag = true;
-      ReturnClipPlaneDistances();
-      //ReRender();
-      //stage.viewer.requestRender();
-      RenderRequest();
-      sleep(100).then(()=> {
-          msg = getOrientMsg();
-          WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-        }
-      );
-    }
-
-    if (msgtype === "SpinAnimate")
-    {
-      WebsockSendMsg( 'SpinAnimating ' + pagename );
-      //strs = datval[1].split("\\n");
-      var r = new Float32Array(3);
-      //var elmstrs = strs[0].split(",");
-      for (j=0; j<3; j++)
-        r[j] = parseFloat(val[j]);
-      if (r[0] == 0.0 && r[1] == 0.0 && r[2] == 0.0)
-      {
-        // default bindings as per ngl\src\controls\mouse-actions.ts
-        stage.mouseControls.add("drag-ctrl-left", NGL.MouseActions.panDrag);
-        stage.mouseControls.add("drag-ctrl-right", NGL.MouseActions.focusScroll);
-        stage.mouseControls.add("drag-shift-left", NGL.MouseActions.zoomDrag);
-        stage.mouseControls.add("drag-shift-right", NGL.MouseActions.zoomDrag);
-        stage.mouseControls.add("drag-middle", NGL.MouseActions.zoomDrag);
-        stage.mouseControls.add("drag-right", NGL.MouseActions.panDrag);
-        stage.mouseControls.add("drag-left", NGL.MouseActions.rotateDrag);
-        stage.mouseControls.add("scroll-ctrl", NGL.MouseActions.scrollCtrl);
-        stage.mouseControls.add("scroll-shift", NGL.MouseActions.scrollShift);
-        stage.setSpin(false);
-      }
-      else
-      {
-        stage.spinAnimation.axis.set(r[0], r[1], r[2]);
-
-        stage.mouseControls.remove("drag-ctrl-left");
-        stage.mouseControls.remove("drag-ctrl-right");
-        stage.mouseControls.remove("drag-shift-left");
-        stage.mouseControls.remove("drag-shift-right");
-        stage.mouseControls.remove("drag-middle");
-        stage.mouseControls.remove("drag-right");
-        stage.mouseControls.remove("drag-left");
-        stage.mouseControls.remove("scroll-ctrl");
-        stage.mouseControls.remove("scroll-shift");
-        stage.setSpin(true);
-      }
-    }
-
-    if (msgtype === "TranslateHKLpoints")
-    {
-      WebsockSendMsg( 'Translating HKLs ' + pagename );
-      strs = datval[1].split("\\n");
-      var sm = new Float32Array(3);
-      var elmstrs = strs[0].split(",");
-      for (j=0; j<3; j++)
-        sm[j] = parseFloat(elmstrs[j]);
-      shapeComp.setPosition([ sm[0], sm[1], sm[2] ]);
-      //stage.viewer.requestRender();
-      RenderRequest();
-      sleep(100).then(()=> {
-          msg = getOrientMsg();
-          WebsockSendMsg('CurrentViewOrientation:\\n' + msg );
-        }
-      );
-    }
-
-    function DeleteVectors(reprname)
-    {
-      thisrepr = stage.getRepresentationsByName(reprname);
-      var wasremoved = false;
-      for (i=0; i<stage.compList.length; i++)
-        if (stage.compList[i].reprList[0].name == reprname)
-        {
-          thiscomp = stage.compList[i];
-          thiscomp.removeRepresentation(thisrepr);
-          stage.removeComponent(thiscomp);
-          wasremoved = true;
-        }
-      return wasremoved;
-    };
-
-    if (msgtype === "AddVector")
-    {
-      var r1 = new Float32Array(3);
-      var r2 = new Float32Array(3);
-      var rgb = new Float32Array(3);
-      for (j=0; j<3; j++)
-      {
-        r1[j] = parseFloat(val[j]);
-        r2[j] = parseFloat(val[j+3]);
-        rgb[j]= parseFloat(val[j+6]);
-      }
-      radius = parseFloat(val[11]);
-
-      if (vectorshape == null)
-        vectorshape = new NGL.Shape('vectorshape');
-
-      vectorshape.addArrow( r1, r2 , [rgb[0], rgb[1], rgb[2]], radius);
-      if (val[6] !== "") {
-        var txtR = [ (r1[0] + r2[0])/2.0, (r1[1] + r2[1])/2.0, (r1[2] + r2[2])/2.0 ];
-        vectorshape.addText( txtR, [rgb[0], rgb[1], rgb[2]], fontsize, val[9] );
-      }
-      // if reprname is supplied with a vector then make a representation named reprname
-      // of this and all pending vectors stored in vectorshape and render them.
-      // Otherwise just accummulate the new vector
-      var reprname = val[10].trim();
-      if (reprname != "")
-      {
-        DeleteVectors(reprname); // delete any existing vectors with the same name
-        vectorshapeComps.push( stage.addComponentFromObject(vectorshape) );
-        vectorreprs.push(
-          vectorshapeComps[vectorshapeComps.length-1].addRepresentation('vecbuf',
-                                                                      { name: reprname} )
-        );
-        vectorshape = null;
-        //stage.viewer.requestRender();
-        RenderRequest();
-      }
-    }
-
-    if (msgtype === "RemoveVectors")
-    {
-      var reprname = val[0].trim(); // elmstrs[0].trim();
-      // if reprname is supplied only remove vectors with that name
-      var reprnamegone = false;
-      var clipvecgone = false;
-      var unitcellgone = false;
-      var reciprocunitcellgone = false;
-      if (reprname != "")
-        reprnamegone = DeleteVectors(reprname);
-      else // otherwise remove all vectors
-      {
-        clipvecgone = DeleteVectors("clip_vector");
-        unitcellgone = DeleteVectors("unitcell");
-        reciprocunitcellgone = DeleteVectors("reciprocal_unitcell");
-      }
-      if (reprnamegone || clipvecgone || unitcellgone || reciprocunitcellgone)
-        //stage.viewer.requestRender();
-        RenderRequest();
-    }
-
-    if (msgtype === "SetMouseSpeed")
-    {
-      stage.trackballControls.rotateSpeed = parseFloat(val[0]);
-    }
-
-    if (msgtype === "GetMouseSpeed")
-    {
-      msg = String( [stage.trackballControls.rotateSpeed] )
-      WebsockSendMsg('ReturnMouseSpeed:\\n' + msg );
-    }
-
-    if (msgtype === "SetClipPlaneDistances")
-    {
-      var near = parseFloat(val[0]);
-      var far = parseFloat(val[1]);
-      origcameraZpos = parseFloat(val[2]);
-      stage.viewer.parameters.clipMode =  'camera';
-      // clipScale = 'absolute' means clip planes are using scene dimensions
-      stage.viewer.parameters.clipScale = 'absolute';
-      clipFixToCamPosZ = true;
-
-      if (near >= far )
-      { // default to no clipping if near >= far
-        stage.viewer.parameters.clipMode = 'scene';
-      // clipScale = 'relative' means clip planes are in percentage
-        stage.viewer.parameters.clipScale = 'relative';
-        clipFixToCamPosZ = false;
-        near = 0;
-        far = 100;
-      }
-      else
-        stage.viewer.camera.position.z = origcameraZpos;
-      stage.viewer.parameters.clipNear = near;
-      stage.viewer.parameters.clipFar = far;
-      origclipnear = near;
-      origclipfar = far;
-      //stage.viewer.requestRender();
-      RenderRequest();
-    }
-
-    if (msgtype === "GetClipPlaneDistances")
-      ReturnClipPlaneDistances();
-
-    if (msgtype === "GetBoundingBox")
-    {
-      msg = String( [stage.viewer.boundingBoxSize.x,
-                     stage.viewer.boundingBoxSize.y,
-                     stage.viewer.boundingBoxSize.z]
-                  )
-      WebsockSendMsg('ReturnBoundingBox:\\n' + msg );
-    }
-
-    if (msgtype ==="JavaScriptCleanUp")
-    {
-      stage.removeAllComponents();
-      stage.mouseObserver.dispose();
-      ttips = [];
-      vectorreprs = [];
-      vectorshapeComps = [];
-      positions = [];
-      br_positions = [];
-      br_colours = [];
-      br_radii = [];
-      br_ttips = [];
-      colours = [];
-      alphas = [];
-      radii = [];
-      shapebufs = [];
-      br_shapebufs = [];
-      shape = null;
-      shapeComp = null;
-      vectorshape = null;
-      repr = null;
-      stage.dispose();
-      stage = null;
-      WebsockSendMsg('CleanUp:\\nDestroying JavaScript objects');
-      document = null;
-    }
-
-    if (msgtype === "InjectNewReflections")
-    {
-      WebsockSendMsg( 'Rendering new reflections ' + pagename );
-      var nrefl = parseInt(val.length/7);
-      if (nrefl !== val.length/7)
-      {
-        alert("Mismatch in array of reflections, colours and radii!")
-        return;
-      }
-
-      // delete the shapebufs[] that holds the positions[] arrays
-      shapeComp.removeRepresentation(repr);
-      // remove shapecomp from stage first
-      stage.removeComponent(shapeComp);
-
-      positions = [];
-      colours = [];
-      radii = [];
-      alphas = [];
-      shapebufs = [];
-      ttips = [];
-      shapebufs = [];
-      nbins = 1; // currently no binning when injecting reflections
-
-      positions_ = []; // dummy variables for conforming to binning scheme above
-      colours_ = [];   // as used when expanding reflections
-      radii_ = [];
-      ttips_ = [-1]
-
-      for (j=0; j<nrefl; j++)
-      {
-        positions_.push( parseFloat(val[7*j]) );
-        positions_.push( parseFloat(val[7*j+1]) );
-        positions_.push( parseFloat(val[7*j+2]) );
-        colours_.push( parseFloat(val[7*j+3]) );
-        colours_.push( parseFloat(val[7*j+4]) );
-        colours_.push( parseFloat(val[7*j+5]) );
-        radii_.push( parseFloat(val[7*j+6]) );
-        ttips_.push(j)
-      }
-
-      positions.push( new Float32Array( positions_ ));
-      colours.push( new Float32Array( colours_ ));
-      radii.push( new Float32Array( radii_ ));
-      ttips.push(ttips_);
-
-      shapebufs.push( new NGL.SphereBuffer({
-        position: positions[0],
-        color: colours[0],
-        radius: radii[0],
-        picking: ttips[0],
-        })
-      );
-      shape.addBuffer(shapebufs[0]);
-      alphas.push(1.0);
-
-      MakeHKL_Axis(shape);
-      shapeComp = stage.addComponentFromObject(shape);
-      repr = shapeComp.addRepresentation('buffer');
-      //stage.viewer.requestRender();
-      RenderRequest();
-      WebsockSendMsg('Injected new reflections');
-    }
-
-    if (msgtype === "SetAutoView")
-    {
-      if (shapeComp != null) // workaround for QTWebEngine bug sometimes failing to render scene
-        shapeComp.autoView();
-      WebsockSendMsg('AutoViewSet ' + pagename);
-    }
-
-    if (msgtype === "MakeImage")
-    {
-      filename = val[0];
-      stage.viewer.makeImage( {
-                factor: 1,
-                antialias: true,
-                trim: false,
-                transparent: false
-            } ).then( function( blob ){
-              //NGL.download( blob, "example.png" );
-              //bytes = new Uint8Array(blob.size);
-              //bytes.map((byte, i) => blob.slice(i));
-              //b64 = btoa(blob);
-              var reader = new FileReader();
-              reader.readAsDataURL(blob);
-              reader.onloadend = function()
-              {
-                var base64data = reader.result.replace(/^data:.+;base64,/, '');
-                WebsockSendMsg('Imageblob\\n' + base64data);
-                /*
-                var msize = 500;
-                var j = 0;
-                var chunk = base64data.slice(j*msize, (j+1)*msize);
-                while (chunk != "")
-                {
-                  if (chunk.length <=0)
-                    break;
-                  msg = 'ImageChunk_' + String(j) + '\\n' + chunk
-                  WebsockSendMsg(msg);
-                  //alert("chunk size: " + String(chunk.length));
-                  syncsleep(50);
-                  //WebsockSendMsg(msg);
-                  //WebsockSendMsg('ImageChunk_' + String(j) + '\\n' + 'Waffle');
-                  j++;
-                  chunk = base64data.slice(j*msize, (j+1)*msize);
-                }
-                alert("last chunk: " + String(chunk));
-                WebsockSendMsg('ImageSent\\n');
-                alert("ImageSent");
-                */
-                //download("base64data.txt", base64data);
-              }
-              //WebsockSendMsg('Imageblob\\n' + reader.result);
-              //WebsockSendMsg('Imageblob\\n' + String(bytes) );
-
-              var canvas = stage.viewer.renderer.domElement;
-              var ctx = canvas.getContext("2d");
-              /*
-              baseimage        = new Image();
-              baseimage.onload = function() {
-                  ctx.drawImage(baseimage,1,1);
-                  //var dataURL = canvas.toDataURL("image/png");
-                  //document.getElementById('canvasImg').src = dataURL;
-              }
-              */
-
-              link.setAttribute('download', filename);
-              var imgurl = canvas.toDataURL("image/png"); //.replace("image/png", "image/octet-stream");
-
-              //var w=window.open(imgurl);
-              //w.document.write("<img src='"+imgurl+"' alt='from canvas'/>");
-              //location.href = imgurl;
-
-              link.src = imgurl;
-              link.setAttribute('href', imgurl);
-              //document.body.appendChild(link);
-              //link.click();
-
-              // wait for the link to be added to the document
-              /*
-              window.requestAnimationFrame(function () {
-                var event = new MouseEvent('click');
-                link.dispatchEvent(event);
-                //document.body.removeChild(link);
-              });
-               */
-        } );
-
-      //WebsockSendMsg('MakeImage ' + pagename);
-    }
-
-    if (msgtype === "Testing")
-    {
-      // test something new
-      /*
-      var newradii = radii[0].map(function(element) {
-        return element*1.5;
-      });
-      shapebufs[0].setAttributes({
-          radius: newradii
-      })
-      repr = shapeComp.addRepresentation('buffer');
-      //stage.viewer.requestRender();
-      RenderRequest();
-      */
-    }
-    WebsockSendMsg('Received message: ' + msgtype );
-    if (isdebug)
-      debugmessage.innerText = dbgmsg;
-  }
-
-  catch(err)
-  {
-    WebsockSendMsg('JavaScriptError: ' + err.stack );
-  }
-
-};
-
-    """ %(self.websockport, cntbin, str(self.verbose>=2).lower(), self.__module__, self.__module__, qualitystr )
+      self.NGLscriptstr = HKLJavaScripts.NGLscriptstr % ( self.ngl_settings.tooltip_alpha,
+        '\"' + self.camera_type + '\"', axisfuncstr, spherebufferstr,
+        negativeradiistr, colourscriptstr)
+
+    WebsockMsgHandlestr = HKLJavaScripts.WebsockMsgHandlestr %(self.websockport, cntbin,
+             str(self.verbose>=2).lower(), self.__module__, self.__module__, qualitystr )
 
     self.NGLscriptstr = WebsockMsgHandlestr + self.NGLscriptstr
     if self.jscriptfname:
@@ -2592,62 +1384,57 @@ mysocket.onmessage = function(e)
       if self.WaitforHandshake():
         nwait = 0
         while self.viewmtrx is None and nwait < self.handshakewait:
-          time.sleep(self.sleeptime)
+          #time.sleep(self.sleeptime)
+          self.WBmessenger.Sleep(self.sleeptime)
           nwait += self.sleeptime
       self.GetClipPlaneDistances()
       self.GetBoundingBox()
       self.OrigClipFar = self.clipFar
       self.OrigClipNear = self.clipNear
       self.SetMouseSpeed( self.ngl_settings.mouse_sensitivity )
+      self.isnewfile = False
     self.sceneisdirty = False
     self.lastscene_id = self.viewerparams.scene_id
 
 
-  def OnWebsocketClientMessage(self, client, server, message):
-    if self.viewerparams.scene_id is None or self.miller_array is None:
-      return
+  def ProcessMessage(self, message):
     try:
-      if message != "":
+      if sys.version_info[0] > 2:
+        ustr = str
+      else:
+        ustr = unicode
+      if isinstance(message, bytes) and isinstance(self.lastmsg, ustr) and "Imageblob" in self.lastmsg:
+        self.mprint( "Saving image to file", verbose=1)
+        with open( self.imagename, "wb") as imgfile:
+          imgfile.write( message)
+
+      if isinstance(message, ustr) and message != "":
         if "Orientation" in message:
           self.ProcessOrientationMessage(message)
         elif 'Received message:' in message:
           self.mprint( message, verbose=2)
         elif "websocket" in message:
           self.mprint( message, verbose=1)
+        elif "Refreshing" in message or "disconnecting" in message:
+          self.mprint( message, verbose=1)
+          self.WBmessenger.Sleep(self.sleeptime)
         elif "AutoViewSet" in message:
           self.set_volatile_params()
-        elif "JavaScriptCleanUp:" in message:
+        elif "JavaScriptCleanUpDone:" in message:
           self.mprint( message, verbose=1)
-          self.StopThreads()
+          self.WBmessenger.Sleep(0.5) # time for browser to clean up
+          if not self.isnewfile:
+            self.WBmessenger.StopWebsocket()
         elif "JavaScriptError:" in message:
           self.mprint( message, verbose=0)
         elif "Expand" in message:
-          self.mprint( message, verbose=0)
-          #raise Sorry(message)
+          self.mprint( message, verbose=2)
+        elif "Connection lost" in message:
+          self.mprint( message, verbose=1)
         elif "Imageblob" in message:
-          datastr = message[ message.find("\n") + 1: ]
-          with open( self.imagename, "wb") as imgfile:
-            #datastr += "=" * ((4 - len(datastr) % 4) % 4)
-            #datastr = datastr[(len('data:image/png;base64,')):]
-            #blob = base64.b64decode(datastr2)
-            #blob = base64.urlsafe_b64decode(datastr)
-            #blob = base64.b64decode(datastr + '=' * (-len(datastr) % 4) )
-            blob = base64.b64decode(datastr )
-            imgfile.write(blob)
-        elif "ImageChunk" in message:
-          self.imgcount +=1
-          self.imgdatastr += message[ message.find("\n") + 1: ]
-          print( "imagechunk " + str(self.imgcount))
-        elif "ImageSent" in message:
-          with open( self.imagename, "wb") as imgfile:
-            datastr = self.imgdatastr #[(len('data:image/png;base64,')):]
-            blob = base64.b64decode(datastr + b'===' )
-            imgfile.write(blob)
-          self.imgdatastr = ""
-          self.imgcount = 0
-          print( "ImageSaved ")
-        #elif "MakeImage" in message:
-        #  self.mprint( "Image saved to storage", verbose=0)
+          self.mprint( "Image to be received", verbose=1)
+        elif "ImageWritten" in message:
+          self.mprint( "Image saved to file", verbose=0)
         elif "ReturnClipPlaneDistances:" in message:
           datastr = message[ message.find("\n") + 1: ]
           lst = datastr.split(",")
@@ -2680,14 +1467,13 @@ mysocket.onmessage = function(e)
           else:
             hklid = hklid % len(hkls)
             ttip = self.GetTooltipOnTheFly(hklid, sym_id, anomalous=True)
-          #self.send_msg_to_browser("ShowThisTooltip", ttip)
           self.AddToBrowserMsgQueue("ShowThisTooltip", ttip)
         else:
           if "Ready " in message:
             self.mprint( message, verbose=5)
-        self.lastmsg = message
     except Exception as e:
       self.mprint( to_str(e) + "\n" + traceback.format_exc(limit=10), verbose=0)
+    self.lastmsg = message
 
 
   def GetCameraPosRotTrans(self, viewmtrx):
@@ -2760,98 +1546,18 @@ Distance: %s
 
   def WaitforHandshake(self, sec=5):
     nwait = 0
-    while not self.browserisopen :
-      time.sleep(self.sleeptime)
+    while not self.WBmessenger.browserisopen :
+      #time.sleep(self.sleeptime)
+      self.WBmessenger.Sleep(self.sleeptime)
       nwait += self.sleeptime
       if nwait > sec:
         return False
     return True
 
 
-  def AddToBrowserMsgQueue(self, msgtype, msg=""):
-    self.msgqueue.append( (msgtype, msg) )
-
-
-  def WebBrowserMsgQueue(self):
-    try:
-      while True:
-        nwait = 0.0
-        sleep(self.sleeptime)
-        if self.javascriptcleaned:
-          self.mprint("Shutting down WebBrowser message queue", verbose=1)
-          return
-        if len(self.msgqueue):
-          pendingmessagetype, pendingmessage = self.msgqueue[0]
-          gotsent = self.send_msg_to_browser(pendingmessagetype, pendingmessage)
-          while not self.browserisopen:  #self.websockclient:
-            sleep(self.sleeptime)
-            nwait += self.sleeptime
-            if nwait > self.handshakewait or self.javascriptcleaned or not self.viewerparams.scene_id is not None:
-              return
-          if gotsent:
-            self.msgqueue.remove( self.msgqueue[0] )
-          #if self.was_disconnected:
-          #  nwait2 = 0.0
-          #  while nwait2 < self.handshakewait:
-          #    nwait2 += self.sleeptime
-          #  self.ReloadNGL()
-# if the html content is huge the browser will be unresponsive until it has finished
-# reading the html content. This may crash this thread. So try restarting this thread until
-# browser is ready
-    except Exception as e:
-      self.mprint( str(e) + ", Restarting WebBrowserMsgQueue\n" \
-                         + traceback.format_exc(limit=10), verbose=2)
-      self.websockclient = None
-      self.WebBrowserMsgQueue()
-
-
-  def OnConnectWebsocketClient(self, client, server):
-    self.websockclient = client
-    self.mprint( "Browser connected:" + str( self.websockclient ), verbose=1 )
-    if self.was_disconnected:
-      self.was_disconnected = False
-    if self.lastviewmtrx and self.viewerparams.scene_id is not None:
-      self.set_volatile_params()
-      self.mprint( "Reorienting client after refresh:" + str( self.websockclient ), verbose=2 )
-      self.AddToBrowserMsgQueue("ReOrient", self.lastviewmtrx)
-    else:
-      self.SetAutoView()
-
-
-  def OnDisconnectWebsocketClient(self, client, server):
-    self.mprint( "Browser disconnected:" + str( client ), verbose=1 )
-    self.was_disconnected = True
-
-
-  def send_msg_to_browser(self, msgtype, msg=""):
-    message = u"" + msgtype + self.msgdelim + str(msg)
-    if self.websockclient:
-      nwait = 0.0
-      while not ("Ready" in self.lastmsg or "tooltip_id" in self.lastmsg \
-        or "CurrentViewOrientation" in self.lastmsg or "AutoViewSet" in self.lastmsg \
-        or "ReOrient" in self.lastmsg or self.websockclient is None):
-        sleep(self.sleeptime)
-        nwait += self.sleeptime
-        if nwait > 2.0 and self.browserisopen:
-          self.mprint("ERROR: No handshake from browser!", verbose=0 )
-          self.mprint("failed sending " + msgtype, verbose=1)
-          self.mprint("Reopening webpage again", verbose=0)
-          break
-    if self.browserisopen and self.websockclient is not None:
-      try:
-        self.server.send_message(self.websockclient, message )
-        return True
-      except Exception as e:
-        self.mprint( str(e) + "\n" + traceback.format_exc(limit=10), verbose=1)
-        self.websockclient = None
-        return False
-    else:
-      return self.OpenBrowser()
-
-
-
   def OpenBrowser(self):
-    if self.viewerparams.scene_id is not None and not (self.websockclient or self.browserisopen):
+    if self.viewerparams.scene_id is not None and not self.WBmessenger.websockclient \
+       and not self.WBmessenger.browserisopen or self.isnewfile:
       NGLlibpath = libtbx.env.under_root(os.path.join("modules","cctbx_project","crys3d","hklview","ngl.js") )
       htmlstr = self.hklhtml %(NGLlibpath, os.path.abspath( self.jscriptfname))
       htmlstr += self.htmldiv
@@ -2861,47 +1567,19 @@ Distance: %s
       self.url = self.url.replace("\\", "/")
       self.mprint( "Writing %s and connecting to its websocket client" %self.hklfname, verbose=1)
       if self.UseOSBrowser=="default":
-        if not webbrowser.open(self.url, new=1):
+        if not webbrowser.open(self.url, new=0):
           self.mprint("Could not open the default web browser")
           return False
       if self.UseOSBrowser != "default" and self.UseOSBrowser != "":
         browserpath = self.UseOSBrowser + " %s"
-        if not webbrowser.get(browserpath).open(self.url, new=1):
+        if not webbrowser.get(browserpath).open(self.url, new=0):
           self.mprint("Could not open web browser, %s" %self.UseOSBrowser)
           return False
       self.SendInfoToGUI({ "html_url": self.url } )
-      self.browserisopen = True
-      self.isnewfile = False
-
-
-  def StartWebsocket(self):
-    self.server = WebsocketServer(self.websockport, host='127.0.0.1')
-    if not self.server:
-      raise Sorry("Could not connect to web browser")
-    self.server.set_fn_new_client(self.OnConnectWebsocketClient)
-    self.server.set_fn_client_left(self.OnDisconnectWebsocketClient)
-    self.server.set_fn_message_received(self.OnWebsocketClientMessage)
-    self.wst = threading.Thread(target=self.server.run_forever)
-    self.wst.daemon = True
-    self.wst.start()
-    self.msgqueuethrd = threading.Thread(target = self.WebBrowserMsgQueue )
-    self.msgqueuethrd.daemon = True
-    self.msgqueuethrd.start()
-
-
-  def StopThreads(self):
-    try:
-      if self.websockclient: # might not have been created if program is closed before a data set is shown
-        self.websockclient['handler'].send_text(u"", opcode=0x8)
-    except Exception as e:
-      self.mprint( to_str(e) + "\n" + traceback.format_exc(limit=10), verbose=0)
-    self.mprint("Shutting down Websocket listening thread", verbose=1)
-    self.server.shutdown()
-    self.javascriptcleaned = True
-    self.msgqueuethrd.join()
-    self.mprint("Shutting down WebsocketServer", verbose=1)
-    self.wst.join()
-    self.isterminating = True
+      self.WBmessenger.browserisopen = True
+      #self.isnewfile = False
+      return True
+    return False
 
 
   def set_camera_type(self):
@@ -2910,12 +1588,12 @@ Distance: %s
 
   def set_show_tooltips(self):
     msg = "%s" %self.ngl_settings.show_tooltips
-    self.send_msg_to_browser("DisplayTooltips", msg)
+    self.AddToBrowserMsgQueue("DisplayTooltips", msg)
 
 
   def set_tooltip_opacity(self):
     msg = "%f" %self.ngl_settings.tooltip_alpha
-    self.send_msg_to_browser("TooltipOpacity", msg)
+    self.AddToBrowserMsgQueue("TooltipOpacity", msg)
 
 
   def SetOpacities(self, bin_opacities_str):
@@ -2928,14 +1606,14 @@ Distance: %s
         bin = binopacity[1] # int(binopacity.split(",")[1])
         retstr += self.set_opacity(bin, alpha)
       self.SendInfoToGUI( { "bin_opacities": self.ngl_settings.bin_opacities } )
-    return retstr
+    self.mprint( retstr, verbose=1)
 
 
   def set_opacity(self, bin, alpha):
     if bin > self.nbinvalsboundaries-1:
       return "There are only %d bins present\n" %self.nbinvalsboundaries
     msg = "%d, %f" %(bin, alpha)
-    self.send_msg_to_browser("alpha", msg)
+    self.AddToBrowserMsgQueue("alpha", msg)
     return "Opacity %s set on bin[%s]\n" %(alpha, bin)
 
 
@@ -2945,19 +1623,18 @@ Distance: %s
 
   def ReloadNGL(self): # expensive as javascript may be several Mbytes large
     self.mprint("Rendering JavaScript...", verbose=1)
-    self.AddToBrowserMsgQueue("Reload")
+    if not self.OpenBrowser():
+      self.AddToBrowserMsgQueue("Reload")
 
 
-  def JavaScriptCleanUp(self):
+  def JavaScriptCleanUp(self, ):
     self.AddToBrowserMsgQueue("JavaScriptCleanUp")
-    if self.viewerparams.scene_id is None: # nothing is showing in the browser
-      self.StopThreads()
 
 
   def ExpandInBrowser(self, P1=True, friedel_mate=True):
-    retmsg = "Not expanding in browser\n"
     if self.sceneisdirty:
-      return retmsg
+      self.mprint( "Not expanding in browser", verbose=1)
+      return
     uc = self.miller_array.unit_cell()
     OrtMx = matrix.sqr( uc.orthogonalization_matrix())
     InvMx = OrtMx.inverse()
@@ -2967,15 +1644,16 @@ Distance: %s
     if P1:
       msgtype += "P1"
       unique_rot_ops = self.symops[ 0 : self.sg.order_p() ] # avoid duplicate rotation matrices
-      retmsg = "Expanding to P1 in browser\n"
+      retmsg = "Expanding to P1 in browser"
       if not self.miller_array.is_unique_set_under_symmetry():
-        retmsg += "Not all reflections are in the same asymmetric unit in reciprocal space.\n"
+        retmsg += "\nNot all reflections are in the same asymmetric unit in reciprocal space.\n"
         retmsg += "Some reflections might be displayed on top of one another.\n"
+      self.mprint( retmsg, verbose=1)
     else:
       unique_rot_ops = [ self.symops[0] ] # No P1 expansion. So only submit the identity matrix
     if friedel_mate and not self.miller_array.anomalous_flag():
       msgtype += "Friedel"
-      retmsg = "Expanding Friedel mates in browser\n"
+      self.mprint( "Expanding Friedel mates in browser", verbose=1)
     for i, symop in enumerate(unique_rot_ops):
       RotMx = matrix.sqr( symop.r().as_double())
       ortrot = (OrtMx * RotMx * InvMx).as_mat3()
@@ -2988,7 +1666,7 @@ Distance: %s
       msg += str_rot + "\n" # add rotation matrix to end of message string
     self.AddToBrowserMsgQueue(msgtype, msg)
     self.GetBoundingBox() # bounding box changes when the extent of the displayed lattice changes
-    return retmsg
+
 
 
   def AddVector(self, s1, s2, s3, t1, t2, t3, isreciprocal=True, label="",
@@ -3102,7 +1780,8 @@ Distance: %s
   def DrawUnitCell(self, scale=1):
     if scale is None:
       self.RemoveVectors("unitcell")
-      return "Removing real space unit cell\n"
+      self.mprint( "Removing real space unit cell", verbose=1)
+      return
     uc = self.miller_array.unit_cell()
     rad = 0.2 # scale # * 0.05 #  1000/ uc.volume()
     self.AddVector(0,0,0, scale,0,0, False, label="a", r=0.5, g=0.8, b=0.8, radius=rad)
@@ -3117,13 +1796,15 @@ Distance: %s
     self.AddVector(scale,0,0, scale,0,scale, False, r=0.8, g=0.8, b=0.5, radius=rad)
     self.AddVector(0,scale,0, 0,scale,scale, False, r=0.8, g=0.8, b=0.5, radius=rad)
     self.AddVector(scale,scale,0, scale,scale,scale, False, r=0.8, g=0.8, b=0.5, radius=rad, name="unitcell")
-    return "Adding real space unit cell\n"
+    self.mprint( "Adding real space unit cell", verbose=1)
+
 
 
   def DrawReciprocalUnitCell(self, scale=1):
     if scale is None:
       self.RemoveVectors("reciprocal_unitcell")
-      return "Removing reciprocal unit cell\n"
+      self.mprint( "Removing reciprocal unit cell", verbose=1)
+      return
     rad = 0.2 # 0.05 * scale
     self.AddVector(0,0,0, scale,0,0, label="a*", r=0.5, g=0.3, b=0.3, radius=rad)
     self.AddVector(0,0,0, 0,scale,0, label="b*", r=0.3, g=0.5, b=0.3, radius=rad)
@@ -3137,7 +1818,7 @@ Distance: %s
     self.AddVector(scale,0,0, scale,0,scale, r=0.3, g=0.3, b=0.5, radius=rad)
     self.AddVector(0,scale,0, 0,scale,scale, r=0.3, g=0.3, b=0.5, radius=rad)
     self.AddVector(scale,scale,0, scale,scale,scale, r=0.3, g=0.3, b=0.5, radius=rad, name="reciprocal_unitcell")
-    return "Adding reciprocal unit cell\n"
+    self.mprint( "Adding reciprocal unit cell", verbose=1)
 
 
   def GetUnitcellScales(self):
@@ -3217,7 +1898,8 @@ Distance: %s
     if self.WaitforHandshake():
       nwait = 0
       while self.ngl_settings.mouse_sensitivity is None and nwait < 5:
-        time.sleep(self.sleeptime)
+        #time.sleep(self.sleeptime)
+        self.WBmessenger.Sleep(self.sleeptime)
         nwait += self.sleeptime
 
 
@@ -3236,7 +1918,8 @@ Distance: %s
     if self.WaitforHandshake():
       nwait = 0
       while self.clipFar is None and nwait < self.handshakewait:
-        time.sleep(self.sleeptime)
+        #time.sleep(self.sleeptime)
+        self.WBmessenger.Sleep(self.sleeptime)
         nwait += self.sleeptime
       self.mprint("clipnear, clipfar, cameraPosZ: %s, %s %s" \
                  %(self.clipNear, self.clipFar, self.cameraPosZ), 2)
@@ -3251,7 +1934,8 @@ Distance: %s
     if self.WaitforHandshake():
       nwait = 0
       while self.boundingX is None and nwait < self.handshakewait:
-        time.sleep(self.sleeptime)
+        #time.sleep(self.sleeptime)
+        self.WBmessenger.Sleep(self.sleeptime)
         nwait += self.sleeptime
       self.mprint("boundingXYZ: %s, %s %s" \
          %(self.boundingX, self.boundingY, self.boundingZ), verbose=2)
@@ -3279,16 +1963,15 @@ Distance: %s
 
 
   def DisableMouseRotation(self): # disable rotating with the mouse
-    self.send_msg_to_browser("DisableMouseRotation")
+    self.AddToBrowserMsgQueue("DisableMouseRotation")
 
 
   def EnableMouseRotation(self): # enable rotating with the mouse
-    self.send_msg_to_browser("EnableMouseRotation")
+    self.AddToBrowserMsgQueue("EnableMouseRotation")
 
 
   def ReOrientStage(self):
     if self.viewmtrx:
-      #self.send_msg_to_browser("ReOrient", self.viewmtrx)
       self.AddToBrowserMsgQueue("SetAutoView", self.viewmtrx)
 
 
@@ -3345,7 +2028,6 @@ Distance: %s
     strdata = ""
     hklscene = hklscenes[0]
     self.scene = hklscene
-
     for i,radius in enumerate(hklscene.radii):
       ftuple = (hklscene.points[i][0], hklscene.points[i][1], hklscene.points[i][2],
                hklscene.colors[i][0], hklscene.colors[i][1], hklscene.colors[i][2], radius )
@@ -3361,8 +2043,10 @@ ngl_philstr = """
     .type = float
   bin_opacities = ""
     .type = str
-  tooltip_alpha = 0.85
+  tooltip_alpha = 0.70
     .type = float
+  fontsize = 9
+    .type = int
   show_tooltips = none *click hover
     .type = choice
   fixorientation = False
@@ -3414,7 +2098,7 @@ def new_client(client, server):
 def on_message(client, server, message):
     print message
 
-websocket.enableTrace(True)
+#websocket.enableTrace(True)
 server = WebsocketServer(7894, host='127.0.0.1')
 server.set_fn_new_client(new_client)
 server.set_fn_message_received(on_message)
@@ -3448,29 +2132,40 @@ def LoopSendMessages():
 
 # python3 code
 
-
+# WS server example
 import asyncio
-import math
 import websockets
 
-async def time(websocket, path):
-  x = 0
-  for i in range(1000):
-    x += 0.2
-    alpha =  (math.cos(x) +1.0 )/2.0
-    msg = u"alpha, 2, %f" %alpha
-    await websocket.send( msg )
-    r = (math.cos(x) +1.0 )/2.0
-    g = (math.cos(x+1) +1.0 )/2.0
-    b = (math.cos(x+2) +1.0 )/2.0
-    msg = u"colour, 1, %d, %f, %f, %f" %(i,r,g,b)
-    await websocket.send( msg )
-    message = await websocket.recv()
-    print( message)
+async def hello(websocket, path):
+  while True:
+    name = await websocket.recv()
+    print(f"< {name}")
+    greeting = f"Hello {name}!"
+    await websocket.send(greeting)
+    if name=="STOP":
+      return
     await asyncio.sleep(0.2)
 
-start_server = websockets.serve(time, '127.0.0.1', 7894)
+start_server = websockets.serve(hello, "localhost", 8765)
 asyncio.get_event_loop().run_until_complete(start_server)
 asyncio.get_event_loop().run_forever()
+
+
+
+# WS client example
+import asyncio
+import websockets
+
+async def hello():
+  uri = "ws://localhost:8765"
+  async with websockets.connect(uri) as websocket:
+    while True:
+      name = input("What's your name?\n" )
+      await websocket.send(name)
+      print(f"> {name}")
+      greeting = await websocket.recv()
+      print(f"< {greeting}")
+
+asyncio.get_event_loop().run_until_complete(hello())
 
 """

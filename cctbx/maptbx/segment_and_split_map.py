@@ -1,4 +1,5 @@
 from __future__ import absolute_import, division, print_function
+from operator import itemgetter
 import iotbx.phil
 import iotbx.pdb
 import iotbx.mrcfile
@@ -14,6 +15,7 @@ import libtbx.callbacks # import dependency
 from libtbx import group_args
 from six.moves import range
 from six.moves import zip
+from cctbx.development.create_models_or_maps import get_map_from_map_coeffs
 
 master_phil = iotbx.phil.parse("""
 
@@ -306,6 +308,12 @@ master_phil = iotbx.phil.parse("""
        .type = bool
        .short_caption = Include helical symmetry
        .help = You can include or exclude searches for helical symmetry
+
+     must_be_consistent_with_space_group_number = None
+       .type = int
+       .short_caption = Space group to match
+       .help = Searches for symmetry must be compatible with this space group\
+               number.
 
      symmetry_center = None
        .type = floats
@@ -1396,10 +1404,13 @@ class info_object:
     import time
     self.init_asctime = time.asctime()
 
-  def set_box_map_ncs_au_map_data(self, box_map_ncs_au_map_data = None,
+  def set_box_map_ncs_au_map_data(self,
+       box_map_ncs_au_map_data = None,
+       box_mask_ncs_au_map_data = None,
        box_map_ncs_au_half_map_data_list = None,
        box_map_ncs_au_crystal_symmetry = None):
     self.box_map_ncs_au_map_data = box_map_ncs_au_map_data.deep_copy()
+    self.box_mask_ncs_au_map_data = box_mask_ncs_au_map_data.deep_copy()
     self.box_map_ncs_au_half_map_data_list = []
     for hm in box_map_ncs_au_half_map_data_list:
        self.box_map_ncs_au_half_map_data_list.append(hm.deep_copy())
@@ -1408,6 +1419,10 @@ class info_object:
       self.box_map_ncs_au_map_data = self.shift_map_back(
         map_data = self.box_map_ncs_au_map_data,
         crystal_symmetry = self.box_map_ncs_au_crystal_symmetry,
+        shift_cart = self.origin_shift)
+      self.box_mask_ncs_au_map_data = self.shift_mask_back(
+        mask_data = self.box_mask_ncs_au_map_data,
+        crystal_symmetry = self.box_mask_ncs_au_crystal_symmetry,
         shift_cart = self.origin_shift)
 
       new_hm_list = []
@@ -2405,6 +2420,7 @@ class ncs_group_object:
     if not ncs_related_regions: ncs_related_regions = []
     if not self_and_ncs_related_regions: self_and_ncs_related_regions = []
     if not map_files_written: map_files_written = []
+    if not max_cell_dim: max_cell_dim = 0.
     from libtbx import adopt_init_args
     adopt_init_args(self, locals())
 
@@ -2767,8 +2783,10 @@ def apply_sharpening(map_coeffs = None,
       f_array, phases = map_coeffs_as_fp_phi(map_coeffs)
       f_array_b_iso = get_b_iso(f_array, d_min = d_min)
       if not f_array.binner():
-        (local_d_max, local_d_min) = f_array.d_max_min()
-        f_array.setup_binner(n_bins = n_bins, d_max = local_d_max, d_min = local_d_min)
+        (local_d_max, local_d_min) = f_array.d_max_min(
+          d_max_is_highest_defined_if_infinite=True)
+        f_array.setup_binner(n_bins = n_bins, d_max = local_d_max,
+        d_min = local_d_min)
 
       from cctbx.maptbx.refine_sharpening import apply_target_scale_factors
       map_and_b = apply_target_scale_factors(f_array = f_array, phases = phases,
@@ -2841,33 +2859,6 @@ def apply_sharpening(map_coeffs = None,
       mb.sharpened_map_coeffs = sharpened_map_coeffs
     return mb
 
-def get_map_from_map_coeffs(map_coeffs = None, crystal_symmetry = None,
-     n_real = None, apply_sigma_scaling = True):
-    from cctbx import maptbx
-    from cctbx.maptbx import crystal_gridding
-    if map_coeffs.crystal_symmetry().space_group_info()!=  \
-       crystal_symmetry.space_group_info():
-      assert str(map_coeffs.crystal_symmetry().space_group_info()
-          ).replace(" ", "").lower() == 'p1'
-      # use map_coeffs.crystal_symmetry
-      crystal_symmetry = map_coeffs.crystal_symmetry()
-    if n_real:
-      cg = crystal_gridding(
-        unit_cell = crystal_symmetry.unit_cell(),
-        space_group_info = crystal_symmetry.space_group_info(),
-        pre_determined_n_real = n_real)
-    else:
-      cg = None
-    fft_map = map_coeffs.fft_map( resolution_factor = 0.25,
-       crystal_gridding = cg,
-       symmetry_flags = maptbx.use_space_group_symmetry)
-    if apply_sigma_scaling:
-      fft_map.apply_sigma_scaling()
-    else:
-      fft_map.apply_volume_scaling()
-    map_data = fft_map.real_map_unpadded()
-    return map_data
-
 def find_symmetry_center(map_data, crystal_symmetry = None, out = sys.stdout):
   # find center if necessary:
   origin = list(map_data.origin())
@@ -2903,10 +2894,16 @@ def find_symmetry_center(map_data, crystal_symmetry = None, out = sys.stdout):
     tuple(xyz_cart)), file = out)
   return xyz_cart
 
-def get_center_of_map(map_data, crystal_symmetry):
+def get_center_of_map(map_data, crystal_symmetry,
+    place_on_grid_point = True):
   all = list(map_data.all())
   origin = list(map_data.origin())
-  sx, sy, sz = [all[0]/2+origin[0], all[1]/2+origin[1], all[2]/2+origin[2]]
+  if place_on_grid_point:
+    sx, sy, sz = [int(all[0]/2)+origin[0], int(all[1]/2)+origin[1],
+       int(all[2]/2)+origin[2]]
+  else:
+    sx, sy, sz = [all[0]/2+origin[0], all[1]/2+origin[1],
+  all[2]/2+origin[2]]
   site_fract = matrix.col((sx/all[0], sy/all[1], sz/all[2], ))
   return crystal_symmetry.unit_cell().orthogonalize(site_fract)
 
@@ -2965,10 +2962,24 @@ def run_get_ncs_from_map(params = None,
       crystal_symmetry = None,
       map_symmetry_center = None,
       ncs_obj = None,
+      fourier_filter = False,
       out = sys.stdout,
       ):
 
   # Get or check NCS operators. Try various possibilities for center of NCS
+
+  # First Fourier filter map if resolution is set
+  if fourier_filter and params.crystal_info.resolution:
+    print("Fourier filtering at resolution of %.2f A" %(
+      params.crystal_info.resolution), file = out)
+    from iotbx.map_manager import map_manager
+    mm = map_manager(map_data= map_data,
+      unit_cell_crystal_symmetry = crystal_symmetry,
+      unit_cell_grid = map_data.all(),
+      wrapping=False)
+    mm.resolution_filter(d_min=params.crystal_info.resolution)
+    map_data = mm.map_data()
+
   ncs_obj_to_check = None
   if params.reconstruction_symmetry.symmetry and (
      not ncs_obj or ncs_obj.max_operators()<2):
@@ -3133,7 +3144,7 @@ def get_ncs_from_map(params = None,
   if not results_list:
     return None, None, None
 
-  results_list.sort()
+  results_list.sort(key=itemgetter(0))
   results_list.reverse()
 
   # Rescore top n_rescore
@@ -3154,7 +3165,7 @@ def get_ncs_from_map(params = None,
         print("symmetry:", symmetry, " no score", ncs_obj.max_operators(), file = out)
       else:
         rescore_list.append([score, cc_avg, ncs_obj, symmetry])
-    rescore_list.sort()
+    rescore_list.sort(key=itemgetter(0))
     rescore_list.reverse()
     results_list = rescore_list
   if len(results_list) == 1:
@@ -3466,6 +3477,8 @@ def get_ncs_list(params = None, symmetry = None,
 
   from mmtbx.ncs.ncs import generate_ncs_ops
   ncs_list = generate_ncs_ops(
+   must_be_consistent_with_space_group_number = \
+      params.reconstruction_symmetry.must_be_consistent_with_space_group_number,
    symmetry = symmetry,
    helical_rot_deg = helical_rot_deg,
    helical_trans_z_angstrom = helical_trans_z_angstrom,
@@ -3518,6 +3531,12 @@ def find_helical_symmetry(params = None,
         max_z_to_test = 2, max_peaks_to_score = 5, out = sys.stdout):
 
   params = deepcopy(params) # so changing them does not go back
+  if not params.crystal_info.resolution:
+    from cctbx.maptbx import d_min_from_map
+    params.crystal_info.resolution = d_min_from_map(
+      map_data, crystal_symmetry.unit_cell(), resolution_factor = 1./4.)
+
+
   if str(params.reconstruction_symmetry.score_basis) == 'None':
     params.reconstruction_symmetry.score_basis = 'cc'
   if params.reconstruction_symmetry.smallest_object is None:
@@ -3621,7 +3640,7 @@ def find_helical_symmetry(params = None,
           new_helical_rot_deg, new_helical_trans_z_angstrom, ncs_score, ncs_cc), file = out)
       score_list.append(
        [ncs_score, ncs_cc, new_helical_rot_deg, new_helical_trans_z_angstrom])
-    score_list.sort()
+    score_list.sort(key=itemgetter(0))
     score_list.reverse()
     done = False
     for ncs_score, ncs_cc, helical_rot_deg, helical_trans_z_angstrom in \
@@ -4016,7 +4035,7 @@ def get_helical_trans_z_angstrom(params = None,
   sort_list = []
   for d, value in zip(d_list, value_list):
     sort_list.append([value, d])
-  sort_list.sort()
+  sort_list.sort(key=itemgetter(0))
   sort_list.reverse()
   likely_z_translations = []
   dis_min = params.crystal_info.resolution/4
@@ -4287,8 +4306,11 @@ def apply_soft_mask(map_data = None,
 
 def smooth_mask_data(mask_data = None,
     crystal_symmetry = None,
-    threshold = 0.5,
+    threshold = None,
     rad_smooth = None):
+
+  if threshold is None:
+    threshold = mask_data.as_1d().min_max_mean().max * 0.5
 
   # Smooth a mask in place. First make it a binary mask
   s = mask_data > threshold  # s marks inside mask
@@ -4303,7 +4325,7 @@ def smooth_mask_data(mask_data = None,
 
     # Make sure that mask_data max value is now 1, scale if not
     max_mask_data_value = mask_data.as_1d().min_max_mean().max
-    if max_mask_data_value < 1.e-30 and max_mask_data_value!= 1.0: # XXX
+    if max_mask_data_value > 1.e-30 and max_mask_data_value!= 1.0:
       mask_data = mask_data*(1./max_mask_data_value)
   else:
     pass
@@ -4319,8 +4341,10 @@ def apply_mask_to_map(mask_data = None,
     verbose = None,
     out = sys.stdout):
 
-  if not mask_data:
+  if smoothed_mask_data and not mask_data:
     mask_data = smoothed_mask_data
+  elif mask_data and not smoothed_mask_data:
+    smoothed_mask_data = mask_data
 
   s = mask_data > threshold  # s marks inside mask
   # get mean inside or outside mask
@@ -4740,6 +4764,10 @@ def get_params(args, map_data = None, crystal_symmetry = None,
     box_buffer = None,
     soft_mask_extract_unique = None,
     mask_expand_ratio = None,
+    include_helical_symmetry = None,
+    min_ncs_cc = None,
+    symmetry_center = None,
+    return_params_only = None,
     out = sys.stdout):
 
   params = get_params_from_args(args)
@@ -4761,6 +4789,13 @@ def get_params(args, map_data = None, crystal_symmetry = None,
     params.crystal_info.molecular_mass = molecular_mass
   if symmetry is not None:
     params.reconstruction_symmetry.symmetry = symmetry
+  if min_ncs_cc is not None:
+    params.reconstruction_symmetry.min_ncs_cc = min_ncs_cc
+  if symmetry_center is not None:
+    params.reconstruction_symmetry.symmetry_center = symmetry_center
+  if include_helical_symmetry is not None:
+    params.reconstruction_symmetry.include_helical_symmetry = \
+      include_helical_symmetry
   if chain_type is not None:
     params.crystal_info.chain_type = chain_type
 
@@ -4792,6 +4827,9 @@ def get_params(args, map_data = None, crystal_symmetry = None,
   if save_box_map_ncs_au is not None:
     params.control.save_box_map_ncs_au = save_box_map_ncs_au
 
+
+  if return_params_only:
+    return params
 
   print("\nSegment_and_split_map\n", file = out)
   print("Command used: %s\n" %(
@@ -4844,6 +4882,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
         params.crystal_info.sequence = open(params.input_files.seq_file).read()
     print("Read sequence from %s" %(params.input_files.seq_file), file = out)
 
+
   if not params.crystal_info.resolution and (
      params.map_modification.b_iso is not None or \
       params.map_modification.auto_sharpen
@@ -4870,7 +4909,9 @@ def get_params(args, map_data = None, crystal_symmetry = None,
   if (params.map_modification.residual_target == 'adjusted_sa' or
      params.map_modification.sharpening_target == 'adjusted_sa') and \
      (params.map_modification.box_in_auto_sharpen or
-       params.map_modification.density_select_in_auto_sharpen):
+       params.map_modification.density_select_in_auto_sharpen) and (
+      params.map_modification.auto_sharpen):
+
     print("Checking to make sure we can use adjusted_sa as target...",
         end = ' ', file = out)
     try:
@@ -5137,6 +5178,8 @@ def get_params(args, map_data = None, crystal_symmetry = None,
     from mmtbx.command_line.map_box import run as run_map_box
     args.append("keep_input_unit_cell_and_grid = False") # for new defaults
 
+    assert params.crystal_info.use_sg_symmetry is not None
+    wrapping = (not params.crystal_info.use_sg_symmetry)
     if params.segmentation.lower_bounds and params.segmentation.upper_bounds:
       bounds_supplied = True
       print("\nRunning map_box with supplied bounds", file = out)
@@ -5147,6 +5190,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
           lower_bounds = params.segmentation.lower_bounds,
           upper_bounds = params.segmentation.upper_bounds,
           write_output_files = params.output_files.write_output_maps,
+          wrapping = wrapping,
           log = out)
     else:
       bounds_supplied = False
@@ -5155,6 +5199,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
        crystal_symmetry = crystal_symmetry,
        ncs_object = ncs_obj,
        write_output_files = params.output_files.write_output_maps,
+       wrapping = wrapping,
        log = out)
 
     # Run again to select au box
@@ -5185,6 +5230,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
           map_data = map_data,
           crystal_symmetry = crystal_symmetry,
           ncs_object = ncs_obj,
+          wrapping = wrapping,
           upper_bounds = upper_bounds, log = out)
         box.map_box = box.map_box.as_double()  # Do we need double?
         shifted_unique_closest_sites = unique_closest_sites+box.shift_cart
@@ -5201,6 +5247,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
         crystal_symmetry = crystal_symmetry,
         ncs_object = ncs_obj,
         lower_bounds = lower_bounds, upper_bounds = upper_bounds,
+        wrapping = wrapping,
         write_output_files = params.output_files.write_output_maps,
         log = out)
 
@@ -5418,7 +5465,9 @@ def get_and_apply_soft_mask_to_maps(
     out = sys.stdout):
   smoothed_mask_data = None
   if not resolution:
-    raise Sorry("Need resolution for soft_mask")
+    from cctbx.maptbx import d_min_from_map
+    resolution = d_min_from_map(
+      map_data, crystal_symmetry.unit_cell(), resolution_factor = 1./4.)
 
   if not rad_smooth:
     rad_smooth = resolution
@@ -5865,7 +5914,7 @@ def get_co(map_data = None, threshold = None, wrapping = None):
   rr = rr[1:]
   if rr:
     z = zip(regions, rr)
-    sorted_by_volume = sorted(z, key = lambda x: x[0], reverse = True)
+    sorted_by_volume = sorted(z, key=itemgetter(0), reverse = True)
   else:
     sorted_by_volume = []
   sorted_by_volume = [(regions_0, rr_0)]+sorted_by_volume
@@ -6410,7 +6459,7 @@ def remove_bad_regions(params = None,
   out = sys.stdout):
 
   worst_list = []
-  for id in duplicate_dict.keys():
+  for id in list(duplicate_dict.keys()):
     fract = duplicate_dict[id]/edited_volume_list[id-1]
     if duplicate_dict[id] and fract >= params.segmentation.max_overlap_fraction:
       worst_list.append([fract, id])
@@ -6451,7 +6500,7 @@ def sort_by_ncs_overlap(matches, equiv_dict_ncs_copy_dict_id):
     for id1 in matches:
       key, n = top_key(equiv_dict_ncs_copy_dict_id[id1]) # Take top ncs_copy
       sort_list.append([n, id1])
-    sort_list.sort()
+    sort_list.sort(key=itemgetter(0))
     sort_list.reverse()
     key_list = []
     for n, id1 in sort_list:
@@ -7880,6 +7929,7 @@ def write_output_files(params,
        tracking_data.set_box_map_ncs_au_map_data(
        box_map_ncs_au_crystal_symmetry = box_crystal_symmetry,
        box_map_ncs_au_map_data = box_map_ncs_au,
+       box_mask_ncs_au_map_data = box_mask_ncs_au,
        box_map_ncs_au_half_map_data_list = half_map_data_list_au_box,
        )
 
@@ -8580,6 +8630,11 @@ def get_overall_mask(
     out = sys.stdout):
 
 
+  # This routine cannot use mask_data with origin != (0,0,0)
+  if map_data.origin() != (0,0,0):
+    print("Map origin must be at (0,0,0) for get_overall_mask")
+    assert map_data.origin() == (0,0,0)  # Map origin must be at (0,0,0)
+
   # Make a local SD map from our map-data
   from cctbx.maptbx import crystal_gridding
   from cctbx import sgtbx
@@ -8616,7 +8671,6 @@ def get_overall_mask(
   import math
   w = 4 * stol * math.pi * smoothing_radius
   sphere_reciprocal = 3 * (flex.sin(w) - w * flex.cos(w))/flex.pow(w, 3)
-
   try:
     temp = complete_set.structure_factors_from_map(
       flex.pow2(map_data-map_data.as_1d().min_max_mean().mean))
@@ -8624,7 +8678,7 @@ def get_overall_mask(
     print(e, file = out)
     print ("The sampling of the map appears to be too low for a "+
       "\nresolution of %s. Using a larger value for resolution" %(
-       resolution))
+       resolution), file = out)
     from cctbx.maptbx import d_min_from_map
     resolution = d_min_from_map(
       map_data, crystal_symmetry.unit_cell(), resolution_factor = 1./4.)
@@ -8806,7 +8860,11 @@ def get_adjusted_path_length(
     crystal_symmetry = None,
     resolution = None,
     out = sys.stdout):
-  from phenix.autosol.trace_and_build import trace_and_build
+  try:
+    from phenix.autosol.trace_and_build import trace_and_build
+  except Exception as e: # Not available
+    return 0
+
   from phenix.programs.trace_and_build import master_phil_str
   import iotbx.phil
   tnb_params = iotbx.phil.parse(master_phil_str).extract()
@@ -9028,6 +9086,11 @@ def get_solvent_fraction_from_low_res_mask(
     crystal_symmetry = crystal_symmetry,
     resolution = mask_resolution,
     out = out)
+  if overall_mask is None:
+    if return_mask_and_solvent_fraction:
+      return None, None
+    else:
+      return None
 
   solvent_fraction = overall_mask.count(False)/overall_mask.size()
   print("Solvent fraction from overall mask: %.3f " %(solvent_fraction), file = out)
@@ -9159,6 +9222,19 @@ def set_up_si(var_dict = None, crystal_symmetry = None,
        solvent_fraction = get_solvent_fraction_from_molecular_mass(
         crystal_symmetry = crystal_symmetry, molecular_mass = molecular_mass,
         out = out)
+
+    # Test to see if we can use adjusted_path_length as target
+    if local_params.map_modification.sharpening_target == \
+            'adjusted_path_length':
+      print(
+       "Checking to make sure we can use 'adjusted_path_length'as target...",
+          end = ' ', file = out)
+      try:
+        from phenix.autosol.trace_and_build import trace_and_build
+      except Exception as e:
+        raise Sorry("Please set sharpening target to something other than "+
+          "adjusted_path_length (not available)")
+      print("OK", file = out)
 
 
 
@@ -9387,9 +9463,11 @@ def select_box_map_data(si = None,
     local_hierarchy = None
     if hierarchy:
        local_hierarchy = hierarchy.deep_copy() # run_map_box modifies its argument
+    assert isinstance(si.wrapping, bool) # wrapping must be defined
     box = run_map_box(args,
         map_data = map_data, pdb_hierarchy = local_hierarchy,
        write_output_files = False,
+       wrapping = si.wrapping,
        crystal_symmetry = crystal_symmetry, log = out)
 
     lower_bounds = box.gridding_first
@@ -9412,6 +9490,7 @@ def select_box_map_data(si = None,
        lower_bounds = lower_bounds,
        upper_bounds = upper_bounds,
        crystal_symmetry = crystal_symmetry,
+       wrapping = si.wrapping,
        log = out)
       box_first_half_map = box_first.map_box.as_double()
     else:
@@ -9427,6 +9506,7 @@ def select_box_map_data(si = None,
        lower_bounds = lower_bounds,
        upper_bounds = upper_bounds,
        crystal_symmetry = crystal_symmetry,
+       wrapping = si.wrapping,
        log = out)
       box_second_half_map = box_second.map_box.as_double()
     else:
@@ -9456,9 +9536,9 @@ def select_box_map_data(si = None,
     else:
       n_buffer = 0
     lower_bounds, upper_bounds = put_bounds_in_range(
-     lower_bounds = lower_bounds, upper_bounds = upper_bounds,
-     box_size = box_size, n_buffer = n_buffer,
-     n_real = map_data.all(), out = out)
+       lower_bounds = lower_bounds, upper_bounds = upper_bounds,
+       box_size = box_size, n_buffer = n_buffer,
+       n_real = map_data.all(), out = out)
 
     # select map data inside this box
     print("\nSelecting map data inside box", file = out)
@@ -9917,7 +9997,7 @@ def get_target_boxes(si = None, ncs_obj = None, map = None,
 def get_box_size(lower_bound = None, upper_bound = None):
   box_size = []
   for lb, ub in zip(lower_bound, upper_bound):
-    box_size.append(ub-lb)
+    box_size.append(ub-lb+1)
   return box_size
 
 def mean_dist_to_nearest_neighbor(all_cart):
@@ -10052,7 +10132,6 @@ def run_local_sharpening(si = None,
 
     weight_data = bsi.get_gaussian_weighting(out = out)
     weighted_data = bsi.map_data*weight_data
-
     sum_weight_value_map = sum_box_data(starting_map = sum_weight_value_map,
        box_map = weighted_data,
        lower_bounds = bsi.lower_bounds,
@@ -10466,7 +10545,7 @@ def optimize_b_blur_or_d_cut_or_b_iso(
     local_best_working_si = deepcopy(working_best_si)
     improving = False
     for jj in range(-n_range, n_range+1):
-        if optimization_target == 'b_blur_hires': # ZZ try optimizing b_blur_hires
+        if optimization_target == 'b_blur_hires': # try optimizing b_blur_hires
           test_b_blur_hires = max(0., working_best_si.b_blur_hires+jj*delta_b_blur_hires)
           test_d_cut = working_best_si.get_d_cut()
           test_b_iso = working_best_si.b_iso
@@ -10769,7 +10848,7 @@ def run_auto_sharpen(
     sort_list = []
     for result in results_list:
       sort_list.append([result.id, result])
-    sort_list.sort()
+    sort_list.sort(key=itemgetter(0))
     for id, result in sort_list:
       local_si = result.local_si
 
@@ -10875,7 +10954,8 @@ def run_auto_sharpen(
         print("Setting discard_if_worse = False as region_weight failed ", file = out)
         si.discard_if_worse = False
 
-    if out_of_range and 'resolution_dependent' in auto_sharpen_methods:
+    if out_of_range and auto_sharpen_methods and \
+        'resolution_dependent' in auto_sharpen_methods:
       new_list = []
       have_something_left = False
       for x in auto_sharpen_methods:
@@ -11077,7 +11157,7 @@ def run_auto_sharpen(
       sort_list = []
       for result in results_list:
         sort_list.append([result.id, result])
-      sort_list.sort()
+      sort_list.sort(key=itemgetter(0))
       for id, result in sort_list:
         local_si = result.local_si
         local_map_and_b = result.local_map_and_b
@@ -11203,7 +11283,6 @@ def run_auto_sharpen(
     print("\nOverall best sharpening method: %s Score: %7.3f\n" %(
        best_si.sharpening_method, best_si.score), file = out)
     best_si.show_summary(out = out)
-
   if (not best_si.is_model_sharpening()) and \
        (not best_si.is_half_map_sharpening()) and null_si:
     if best_si.score>null_si.score:  # we improved them..
@@ -11214,8 +11293,18 @@ def run_auto_sharpen(
     map_data = best_map_and_b.map_data
     map_data = set_mean_sd_of_map(map_data = map_data,
       target_mean = starting_mean, target_sd = starting_sd)
-
     box_sharpening_info_obj.map_data = map_data
+    box_size= map_data.all()
+    calculated_box_size=tuple([i-j+1 for i,j in zip(
+       box_sharpening_info_obj.upper_bounds,
+       box_sharpening_info_obj.lower_bounds)])
+    calculated_box_size_minus_one=tuple([i-j for i,j in zip(
+       box_sharpening_info_obj.upper_bounds,
+       box_sharpening_info_obj.lower_bounds)])
+    if calculated_box_size_minus_one == box_size: # one too big
+      box_sharpening_info_obj.upper_bounds =tuple(
+       [i-1 for i in box_sharpening_info_obj.upper_bounds]
+      ) #  work-around for upper bounds off by one in model sharpening
     box_sharpening_info_obj.smoothed_box_mask_data = smoothed_box_mask_data
     box_sharpening_info_obj.original_box_map_data = original_box_map_data
     box_sharpening_info_obj.n_buffer = n_buffer

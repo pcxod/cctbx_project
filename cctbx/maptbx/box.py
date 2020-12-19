@@ -12,7 +12,7 @@ class with_bounds(object):
   """
   Extract map box using specified lower_bounds and upper_bounds
 
-  Creates new map_manager and modifies model and ncs_objects in place
+  Creates new map_manager and modifies model in place
 
   Input map_manager must have origin (working position) at (0, 0, 0)
   Input model coordinates must correspond to working position of map_manager
@@ -23,7 +23,7 @@ class with_bounds(object):
   Output versions of map_manager and model are in P1 and have origin at (0, 0, 0).
   Bounds refer to grid position in this box with origin at (0, 0, 0)
 
-  Wrapping must be specified on initialization
+  Wrapping:
     wrapping = True means that grid points outside of the unit cell can be
     mapped inside with unit translations and box can effectively come
     from anywhere in space.
@@ -39,16 +39,16 @@ class with_bounds(object):
      map_manager,
      lower_bounds,
      upper_bounds,
-     wrapping,
      model = None,
-     ncs_object = None,
+     wrapping = None,
+     model_can_be_outside_bounds = False,
      log = sys.stdout):
     self.lower_bounds = lower_bounds
     self.upper_bounds = upper_bounds
-    self.wrapping = wrapping
     self._map_manager = map_manager
     self._model = model
-    self._ncs_object = ncs_object
+    self.model_can_be_outside_bounds = model_can_be_outside_bounds
+
 
     # safeguards
     assert lower_bounds is not None
@@ -58,18 +58,18 @@ class with_bounds(object):
     for i in range(3):
       assert list(upper_bounds)[i] > list(lower_bounds)[i]
 
-    assert isinstance(wrapping, bool)
     assert isinstance(map_manager, iotbx.map_manager.map_manager)
+
     assert self._map_manager.map_data().accessor().origin()  ==  (0, 0, 0)
     if model is not None:
       assert isinstance(model, mmtbx.model.manager)
       assert map_manager.is_compatible_model(model)
-    if ncs_object:
-      assert isinstance(ncs_object, mmtbx.ncs.ncs.ncs)
-    if wrapping:
-      assert map_manager.unit_cell_grid == map_manager.map_data().all()
 
-    self.basis_for_boxing_string = 'supplied bounds, wrapping = %s' %(wrapping)
+    self._force_wrapping = wrapping
+    if wrapping is None:
+      wrapping = self.map_manager().wrapping()
+    self.basis_for_boxing_string = 'supplied bounds, wrapping = %s' %(
+      wrapping)
 
     # These are lower and upper bounds of map with origin at (0, 0, 0)
     #   (not the original map)
@@ -92,7 +92,6 @@ class with_bounds(object):
     mmm = map_model_manager(
         map_manager = self.map_manager(),
         model = self.model(),
-        ncs_object = self.ncs_object(),
         )
     # Keep track of the gridding in this boxing.
     mmm.set_gridding_first(self.gridding_first)
@@ -106,7 +105,10 @@ class with_bounds(object):
     return self._map_manager
 
   def ncs_object(self):
-    return self._ncs_object
+    if self.map_manager():
+      return self.map_manager().ncs_object()
+    else:
+      return None
 
   def set_shifts_and_crystal_symmetry(self):
     '''
@@ -138,18 +140,20 @@ class with_bounds(object):
     self.crystal_symmetry = crystal.symmetry(
       unit_cell = box_uc, space_group = "P1")
 
+    self._warning_message = ""
+
+  def warning_message(self):
+    return self._warning_message
+
   def apply_to_model_ncs_and_map(self):
     '''
-    Apply boxing to to self._model, self._ncs_object, self._map_manager
+    Apply boxing to to self._model,  self._map_manager
     so all are boxed
 
     '''
 
     if self._model:
       self._model = self.apply_to_model(self._model)
-
-    if self._ncs_object:
-      self._ncs_object = self.apply_to_ncs_object(self._ncs_object)
 
     self._map_manager = self.apply_to_map(self._map_manager)
 
@@ -158,6 +162,9 @@ class with_bounds(object):
     '''
      Apply boxing to a map_manager that is similar to the one used to generate
        this around_model object
+
+     Also apply to its ncs_object, if any
+
     '''
     assert isinstance(map_manager, iotbx.map_manager.map_manager)
 
@@ -179,17 +186,31 @@ class with_bounds(object):
     bounds_info = get_bounds_of_valid_region(map_data,
       self.gridding_first,
       self.gridding_last)
-    if self.wrapping or bounds_info.inside_allowed_bounds:
+
+    # Allow override of wrapping
+    if isinstance(self._force_wrapping, bool):
+      wrapping = self._force_wrapping
+    else:
+      # Get wrapping from map_manager. If it is not defined and
+      #  bounds are outside allowed, try to get the wrapping
+      wrapping = map_manager.wrapping()
+
+    if wrapping or bounds_info.inside_allowed_bounds:
       # Just copy everything
       map_box = maptbx.copy(map_data, self.gridding_first, self.gridding_last)
       # Note: map_box gridding is self.gridding_first to self.gridding_last
     elif not bounds_info.some_valid_points:
-      # Just copy everything and zero
+      # No valid points, Just copy everything and zero
       map_box = maptbx.copy(map_data, self.gridding_first, self.gridding_last)
       map_box = map_box * 0.
+      self._warning_message += "\nWARNING: boxed map is entirely outside map"+\
+         " and wrapping=%s\n...setting all values to zero" %(wrapping)
 
     else: # Need to copy and then zero outside of defined region
       map_box = copy_and_zero_map_outside_bounds(map_data, bounds_info)
+      self._warning_message += \
+            "\nWARNING: boxed map goes outside original map"+\
+         " and wrapping=%s\n...setting unknown values to zero" %(wrapping)
     #  Now reshape map_box to put origin at (0, 0, 0)
     map_box.reshape(flex.grid(self.box_all))
 
@@ -217,8 +238,18 @@ class with_bounds(object):
     #  Set up new map_manager. This will contain new data and not overwrite
     #   original
     #  NOTE: origin_shift_grid_units is required as bounds have changed
+
+    # Crystal symmetry is now always P1 and wrapping is False
     new_map_manager = map_manager.customized_copy(map_data = map_box,
-      origin_shift_grid_units = origin_shift_grid_units)
+      origin_shift_grid_units = origin_shift_grid_units,
+      crystal_symmetry_space_group_number = 1,
+      wrapping = False)
+    if self._force_wrapping:
+      # Set the wrapping of the new map if it is possible
+      if (self._force_wrapping and (new_map_manager.is_full_size())) or \
+       ( (not self._force_wrapping) and (not new_map_manager.is_full_size())):
+        new_map_manager.set_wrapping(self._force_wrapping)
+
     # Add the label
     new_map_manager.add_label(new_label)
     return new_map_manager
@@ -237,7 +268,6 @@ class with_bounds(object):
     #  model and model original_crystal_symmetry should match
     #   self.map_crystal_symmetry_at_initialization
 
-
     if model.shift_cart() is None:  # model not yet initialized for shifts
        assert self.map_manager().unit_cell_crystal_symmetry(
           ).is_similar_symmetry( model.crystal_symmetry())
@@ -253,6 +283,12 @@ class with_bounds(object):
        crystal_symmetry = self.crystal_symmetry, # new crystal_symmetry
        )
 
+    # if wrapping is False, check to see if model is outside the box
+    if (not self.map_manager().wrapping()) and (
+        not self.model_can_be_outside_bounds):
+      if not model.is_inside_working_cell():
+        self._warning_message += "\nWARNING: Model is not entirely "+\
+          "inside working cell and wrapping is False"
     return model
 
   def apply_to_ncs_object(self, ncs_object):
@@ -268,7 +304,7 @@ class around_model(with_bounds):
   """
   Extract map box around atomic model. Box is in P1 and has origin at (0, 0, 0).
 
-  Creates new map_manager and modifies model and ncs_objects in place
+  Creates new map_manager and modifies model in place
 
   Input map_manager must have origin (working position) at (0, 0, 0)
   Input model coordinates must correspond to working position of map_manager
@@ -276,10 +312,11 @@ class around_model(with_bounds):
   On initialization new bounds and crystal_symmetry are identified.
   Then map_manager is replaced with boxed version and shifted model is created
 
-  Output versions of map_manager and model are in P1 and have origin at (0, 0, 0).
+  Output versions of map_manager and model are in P1 and have origin
+    at (0, 0, 0).
   Bounds refer to grid position in this box with origin at (0, 0, 0)
 
-  Wrapping must be specified on initialization
+  Wrapping:
     wrapping = True means that grid points outside of the unit cell can be
     mapped inside with unit translations and box can effectively come
     from anywhere in space.
@@ -290,56 +327,51 @@ class around_model(with_bounds):
     undefined.  If a box is specified that uses points outside the defined
     region, those points are set to zero.
 
-
+  Bounds:
+    if model_can_be_outside_bounds, allow model to be outside the bounds
+    if stay_inside_current_map, adjust bounds to not go outside current map
   """
-  def __init__(self, map_manager, model, cushion, wrapping,
-      ncs_object = None,
+  def __init__(self, map_manager, model, box_cushion,
+      wrapping = None,
+      model_can_be_outside_bounds = False,
+      stay_inside_current_map = None,
       log = sys.stdout):
 
-    self.wrapping = wrapping
     self._map_manager = map_manager
     self._model = model
-    self._ncs_object = ncs_object
+    self.model_can_be_outside_bounds = model_can_be_outside_bounds
 
-    self.basis_for_boxing_string = 'using model, wrapping = %s'  %(wrapping)
+    self._force_wrapping = wrapping
+    if wrapping is None:
+      wrapping = self.map_manager().wrapping()
+    self.basis_for_boxing_string = 'using_model, wrapping = %s' %(
+      wrapping)
 
     # safeguards
-    assert isinstance(wrapping, bool)
     assert isinstance(map_manager, iotbx.map_manager.map_manager)
     assert isinstance(model, mmtbx.model.manager)
     assert self._map_manager.map_data().accessor().origin()  ==  (0, 0, 0)
-    if ncs_object:
-      assert isinstance(ncs_object, mmtbx.ncs.ncs.ncs)
 
     # Make sure working model and map_manager crystal_symmetry match
 
     assert map_manager.is_compatible_model(model)
 
-    assert cushion >=  0
+    assert box_cushion >=  0
 
-    if wrapping:  # map must be entire unit cell
+    if self.map_manager().wrapping():  # map must be entire unit cell
       assert map_manager.unit_cell_grid == map_manager.map_data().all()
 
     # NOTE: We are going to use crystal_symmetry and sites_frac based on
     #   the map_manager (the model could still have different crystal_symmetry)
 
-    # get items needed to do the shift
-    cs = map_manager.crystal_symmetry()
-    uc = cs.unit_cell()
-    sites_cart = model.get_sites_cart()
-    sites_frac = uc.fractionalize(sites_cart)
-    map_data = map_manager.map_data()
-    # convert cushion into fractional vector
-    cushion_frac = flex.double(uc.fractionalize((cushion, )*3))
-    # find fractional corners
-    frac_min = sites_frac.min()
-    frac_max = sites_frac.max()
-    frac_max = list(flex.double(frac_max)+cushion_frac)
-    frac_min = list(flex.double(frac_min)-cushion_frac)
-    # find corner grid nodes
-    all_orig = map_data.all()
-    self.gridding_first = [ifloor(f*n) for f, n in zip(frac_min, all_orig)]
-    self.gridding_last  = [ iceil(f*n) for f, n in zip(frac_max, all_orig)]
+    info = get_bounds_around_model(
+      map_manager = map_manager,
+      model = model,
+      box_cushion = box_cushion,
+      stay_inside_current_map = stay_inside_current_map)
+    self.gridding_first = info.lower_bounds
+    self.gridding_last = info.upper_bounds
+
 
     # Ready with gridding...set up shifts and box crystal_symmetry
     self.set_shifts_and_crystal_symmetry()
@@ -347,7 +379,7 @@ class around_model(with_bounds):
     # Apply boxing to model, ncs, and map (if available)
     self.apply_to_model_ncs_and_map()
 
-class extract_unique(with_bounds):
+class around_unique(with_bounds):
 
   '''
   Identify unique part of density in a map (using ncs object if present)
@@ -355,7 +387,15 @@ class extract_unique(with_bounds):
   around regions containing density.  Note: the map may be masked between
   nearby density regions so this map could have many discontinuities.
 
-  Creates new map_manager and modifies model and ncs_objects in place
+  NOTE: This method carries out both boxing and masking. Its effect is
+  similar to create_box_with_bounds, where the bounds are defined by the
+  asymmetric part of the map, followed by masking around that asymmetric part
+  of the map.
+
+  NOTE: ncs_object from map_manager will be used to identify the unique
+  part of the map.
+
+  Creates new map_manager and modifies model in place
 
   Input map_manager must have origin (working position) at (0, 0, 0)
   Input model coordinates must correspond to working position of map_manager
@@ -366,7 +406,7 @@ class extract_unique(with_bounds):
   Output versions of map_manager and model are in P1 and have origin at (0, 0, 0).
   Bounds refer to grid position in this box with origin at (0, 0, 0)
 
-  Wrapping must be specified on initialization
+  Wrapping:
     wrapping = True means that grid points outside of the unit cell can be
     mapped inside with unit translations and box can effectively come
     from anywhere in space.
@@ -377,11 +417,27 @@ class extract_unique(with_bounds):
     undefined.  If a box is specified that uses points outside the defined
     region, those points are set to zero.
 
+
+      Additional parameters:
+         mask_expand_ratio:   allows increasing masking radius beyond default at
+                              final stage of masking
+         solvent_content:  fraction of cell not occupied by macromolecule
+         sequence:        one-letter code of sequence of unique part of molecule
+         chain_type:       PROTEIN or RNA or DNA. Used with sequence to estimate
+                            molecular_mass
+         molecular_mass:    Molecular mass (Da) of entire molecule used to
+                            estimate solvent_content
+         target_ncs_au_model: model marking center of location to choose as
+                              unique
+         box_cushion:        buffer around unique region to be boxed
+         soft_mask:  use soft mask
+         keep_low_density:  keep low density regions
+         regions_to_keep:   Allows choosing just highest-density contiguous
+                            region (regions_to_keep=1) or a few
+
   '''
 
   def __init__(self, map_manager,
-    wrapping,  # Must be defined True or False
-    ncs_object = None,
     model = None,
     target_ncs_au_model = None,
     regions_to_keep = None,
@@ -392,45 +448,51 @@ class extract_unique(with_bounds):
     symmetry = None,
     chain_type = 'PROTEIN',
     keep_low_density = True,  # default from map_box
-    box_buffer = 5,
-    soft_mask_extract_unique = True,
+    box_cushion= 5,
+    soft_mask = True,
     mask_expand_ratio = 1,
+    wrapping = None,
     log = None):
 
-    self.wrapping = wrapping
+    self.model_can_be_outside_bounds = None  # not used but required to be set
+
     self._map_manager = map_manager
     self._model = model
-    self._ncs_object = ncs_object
+
+    self._mask_data = None
+
+    self._force_wrapping = wrapping
+    if wrapping is None:
+      wrapping = self.map_manager().wrapping()
+    self.basis_for_boxing_string = 'around_unique, wrapping = %s' %(
+      wrapping)
 
     if log is None:
       log = null_out() # Print only if a log is supplied
 
-    assert isinstance(wrapping, bool)
     assert isinstance(map_manager, iotbx.map_manager.map_manager)
     assert self._map_manager.map_data().accessor().origin()  ==  (0, 0, 0)
-    assert resolution
-    if ncs_object:
-      assert isinstance(ncs_object, mmtbx.ncs.ncs.ncs)
+    assert resolution is not None
     if model is not None:
       assert isinstance(model, mmtbx.model.manager)
       assert map_manager.is_compatible_model(model)
-    if wrapping:  # map must be entire unit cell
+    if self.map_manager().wrapping():  # map must be entire unit cell
       assert map_manager.unit_cell_grid == map_manager.map_data().all()
 
     # Get crystal_symmetry
-    self.crystal_symmetry = map_manager.crystal_symmetry()
+    crystal_symmetry = map_manager.crystal_symmetry()
     # Convert to map_data
-    self.map_data = map_manager.map_data()
 
     from cctbx.maptbx.segment_and_split_map import run as segment_and_split_map
-    assert self.map_data.origin() == (0, 0, 0)
+    assert self._map_manager.map_data().origin() == (0, 0, 0)
+
     args = []
 
     ncs_group_obj, remainder_ncs_group_obj, tracking_data  = \
       segment_and_split_map(args,
         map_data = self._map_manager.map_data(),
-        crystal_symmetry = self.crystal_symmetry,
-        ncs_obj = self._ncs_object,
+        crystal_symmetry = crystal_symmetry,
+        ncs_obj = self._map_manager.ncs_object(),
         target_model = target_ncs_au_model,
         write_files = False,
         auto_sharpen = False,
@@ -445,32 +507,29 @@ class extract_unique(with_bounds):
         symmetry = symmetry,
         keep_low_density = keep_low_density,
         regions_to_keep = regions_to_keep,
-        box_buffer = box_buffer,
-        soft_mask_extract_unique = soft_mask_extract_unique,
+        box_buffer = box_cushion,
+        soft_mask_extract_unique = soft_mask,
         mask_expand_ratio = mask_expand_ratio,
         out = log)
 
     from scitbx.matrix import col
 
-    if not hasattr(tracking_data, 'box_map_ncs_au_map_data'):
+    if not hasattr(tracking_data, 'box_mask_ncs_au_map_data'):
       raise Sorry(" Extraction of unique part of map failed...")
 
-    ncs_au_map_data = tracking_data.box_map_ncs_au_map_data
-    ncs_au_crystal_symmetry = tracking_data.box_map_ncs_au_crystal_symmetry
+    ncs_au_mask_data = tracking_data.box_mask_ncs_au_map_data
 
-    lower_bounds = ncs_au_map_data.origin()
+    lower_bounds = ncs_au_mask_data.origin()
     upper_bounds = tuple(
-      col(ncs_au_map_data.focus())-col((1, 1, 1)))
+      col(ncs_au_mask_data.focus())-col((1, 1, 1)))
 
     print("\nBounds for unique part of map: %s to %s " %(
      str(lower_bounds), str(upper_bounds)), file = log)
 
     # shift the map so it is in the same position as the box map will be in
-    ncs_au_map_data.reshape(flex.grid(ncs_au_map_data.all()))
-    assert col(ncs_au_map_data.all()) == \
+    ncs_au_mask_data.reshape(flex.grid(ncs_au_mask_data.all()))
+    assert col(ncs_au_mask_data.all()) == \
         col(upper_bounds)-col(lower_bounds)+col((1, 1, 1))
-
-    self.basis_for_boxing_string = 'extract unique, wrapping = %s' %(self.wrapping)
 
     self.gridding_first = lower_bounds
     self.gridding_last  = upper_bounds
@@ -481,9 +540,42 @@ class extract_unique(with_bounds):
     # Apply boxing to model, ncs, and map (if available)
     self.apply_to_model_ncs_and_map()
 
-    # And replace map data with boxed asymmetric unit
-    self._map_manager.set_map_data(map_data = ncs_au_map_data)
-    self._map_manager.add_limitation("extract_unique")
+    # Note that at this point, self._map_manager has been boxed
+    assert ncs_au_mask_data.all() == self._map_manager.map_data().all()
+    self._mask_data = ncs_au_mask_data
+
+    # Now separately apply the mask to the boxed map
+    self.apply_around_unique_mask(
+       self._map_manager,
+       resolution = resolution,
+       soft_mask = soft_mask)
+
+  def apply_around_unique_mask(self,
+      map_manager,
+      resolution,
+      soft_mask):
+    '''
+      This procedure matches what is done in segment_and_split_map
+      It comes at the end of around_unique and can be applied to additional
+      map_manager objects if desired.
+    '''
+    assert self._mask_data is not None
+
+    map_manager.create_mask_with_map_data(map_data = self._mask_data)
+
+    if soft_mask: # Make the mask a soft mask if requested
+      map_manager.soft_mask(soft_mask_radius = resolution)
+      map_manager.apply_mask()
+      # Now mask around edges
+      map_manager.create_mask_around_edges(boundary_radius = resolution)
+      map_manager.soft_mask(soft_mask_radius = resolution)
+      map_manager.apply_mask()
+
+    else:  # just apply the mask
+      map_manager.apply_mask()
+
+    # And add limitation to map
+    map_manager.add_limitation("extract_unique")
 
 class around_mask(with_bounds):
   """
@@ -497,7 +589,7 @@ class around_mask(with_bounds):
   Returns boxed version of map_manager supplied.  Object will contain
   the boxed version of mask as self.mask_as_map_manager.
 
-  Wrapping must be specified on initialization
+  Wrapping:
     wrapping = True means that grid points outside of the unit cell can be
     mapped inside with unit translations and box can effectively come
     from anywhere in space.
@@ -509,36 +601,49 @@ class around_mask(with_bounds):
     region, those points are set to zero.
 
   """
-  def __init__(self, map_manager, wrapping,
+  def __init__(self, map_manager,
      mask_as_map_manager,
      model = None,
-     ncs_object = None,
      box_cushion = 3,
+     wrapping = None,
+     model_can_be_outside_bounds = False,
      log = sys.stdout):
 
-    self.wrapping = wrapping
     self._map_manager = map_manager
     self._model = model
-    self._ncs_object = ncs_object
+    self.model_can_be_outside_bounds = model_can_be_outside_bounds
+    assert map_manager.shift_cart()==mask_as_map_manager.shift_cart()
 
     # safeguards
-    assert isinstance(wrapping, bool)
     assert isinstance(map_manager, iotbx.map_manager.map_manager)
     assert isinstance(mask_as_map_manager, iotbx.map_manager.map_manager)
     assert self._map_manager.map_data().accessor().origin()  ==  (0, 0, 0)
     assert map_manager.is_similar(mask_as_map_manager)
-    if wrapping:
+    if self.map_manager().wrapping():
       assert map_manager.unit_cell_grid == map_manager.map_data().all()
 
-    self.basis_for_boxing_string = 'around_mask bounds, wrapping = %s' %(wrapping)
+    self._force_wrapping = wrapping
+    if wrapping is None:
+      wrapping = self.map_manager().wrapping()
+    self.basis_for_boxing_string = 'around_mask bounds, wrapping = %s' %(
+      wrapping)
+
+    # Make sure the map goes from 0 to 1
+    map_data = mask_as_map_manager.map_data()
+    mmm = map_data.as_1d().min_max_mean()
+    minimum = mmm.min
+    range_of_values = mmm.max - mmm.min
+    map_data = (map_data - minimum ) / max(1.e-10,range_of_values)
+
 
     # Get a connectivity object that marks all the connected regions in map
 
     from cctbx.maptbx.segment_and_split_map import get_co
     co, sorted_by_volume, min_b, max_b = get_co(
-       map_data = mask_as_map_manager.map_data(),
+       map_data = map_data,
        threshold = 0.5,
        wrapping = False)
+
 
     if len(sorted_by_volume)<2:  # didn't work
       raise Sorry("No mask obtained...")
@@ -561,9 +666,9 @@ class around_mask(with_bounds):
     cs = map_manager.crystal_symmetry()
     cushion = flex.double(cs.unit_cell().fractionalize((box_cushion, )*3))
     all_orig = map_manager.map_data().all()
-    self.gridding_first = [max(0, ifloor((gf/n-c)*n)) for c, gf, n in zip(
+    self.gridding_first = [max(0, ifloor(gf-c*n)) for c, gf, n in zip(
        cushion, self.gridding_first, all_orig)]
-    self.gridding_last  = [ min(n-1, iceil((gf+c)*n)) for c, gf, n in zip(
+    self.gridding_last  = [min(n-1, iceil(gl+c*n)) for c, gl, n in zip(
        cushion, self.gridding_last, all_orig)]
 
 
@@ -585,7 +690,7 @@ class around_density(with_bounds):
 
   Input map_manager must have origin (working position) at (0, 0, 0)
 
-  Wrapping must be specified on initialization
+  Wrapping:
     wrapping = True means that grid points outside of the unit cell can be
     mapped inside with unit translations and box can effectively come
     from anywhere in space.
@@ -597,29 +702,32 @@ class around_density(with_bounds):
     region, those points are set to zero.
 
   """
-  def __init__(self, map_manager, wrapping,
+  def __init__(self, map_manager,
      threshold = 0.05,
      box_cushion = 3.,
      get_half_height_width = True,
      model = None,
-     ncs_object = None,
+     wrapping = None,
+     model_can_be_outside_bounds = False,
      log = sys.stdout):
 
-    self.wrapping = wrapping
     self._map_manager = map_manager
     self._model = model
-    self._ncs_object = ncs_object
+    self.model_can_be_outside_bounds = model_can_be_outside_bounds
 
     # safeguards
     assert threshold is not None
     assert box_cushion is not None
-    assert isinstance(wrapping, bool)
     assert isinstance(map_manager, iotbx.map_manager.map_manager)
     assert self._map_manager.map_data().accessor().origin()  ==  (0, 0, 0)
-    if wrapping:
+    if self.map_manager().wrapping():
       assert map_manager.unit_cell_grid == map_manager.map_data().all()
 
-    self.basis_for_boxing_string = 'around_density, wrapping = %s' %(wrapping)
+    self._force_wrapping = wrapping
+    if wrapping is None:
+      wrapping = self.map_manager().wrapping()
+    self.basis_for_boxing_string = 'around_density, wrapping = %s' %(
+      wrapping)
 
 
     # Select box where data are positive (> threshold*max)
@@ -781,7 +889,7 @@ def get_bounds_of_valid_region(map_data,
   some_valid_points = True
   for o, a, f, l in zip(map_data.origin(), map_data.all(),
      gridding_first, gridding_last):
-    # Available map goes from o to o+a
+    # Available map goes from o to o+a-1
     # Requested map goes from f to l
 
     # If f is less than o, first valid grid point is o.
@@ -871,3 +979,259 @@ def copy_and_zero_map_outside_bounds(map_data, bounds_info):
   new_map = new_map.as_1d()
   new_map.reshape(acc)
   return new_map
+
+def shift_and_box_model(model = None,
+    box_cushion = 5, shift_model = True,
+    crystal_symmetry = None):
+  '''
+    Shift a model near the origin and box around it
+    Use crystal_symmetry if supplied
+  '''
+  from mmtbx.model import manager as model_manager
+  from scitbx.matrix import col
+  from cctbx import crystal
+
+  ph=model.get_hierarchy()
+  sites_cart=ph.atoms().extract_xyz()
+  if shift_model:
+    sites_cart=sites_cart-col(sites_cart.min())+col(
+      (box_cushion,box_cushion,box_cushion))
+
+  box_end=col(sites_cart.max())+col((box_cushion,box_cushion,box_cushion))
+  if not crystal_symmetry:
+    a,b,c=box_end
+    crystal_symmetry=crystal.symmetry((a,b,c, 90,90,90),1)
+  ph.atoms().set_xyz(sites_cart)
+
+  return model_manager(
+     ph.as_pdb_input(),
+     crystal_symmetry = crystal_symmetry,
+     log = null_out())
+
+def get_boxes_to_tile_map(target_for_boxes = 24,
+      n_real = None,
+      crystal_symmetry = None,
+      cushion_nx_ny_nz = None,
+      wrapping = False,
+      do_not_go_over_target = None,
+      target_xyz_center_list = None,
+     ):
+
+    '''
+      Get a set of boxes that tile the map
+      If cushion_nx_ny_nz is set ... create a second set of boxes that are
+        expanded by cushion_nx_ny_nz in each direction
+      Try to make boxes symmetrical in full map
+      If target_xyz_center_list is set, try to use them as centers but keep
+       size the same as would otherwise be used
+    '''
+    nx,ny,nz = n_real
+    smallest = min(nx,ny,nz)
+    largest = max(nx,ny,nz)
+    target_volume_per_box = (nx*ny*nz)/target_for_boxes
+    target_length = target_volume_per_box**0.33
+    if target_xyz_center_list:
+      lower_bounds_list = []
+      upper_bounds_list = []
+      uc = crystal_symmetry.unit_cell()
+      for site_frac in uc.fractionalize(target_xyz_center_list):
+        center_ijk = tuple([ int(0.5+x * n) for x,n in zip(site_frac, n_real)])
+        lower_bounds_list.append(
+          tuple( [
+             int(max(1,min(n-2,(i - (1+target_length)//2)))) for i,n in
+            zip(center_ijk,n_real)
+             ]
+          ))
+        upper_bounds_list.append(
+          tuple( [
+             int(max(1,min(n-2,(i + (1+target_length)//2)))) for i,n in
+            zip(center_ijk,n_real)
+             ]
+          ))
+    elif target_for_boxes == 1:
+      lower_bounds_list = [(0,0,0)]
+      upper_bounds_list = [tuple([i - 1 for i in n_real])]
+    else:
+      lower_bounds_list = []
+      upper_bounds_list = []
+      for x_info in get_bounds_list(nx, target_length,
+        do_not_go_over_target = do_not_go_over_target):
+        for y_info in get_bounds_list(ny, target_length,
+           do_not_go_over_target = do_not_go_over_target):
+          for z_info in get_bounds_list(nz, target_length,
+             do_not_go_over_target = do_not_go_over_target):
+            lower_bounds_list.append(
+               [x_info.lower_bound,
+                y_info.lower_bound,
+                z_info.lower_bound])
+            upper_bounds_list.append(
+               [x_info.upper_bound,
+                y_info.upper_bound,
+                z_info.upper_bound])
+
+    # Now make a set of boxes with a cushion if requested
+    lower_bounds_with_cushion_list = []
+    upper_bounds_with_cushion_list = []
+    if cushion_nx_ny_nz:
+
+      for lb,ub in zip (lower_bounds_list,upper_bounds_list):
+        if (wrapping):
+          new_lb = tuple([b - c for b,c in zip(lb, cushion_nx_ny_nz)])
+          new_ub = tuple([u + c for u,c in zip(ub, cushion_nx_ny_nz)])
+        else:
+          new_lb = tuple([max(0,b - c) for b,c in zip(lb, cushion_nx_ny_nz)])
+          new_ub = tuple([min(n-1,u + c) for u,c,n in zip(ub, cushion_nx_ny_nz,
+            n_real)])
+        lower_bounds_with_cushion_list.append(new_lb)
+        upper_bounds_with_cushion_list.append(new_ub)
+    else:
+      lower_bounds_with_cushion_list = lower_bounds_list
+      upper_bounds_with_cushion_list = upper_bounds_list
+
+    # Now remove any duplicates
+    lb_ub_list = []
+    new_lb_list = []
+    new_ub_list = []
+    for lb,ub in zip (
+         lower_bounds_with_cushion_list,upper_bounds_with_cushion_list):
+       if [lb,ub] in lb_ub_list: continue
+       lb_ub_list.append([lb,ub])
+       new_lb_list.append(lb)
+       new_ub_list.append(ub)
+    lower_bounds_with_cushion_list = new_lb_list
+    upper_bounds_with_cushion_list = new_ub_list
+
+    return group_args(
+      lower_bounds_list = lower_bounds_list,
+      upper_bounds_list = upper_bounds_list,
+      lower_bounds_with_cushion_list = lower_bounds_with_cushion_list,
+      upper_bounds_with_cushion_list = upper_bounds_with_cushion_list,
+      n_real = n_real,
+      crystal_symmetry = crystal_symmetry,
+     )
+
+def get_bounds_list(nx, target_length,
+     do_not_go_over_target = None,):
+  '''
+    Return start, end that are about the length target_length and that
+    collectively cover exactly nx grid units.
+    Try to make bounds on the ends match target_length
+    Try to make bounds symmetrical
+  '''
+
+  bounds_list = []
+  if nx < (3 * target_length)/2:  # take one only
+    bounds_list.append(
+      group_args(
+       lower_bound = 0,
+       upper_bound = nx - 1,)
+      )
+  else:  # take as many as fit
+    n_target = nx/target_length  # how many we want (float)
+    if do_not_go_over_target:
+      n = max(1,int(n_target)) # int ... how many can fit
+    else: # usual
+      n = max(1,int(0.5 + n_target)) # int ... how many can fit
+    exact_target_length =  nx/n  # float length of each group
+
+    last_end_point = -1
+    length_list = []
+    for i in range(n):
+      target_end_point = exact_target_length * (i+1)
+      actual_end_point = min (nx -1, max(0, int(0.5 + target_end_point)))
+      length_list.append(actual_end_point - last_end_point)
+      last_end_point = actual_end_point
+
+    # Now try and make length_list symmetric
+    length_list = make_list_symmetric(length_list)
+    last_end_point = -1
+    for i in range(n):
+      actual_end_point = last_end_point + length_list[i]
+      bounds_list.append(
+          group_args(
+       lower_bound = last_end_point + 1,
+       upper_bound = actual_end_point,)
+      )
+      last_end_point = actual_end_point
+
+  return bounds_list
+
+def make_list_symmetric(length_list):
+  '''
+   adjust entries in length_list to make it symmetric but same total
+  '''
+  from copy import deepcopy
+  length_list = deepcopy(length_list)
+  unused_length = 0
+  n=len(length_list)
+
+  from scitbx.array_family import flex
+  total = flex.double(tuple(length_list)).min_max_mean().mean*len(length_list)
+  for i_from_end in range (n//2): # may leave out middle one if present
+    i = i_from_end
+    n_bigger = length_list[i] - length_list[n-i-1]
+    n_bigger_abs = abs(n_bigger)
+    n_shift = n_bigger_abs//2
+    n_bigger_even = 2*n_shift
+    if n_bigger > 0:
+      # move n_shift to n-i-1 and save remainder
+      length_list[n-i-1] += n_shift
+      length_list[i] -= n_shift
+      delta = length_list[i] - length_list[n-i-1]
+      assert delta >= 0
+      length_list[i] -= delta
+      unused_length += delta
+    elif n_bigger < 0:
+      # move n_shift to i and save remainder
+      length_list[i] += n_shift
+      length_list[n-i-1] -= n_shift
+      delta = length_list[n-i-1] - length_list[i]
+      assert delta >= 0
+      length_list[n-i-1] -= delta
+      unused_length += delta
+    if unused_length//2 > 0:
+      length_list[i] += unused_length//2
+      length_list[n-i-1] += unused_length//2
+      unused_length -= 2* (unused_length//2)
+  if unused_length:
+    length_list[(n+1)//2] += unused_length
+  return length_list
+
+
+def get_bounds_around_model(
+      map_manager = None,
+      model = None,
+      box_cushion = None,
+      stay_inside_current_map = None,
+     ):
+    '''
+      Calculate the lower and upper bounds to box around a model
+      Allow bounds to go outside the available box unless
+      stay_inside_current_map (this has to be dealt with at the boxing stage)
+    '''
+
+    # get items needed to do the shift
+    cs = map_manager.crystal_symmetry()
+    uc = cs.unit_cell()
+    sites_cart = model.get_sites_cart()
+    sites_frac = uc.fractionalize(sites_cart)
+    map_data = map_manager.map_data()
+    # convert box_cushion into fractional vector
+    cushion_frac = flex.double(uc.fractionalize((box_cushion, )*3))
+    # find fractional corners
+    frac_min = sites_frac.min()
+    frac_max = sites_frac.max()
+    frac_max = list(flex.double(frac_max)+cushion_frac)
+    frac_min = list(flex.double(frac_min)-cushion_frac)
+    # find corner grid nodes
+    all_orig = map_data.all()
+
+    lower_bounds = [ifloor(f*n) for f, n in zip(frac_min, all_orig)]
+    upper_bounds = [ iceil(f*n) for f, n in zip(frac_max, all_orig)]
+    if stay_inside_current_map:
+      lower_bounds = [ max (0,lb) for lb in lower_bounds]
+      upper_bounds = [ min (ub, n-1) for ub,n in zip(upper_bounds,all_orig)]
+    return group_args(
+      lower_bounds = lower_bounds,
+      upper_bounds = upper_bounds,
+    )

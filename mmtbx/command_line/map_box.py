@@ -35,6 +35,10 @@ master_phil = libtbx.phil.parse("""
     .help = Input map file (CCP4/mrc format).
     .short_caption = Input map file
     .type = str
+  mask_file_name = None
+    .help = Input mask file (CCP4/mrc format).
+    .short_caption = Input mask file
+    .type = str
   target_ncs_au_file = None
     .help = File with model indicating which au to choose in extract_unique
     .short_caption = Input target ncs au file
@@ -51,7 +55,7 @@ master_phil = libtbx.phil.parse("""
     .short_caption = Selection radius
   box_cushion = 3.0
     .type = float
-    .help = If mask_atoms is False, a box of density will be cut out around\
+    .help = If model is supplied, a box of density will be cut out around\
             the input model (after selections are applied to the model). \
             The size of the box of density will be box_cushion bigger than \
             the model.  Box cushion also applied if density_select is set.\
@@ -327,8 +331,13 @@ master_phil = libtbx.phil.parse("""
 
   wrapping = False
     .type = bool
-    .help = Assume map ends at map boundaries. Alternative is wrap around.
+    .help = If wrapping, map wraps around at map boundaries.
     .short_caption = Wrapping
+
+  check_wrapping = False
+    .type = bool
+    .help = Check that wrapping is consistent with map if it is set to True
+    .short_caption = Check wrapping
 
   output_ccp4_map_mean = None
     .type = float
@@ -340,11 +349,16 @@ master_phil = libtbx.phil.parse("""
     .help = Choose mean and SD of output CCP4 map
     .short_caption = SD of output CCP4 map
 
-  output_map_labels = None
+  output_map_label = None
     .type = str
     .multiple = True
     .help = Add this label to output map
     .short_caption = Add label
+
+  remove_output_map_labels = None
+    .type = bool
+    .help = Remove all output map labels
+    .short_caption = Remove labels
 
   gui
     .help = "GUI-specific parameter required for output directory"
@@ -388,19 +402,8 @@ def get_model_from_inputs(
     dm.set_overwrite(True)
     dm.process_model_file(file_name)
     model = dm.get_model(file_name)
-    if not model.crystal_symmetry():
+    if crystal_symmetry and not model.crystal_symmetry():
       model.set_crystal_symmetry(crystal_symmetry)
-      model._process_input_model()
-
-    if crystal_symmetry and (
-      not model.crystal_symmetry().is_similar_symmetry(crystal_symmetry)):
-      print ("\nWarning: replacing model crystal symmetry:\n" +
-        "(%s) \nwith input crystal symmetry:\n (%s)\n" %(
-         str(model.crystal_symmetry()), str(crystal_symmetry)), file = log)
-      model =  mmtbx.model.manager(
-          model_input = model.get_hierarchy().as_pdb_input(),
-          crystal_symmetry = crystal_symmetry,
-          log = log)
 
   return model
 
@@ -423,14 +426,22 @@ def get_map_manager_objects(
   map_or_map_coeffs_prefix = None
 
   if map_data and not ccp4_map:  # convert to map_manager
+    # Called with map_data.  We do not know for sure if map_data is
+    #  wrapped or not. Require wrapping to be set to define it.
+
+    assert isinstance(params.wrapping, bool)
     ccp4_map = map_manager(map_data = map_data,
       unit_cell_grid = map_data.all(),
-      unit_cell_crystal_symmetry = crystal_symmetry)
-
+      unit_cell_crystal_symmetry = crystal_symmetry,
+      wrapping = params.wrapping)
   elif (not ccp4_map):
+
     # read first mtz file
     if ( (len(inputs.reflection_file_names) > 0) or
          (params.map_coefficients_file is not None) ):
+      # Here with MTZ input, wrapping default is True (crystallographic map)
+      if not isinstance(params.wrapping, bool):
+        params.wrapping = True
       # file in phil takes precedent
       if (params.map_coefficients_file is not None):
         if (len(inputs.reflection_file_names)  ==  0):
@@ -452,11 +463,15 @@ def get_map_manager_objects(
       # Convert map_data to map_manager object
       ccp4_map = map_manager(map_data = map_data,
         unit_cell_grid = map_data.all(),
-        unit_cell_crystal_symmetry = crystal_symmetry)
+        unit_cell_crystal_symmetry = crystal_symmetry,
+        wrapping = params.wrapping)
 
     # or read CCP4 map
     elif ( (inputs.ccp4_map is not None) or
            (params.ccp4_map_file is not None) ):
+      # Here wrapping comes from map file; no need to set default. If not
+      #  specified in map labels, wrapping will be False for map file.
+
       if (params.ccp4_map_file is not None):
         inputs.ccp4_map = read_map_file_with_data_manager(params.ccp4_map_file)
         inputs.ccp4_map_file_name = params.ccp4_map_file
@@ -479,7 +494,11 @@ def get_map_manager_objects(
   if mask_data and (not mask_as_map_manager):
     mask_as_map_manager = map_manager(map_data = mask_data.as_double(),
         unit_cell_grid = mask_data.all(),
-        unit_cell_crystal_symmetry = crystal_symmetry)
+        unit_cell_crystal_symmetry = crystal_symmetry,
+        wrapping = params.wrapping)
+  if (not mask_as_map_manager) and params.mask_file_name:
+    mask_as_map_manager = read_map_file_with_data_manager(
+        params.mask_file_name)
 
   if len(inputs.pdb_file_names)>0:
     output_prefix = os.path.basename(inputs.pdb_file_names[0])[:-4]
@@ -562,8 +581,7 @@ def process_inputs(args = None,
   crystal_symmetry = None,
   log = sys.stdout):
 
-  # Process inputs ignoring symmetry conflicts just to get the value of
-  #   ignore_symmetry_conflicts...
+  # Process inputs ignoring symmetry conflicts
 
   inputs = mmtbx.utils.process_command_line_args(args = args,
       cmd_cs = crystal_symmetry,
@@ -571,19 +589,6 @@ def process_inputs(args = None,
       suppress_symmetry_related_errors = True)
   params = inputs.params.extract()
 
-  # Now process inputs for real and write a nice error message if necessary.
-  try:
-    inputs = mmtbx.utils.process_command_line_args(args = args,
-      cmd_cs = crystal_symmetry,
-      master_params = master_phil,
-      suppress_symmetry_related_errors = params.ignore_symmetry_conflicts)
-  except Exception as e:
-    if str(e).find("symmetry mismatch ")>1:
-      raise Sorry(str(e)+"\nTry 'ignore_symmetry_conflicts=True'")
-    else:
-      raise e
-
-  params = inputs.params.extract()
   master_phil.format(python_object = params).show(out = log)
 
   return inputs, params
@@ -631,7 +636,12 @@ def modify_params(params = None,
     write_output_files = None,
     upper_bounds = None,
     lower_bounds = None,
+    wrapping = None,
     log = sys.stdout):
+
+  #  Update wrapping if specified
+  if isinstance(wrapping, bool):
+    params.wrapping = wrapping
 
   # PDB file
   if params.pdb_file and not inputs.pdb_file_names and not pdb_hierarchy \
@@ -705,23 +715,10 @@ def apply_selection_to_model(params = None, model = None, log = sys.stdout):
   if not model:
      return
 
-  if not params.selection: params.selection = "all"
+  if not params.selection or params.selection == "all":
+    return model
+
   selection = model.selection(params.selection)
-  if selection.size():
-    print_statistics.make_sub_header("atom selection", out = log)
-    print("Selection string: selection = '%s'"%params.selection, file = log)
-    print("  selects %d atoms from total %d atoms."%(selection.count(True),
-        selection.size()), file = log)
-  sites_cart_all = model.get_xray_structure().sites_cart()
-  sites_cart = sites_cart_all.select(selection)
-  selection = model.get_xray_structure().selection_within(
-    radius    = params.selection_radius,
-    selection = selection)
-
-  print("  Final selection is %d atoms from total %d atoms."%(
-        selection.count(True),
-        selection.size()), file = log)
-
   model = model.select(selection)
   return model
 
@@ -853,6 +850,7 @@ def run(args,
      mask_data = None, # XXX remove
      lower_bounds = None,
      upper_bounds = None,
+     wrapping = None,  # Alternative way to specify wrapping
      write_output_files = True,
      log = None):
 
@@ -878,6 +876,7 @@ def run(args,
     write_output_files = write_output_files,
     upper_bounds = upper_bounds,
     lower_bounds = lower_bounds,
+    wrapping = wrapping,
     log = log)
 
   # Check parameters and issue error messages if necessary
@@ -889,7 +888,6 @@ def run(args,
 
   # Use inputs.crystal_symmetry (precedence there is for map)
   crystal_symmetry = inputs.crystal_symmetry
-
 
   # Get map_manager objects
 
@@ -945,6 +943,10 @@ def run(args,
   if(ccp4_map.map_data is None):
     raise Sorry("Map or map coefficients file is needed.")
 
+  # Set wrapping if specified:
+  if params.wrapping in [True, False]:
+    ccp4_map.set_wrapping(params.wrapping)
+
   ncs_object = get_ncs_object(params = params,
       ncs_object = ncs_object, log = log)
 
@@ -964,8 +966,8 @@ def run(args,
   if params.output_unit_cell and \
      tuple(params.output_unit_cell)!= tuple(ccp4_map.unit_cell().parameters()):
     ccp4_map, model = change_output_unit_cell(params = params,
-     ccp4_map = ccp4_map,
-     model = model)
+       ccp4_map = ccp4_map,
+       model = model)
 
 
   # Decide if we are going to box at the beginning:
@@ -983,11 +985,13 @@ def run(args,
   mam = map_model_manager(
     model = model,
     map_manager = ccp4_map,
-    ncs_object = ncs_object)
+    ncs_object = ncs_object,
+    ignore_symmetry_conflicts = params.ignore_symmetry_conflicts)
   if box:
-    mam.box_around_model(
-      box_cushion = params.box_cushion,
-      wrapping = params.wrapping)
+    mam.box_all_maps_around_model_and_shift_origin(
+      box_cushion = params.box_cushion)
+    if mam.warning_message():
+      print (mam.warning_message(), file = log)
 
   # Map and model and ncs are boxed if requested and
   #   shifted to place origin at (0, 0, 0)
@@ -1006,22 +1010,22 @@ def run(args,
     mam = with_bounds(mam.map_manager(), # actually a box
          params.lower_bounds,
          params.upper_bounds,
-         params.wrapping,
          model = mam.model(),
-         ncs_object = mam.ncs_object(),
          log = log)
+    if mam.warning_message():
+      print (mam.warning_message(), file = log)
 
   elif params.density_select:  # Box it with density_select
     assert not box # should not have used boxing
     from cctbx.maptbx.box import around_density
     mam = around_density(mam.map_manager(), # actually a box
-         params.wrapping,
          box_cushion = params.box_cushion,
          threshold = params.density_select_threshold,
          get_half_height_width = params.get_half_height_width,
          model = mam.model(),
-         ncs_object = mam.ncs_object(),
          log = log)
+    if mam.warning_message():
+      print (mam.warning_message(), file = log)
 
   elif params.mask_select:  # Box it with mask_select
     assert not box # should not have used boxing
@@ -1034,23 +1038,24 @@ def run(args,
         sequence = sequence,
         solvent_content = params.solvent_content,
         )
+      cm=mm._created_mask
       mask_as_map_manager = mm.get_mask_as_map_manager()
       if not mask_as_map_manager:
         raise Sorry("Unable to auto-generate mask")
 
-    mam = around_mask(mam.map_manager(), # actually a box
-         params.wrapping,
+    mam = around_mask(mam.map_manager(), # actually a box, shifted
          mask_as_map_manager = mask_as_map_manager,
          box_cushion = params.box_cushion,
          model = mam.model(),
-         ncs_object = mam.ncs_object(),
          log = log)
+    if mam.warning_message():
+      print (mam.warning_message(), file = log)
 
   # Now mask map if requested
 
   if (params.extract_unique):  # mask around unique part of map and rebox
     # NOTE: actually returns box not mam XXX
-    mam = apply_extract_unique(mam, params = params,
+    mam = apply_around_unique(mam, params = params,
        sequence = sequence,
        target_ncs_au_model = target_ncs_au_model,
        log = log)
@@ -1079,15 +1084,33 @@ def run(args,
     if params.output_unit_cell_grid:
       print ("Setting gridding of unit cell of final map to be at %s" %(
        str(params.output_unit_cell_grid)), file = log)
-
     mam.map_manager().set_original_origin_and_gridding(
        original_origin = params.output_origin_grid_units,
        gridding = params.output_unit_cell_grid)
 
     if mam.model():
+      mam.model().shift_model_and_set_crystal_symmetry(
+       shift_cart = (0,0,0),
+       crystal_symmetry = mam.map_manager().crystal_symmetry())
+      mam.model().set_shift_cart((0,0,0)) # next line requires shift-cart=0,0,0
+      mam.model().set_unit_cell_crystal_symmetry(
+        mam.map_manager().crystal_symmetry())
       mam.model().set_shift_cart(mam.map_manager().shift_cart())
-    if mam.ncs_object():
-      mam.ncs_object().set_shift_cart(mam.map_manager().shift_cart())
+
+  if params.wrapping in [True, False] and mam.map_manager().is_full_size():
+    mam.map_manager().set_wrapping(params.wrapping)
+    if params.wrapping and params.check_wrapping and (
+       not mam.map_manager().is_consistent_with_wrapping()):
+      print("\nWARNING: This map is not consistent with wrapping but wrapping"+
+        " is set to True",file = log)
+
+  # Adjust labels
+  if params.output_map_label:  # add it
+    for label in params.output_map_label:
+      mam.map_manager().add_label(label)
+
+  if params.remove_output_map_labels:
+    mam.map_manager().remove_labels()
 
   # Print out any notes about the output files
   print_notes(params = params, mam = mam,
@@ -1125,7 +1148,7 @@ def run(args,
       shift_cart = mam.map_manager().shift_cart(),
       xray_structure_box = xrs,
       hierarchy = hierarchy,
-      ncs_object = mam.ncs_object(),
+      ncs_object = mam.map_manager().ncs_object(),
       map_box = mam.map_manager().map_data(),
       map_data = ccp4_map.map_data(),
       map_box_half_map_list = None,
@@ -1140,7 +1163,7 @@ def run(args,
   if write_output_files:
     model = mam.model()
     map_manager = mam.map_manager()
-    ncs_object = mam.ncs_object()
+    ncs_object = mam.map_manager().ncs_object()
     from iotbx.data_manager import DataManager
     dm = DataManager(datatypes = ['model', 'ncs_spec', 'real_map', 'miller_array'])
     dm.set_overwrite(True)
@@ -1160,8 +1183,7 @@ def run(args,
         filename =  "%s_box.ncs_spec"%output_prefix
       else:
         filename =  "%s.ncs_spec"%params.output_file_name_prefix
-      dm.write_ncs_spec_file(
-         ncs_object.as_ncs_spec_string(), filename = filename)
+      dm.write_ncs_spec_file(ncs_object, filename = filename)
       print("\nWriting symmetry to %s" %( filename), file = log)
 
     # Write ccp4 map.
@@ -1203,7 +1225,7 @@ def run(args,
        d_min = maptbx.d_min_from_map(map_data = mam.map_manager().map_data(),
          unit_cell = mam.map_manager().crystal_symmetry().unit_cell())
      map_coeffs = mam.map_manager().map_as_fourier_coefficients(
-       high_resolution = d_min)
+       d_min = d_min)
      mtz_dataset = map_coeffs.as_mtz_dataset(column_root_label = 'F')
      mtz_object = mtz_dataset.mtz_object()
      dm.write_miller_array_file(mtz_object, filename = file_name)
@@ -1345,17 +1367,15 @@ def change_output_unit_cell(params = None,
       model.set_crystal_symmetry(ccp4_map.crystal_symmetry())
     return ccp4_map, model
 
-def apply_extract_unique(mam,
+def apply_around_unique(mam,
       params = None,
       sequence = None,
       target_ncs_au_model = None,
       log = None):
 
-    from cctbx.maptbx.box import extract_unique
-    new_mam = extract_unique(
+    from cctbx.maptbx.box import around_unique
+    new_mam = around_unique(
       mam.map_manager(),
-      wrapping = False,  # always False here
-      ncs_object = mam.ncs_object(),
       model = mam.model(),
       target_ncs_au_model = target_ncs_au_model,
       sequence = sequence,
@@ -1366,8 +1386,8 @@ def apply_extract_unique(mam,
       symmetry = params.symmetry,
       chain_type = params.chain_type,
       keep_low_density = params.keep_low_density,
-      box_buffer = params.box_cushion,
-      soft_mask_extract_unique = params.soft_mask_extract_unique,
+      box_cushion = params.box_cushion,
+      soft_mask = params.soft_mask_extract_unique,
       mask_expand_ratio = params.mask_expand_ratio,
       )
     return new_mam  # XXX actually it is a box not an mam

@@ -10,6 +10,7 @@ import os
 
 from libtbx.str_utils import show_string
 from libtbx import smart_open
+import six
 from six.moves import cPickle as pickle
 
 def _open(file_name, mode):
@@ -47,7 +48,9 @@ def dump(file_name, obj):
   >>> print load("output.pkl.gz")
   [1, 2, 3]
   """
-  return pickle.dump(obj, _open(file_name, "wb"), pickle.HIGHEST_PROTOCOL)
+  with _open(file_name, "wb") as f:
+    p = pickle.dump(obj, f, pickle.HIGHEST_PROTOCOL)
+  return p
 
 def dumps(obj):
   """
@@ -79,8 +82,16 @@ def load(file_name, faster_but_using_more_memory=True):
   object
   """
   if (faster_but_using_more_memory):
-    return pickle.loads(_open(file_name, "rb").read())
-  return pickle.load(_open(file_name, "rb"))
+    if six.PY2:
+      with _open(file_name, "rb") as f:
+        s = f.read()
+      return pickle.loads(s)
+    with _open(file_name, "rb") as f:
+      s = f.read()
+    return pickle.loads(s, encoding='bytes')
+  with _open(file_name, "rb") as f:
+    p = pickle.load(f)
+  return p
 
 def loads(string):
   """

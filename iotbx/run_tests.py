@@ -9,10 +9,13 @@ tst_list_base = [
   "$D/regression/tst_phil.py",
   "$D/regression/tst_pdb_cif_inputs.py",
   "$D/regression/tst_data_manager.py",
-  "$D/regression/tst_r_model.py",
+  "$D/regression/tst_map_manager_wrapping.py",
   "$D/regression/tst_map_manager.py",
   "$D/regression/tst_map_model_manager.py",
   "$D/regression/tst_map_model_manager_2.py",
+  "$D/regression/tst_map_model_manager_3.py",
+  "$D/regression/tst_map_model_manager_4.py",
+  "$D/regression/tst_map_model_manager_call_consistency.py",
   "$D/ranges.py",
   "$D/regression/tst_crystal_symmetry_from_any.py",
   "$D/regression/tst_poscar.py",
@@ -29,6 +32,7 @@ tst_list_base = [
   "$D/shelx/tst_hklf.py",
   "$D/shelx/tst_writer.py",
   "$D/shelx/tst_fvar_encoding.py",
+  "$D/pdb/tst_pdb.py",
   "$D/pdb/tst_mmcif.py",
   "$D/pdb/tst_mmcif_hierarchy.py",
   "$D/pdb/tst_mmcif_hierarchy_2.py",
@@ -37,6 +41,8 @@ tst_list_base = [
   "$B/pdb/hybrid_36_fem",
   "$D/pdb/tst_hierarchy.py",
   "$D/pdb/tst_hierarchy_atom_sort.py",
+  "$D/pdb/tst_hierarchy_flip_symmetric.py",
+  '$D/regression/tst_selected_hierarchy_flip.py',
   "$D/pdb/tst_ext.py",
   "$D/pdb/tst_atom_selection.py",
   "$D/pdb/tst_rna_dna_atom_names.py",
@@ -98,6 +104,7 @@ tst_list_base = [
   "$D/regression/tst_export_scalepack_unmerged.py",
   ["$D/dsn6/tst.py", "P31"],
   "$D/regression/ncs/tst_mtrix_biomt_cmdl.py",
+  "$D/regression/ncs/tst_mmcif_biomt_reduction_output.py",
   "$D/regression/ncs/tst_ncs_search_ligs.py",
   "$D/regression/ncs/tst_ncs_search_broken_chain.py",
   "$D/regression/ncs/tst_ncs_groups_preprocessing.py",
@@ -112,6 +119,7 @@ tst_list_base = [
   "$D/bioinformatics/test/tst_alignment_as_hsearch.py",
   "$D/bioinformatics/test/tst_ebi_wu_blast_xml.py",
   "$D/bioinformatics/test/tst_ncbi_blast_xml.py",
+  "$D/bioinformatics/pdb_info.py",
   "$D/regression/tst_cif_as_pdb_1atom.py",
   "$D/regression/tst_split_data_cif.py",
   "$D/regression/tst_all_chain_ids.py",
@@ -127,17 +135,6 @@ if sys.platform == 'win32':
   tst_list_fail += tst_list_windows_fail
 else:
   tst_list_base += tst_list_windows_fail
-
-# failing tests on macOS and linux, Python 3.6
-tst_list_unix_fail = [
-  "$D/pdb/tst_pdb.py",
-  ]
-
-if ((sys.platform == 'darwin' or sys.platform.startswith('linux')) and
-    sys.version_info > (3, 0)):
-  tst_list_fail += tst_list_unix_fail
-else:
-  tst_list_base += tst_list_unix_fail
 
 # unstable test on Python 3.6 (seems to be only on Azure Pipelines)
 tst_list_py3_unstable = [

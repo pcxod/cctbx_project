@@ -1,4 +1,5 @@
 from __future__ import absolute_import, division, print_function
+from operator import itemgetter
 from libtbx.utils import Abort
 from libtbx import group_args
 from six.moves import cStringIO as StringIO
@@ -9,6 +10,7 @@ import sys
 from functools import reduce
 from six.moves import range
 from six.moves import zip
+from libtbx.utils import Sorry
 
 # Wrap lines that are longer than 'width'
 def wrap(text, width):
@@ -891,7 +893,8 @@ def any_sequence_format(file_name, assign_name_if_not_defined=False,
     data=None):
   format_parser = sequence_parser_for(file_name)
   if data is None:
-    data = open(file_name, "r").read()
+    with open(file_name, "r") as f:
+      data = f.read()
   seq_object = None
   if (format_parser is not None):
     try :
@@ -1240,7 +1243,8 @@ def known_alignment_formats():
 
 def any_alignment_file(file_name):
   base, ext = os.path.splitext(file_name)
-  data = open(file_name).read()
+  with open(file_name) as f:
+    data = f.read()
   parser1 = None
   if (ext != ".hhr") and (ext in _implemented_alignment_parsers):
     parser1 = _implemented_alignment_parsers.get(ext)
@@ -1764,7 +1768,8 @@ class hhalign_parser(hhpred_parser):
       )
 
 def any_hh_file(file_name):
-  data = open(file_name).read()
+  with open(file_name) as f:
+    data = f.read()
   for parser in [hhalign_parser, hhsearch_parser] :
     try :
       p = parser(data)
@@ -1827,10 +1832,10 @@ def get_sequences(file_name=None,text=None,remove_duplicates=None):
   #  unless remove_duplicates=True
   if not text:
     if not file_name:
-      from libtbx.utils import Sorry
       raise Sorry("Missing file for get_sequences: %s" %(
         file_name))
-    text=open(file_name).read()
+    with open(file_name) as f:
+      text = f.read()
   # clear any lines that have only > and nothing else
   text=clear_empty_lines(text)
 
@@ -1844,7 +1849,64 @@ def get_sequences(file_name=None,text=None,remove_duplicates=None):
       simple_sequence_list.append(sequence.sequence)
   return simple_sequence_list
 
-def get_sequence_from_pdb(file_name=None,text=None,hierarchy=None):
+def get_chain_type(model=None, hierarchy=None):
+  '''
+   Identify chain type in a hierarchy or model and require only one chain type
+  '''
+
+  if not hierarchy:
+    hierarchy = model.get_hierarchy()
+
+  asc1 = hierarchy.atom_selection_cache()
+  sel1 = asc1.selection(string = 'protein')
+
+  count_protein = hierarchy.select(sel1).atoms().extract_xyz().size()
+
+  asc1 = hierarchy.atom_selection_cache()
+  sel1 = asc1.selection(string = '(not protein) and (not water) and (not hetero)')
+  hierarchy_rna_dna= hierarchy.select(sel1)
+  count_rna_dna= hierarchy_rna_dna.atoms().extract_xyz().size()
+
+  if count_protein and count_rna_dna:
+    raise Sorry(
+        "Model contains both protein "+
+       "(%s atoms) and rna/dna (%s atoms)...only one chain type allowed" %(
+       count_protein,count_rna_dna))
+  elif count_protein:
+    return "PROTEIN"
+  else:
+
+    # Determine if hierarchy contains O2' or U residue
+    sequence_as_rna = get_sequence_from_hierarchy(
+       hierarchy=hierarchy,chain_type="RNA")
+    if sequence_as_rna.upper().count("U") > 0:
+      return 'RNA'  # for sure RNA
+    # Otherwise, look for O2'
+
+    asc1 = hierarchy_rna_dna.atom_selection_cache()
+    sel1 = asc1.selection(string = "name O2* or name O2'")
+    hierarchy_rna_dna_o_two = hierarchy_rna_dna.select(sel1)
+    count_rna = hierarchy_rna_dna_o_two.atoms().extract_xyz().size()
+
+    asc1 = hierarchy_rna_dna.atom_selection_cache()
+    sel1 = asc1.selection(string = "name p")
+    hierarchy_rna_dna_p = hierarchy_rna_dna.select(sel1)
+    count_rna_dna_p  = hierarchy_rna_dna_p.atoms().extract_xyz().size()
+    if count_rna_dna_p and not count_rna:
+      return "DNA"
+    elif count_rna_dna_p and count_rna:
+      return "RNA"
+    else:
+      raise Sorry("Model does not appear to contain protein or RNA or DNA")
+
+def get_sequence_from_hierarchy(hierarchy, chain_type=None,
+     remove_white_space=False):
+  return get_sequence_from_pdb(hierarchy=hierarchy,chain_type=chain_type,
+     remove_white_space=remove_white_space)
+
+def get_sequence_from_pdb(file_name=None,text=None,hierarchy=None,
+    chain_type=None, remove_white_space=False):
+
   if not hierarchy:
     # read from PDB
     if not text:
@@ -1852,7 +1914,8 @@ def get_sequence_from_pdb(file_name=None,text=None,hierarchy=None):
         from libtbx.utils import Sorry
         raise Sorry("Missing file for get_sequence_from_pdb: %s" %(
           file_name))
-      text=open(file_name).read()
+      with open(file_name) as f:
+        text = f.read()
     import iotbx.pdb
     pdb_inp = iotbx.pdb.input(lines=text.splitlines(),source_info="None")
     import mmtbx.model
@@ -1860,22 +1923,35 @@ def get_sequence_from_pdb(file_name=None,text=None,hierarchy=None):
           model_input = pdb_inp,
           stop_for_unknowns = False)
     hierarchy=mm.get_hierarchy()
+
+  if hierarchy.overall_counts().n_residues == 0:
+    return ""  # nothing there
+
+  if not chain_type:
+    chain_type = get_chain_type(hierarchy = hierarchy)
+
   chain_sequences=[]
   from iotbx.pdb import amino_acid_codes as aac
-  one_letter_code_dict = aac.one_letter_given_three_letter
-
+  protein_one_letter_code_dict = aac.one_letter_given_three_letter
+  from iotbx.pdb.nucleic_acid_codes import rna_one_letter_code_dict,dna_one_letter_code_dict
+  one_letter_code_dicts={'PROTEIN':protein_one_letter_code_dict,
+    'DNA':dna_one_letter_code_dict,
+    'RNA':rna_one_letter_code_dict}
 
   for model in hierarchy.models():
     for chain in model.chains():
+      one_letter_code = one_letter_code_dicts[chain_type]
       chain_sequence=""
       for rg in chain.residue_groups():
         for atom_group in rg.atom_groups():
-          chain_sequence+=one_letter_code_dict.get(atom_group.resname,"")
+          chain_sequence+=one_letter_code.get(
+             atom_group.resname.strip().upper(),"")
           break
       chain_sequences.append(chain_sequence)
   sequence_as_string="\n".join(chain_sequences)
+  if remove_white_space:
+    sequence_as_string = sequence_as_string.replace("\n","").replace(" ","")
   return sequence_as_string
-
 
 def guess_chain_types_from_sequences(file_name=None,text=None,
     return_as_dict=False,minimum_fraction=None,
@@ -1886,7 +1962,8 @@ def guess_chain_types_from_sequences(file_name=None,text=None,
       from libtbx.utils import Sorry
       raise Sorry("Missing file for guess_chain_types_from_sequences: %s" %(
         file_name))
-    text=open(file_name).read()
+    with open(file_name) as f:
+      text = f.read()
   # clear any lines that have only > and nothing else
   text=clear_empty_lines(text)
 
@@ -1976,7 +2053,7 @@ def chain_type_and_residues(text=None,chain_type=None,likely_chain_types=None):
     'DNA':"gact",
     'RNA':"gacu",}
   if chain_type not in [None,'None']:
-    for key in letter_dict.keys():
+    for key in list(letter_dict.keys()):
       if key != chain_type:
         del letter_dict[key]
   # Get all allowed letters
@@ -2002,14 +2079,13 @@ def chain_type_and_residues(text=None,chain_type=None,likely_chain_types=None):
     non_allowed_count_dict[chain_type]=count_letters(
       letters=letter_dict[chain_type],
       text=text,only_count_non_allowed=True)
-
   # Take max count_dict. If tie, take minimum non-allowed. If tie take the one
   #  with fewer letters (i.e., DNA instead of protein if matches both except
   #  poly-ala not poly-A)
   score_list=[]
   for chain_type in letter_dict.keys():
     score_list.append([count_dict[chain_type],chain_type])
-  score_list.sort()
+  score_list.sort(key=itemgetter(0))
   score_list.reverse()
   ok_list=[]
   best_score=score_list[0][0]
@@ -2034,7 +2110,7 @@ def chain_type_and_residues(text=None,chain_type=None,likely_chain_types=None):
   score_list=[]
   for chain_type in ok_list:
     score_list.append([non_allowed_count_dict[chain_type],chain_type])
-  score_list.sort()
+  score_list.sort(key=itemgetter(0))
   ok_list=[]
   best_score=score_list[0][0]
   for score,chain_type in score_list:
@@ -2043,14 +2119,14 @@ def chain_type_and_residues(text=None,chain_type=None,likely_chain_types=None):
   if len(ok_list)<1: return None,None
   if len(ok_list)==1: return ok_list[0],residues
 
-  if text==residues*"a" and "PROTEIN" in letter_dict.keys():
+  if text.replace("g","a")==residues*"a" and "PROTEIN" in letter_dict.keys():
     # special case, all Adenine or Ala
     return "PROTEIN",residues
 
   score_list=[]
   for chain_type in ok_list:
     score_list.append([len(letter_dict[chain_type]),chain_type])
-  score_list.sort()
+  score_list.sort(key=itemgetter(0))
   ok_list=[]
   best_score=score_list[0][0]
   for score,chain_type in score_list:

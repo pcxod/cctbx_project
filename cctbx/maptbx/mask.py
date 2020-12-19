@@ -18,7 +18,8 @@ class create_mask_around_atoms(object):
       xray_structure = None,
       mask_atoms_atom_radius = None,
       n_real = None,
-      map_manager = None):
+      map_manager = None,
+      wrapping = None):
 
     '''
      Create a mask (map object) with values of 1 near atoms in xray_structure
@@ -29,11 +30,15 @@ class create_mask_around_atoms(object):
        mask_atoms_atom_radius:  radius around atoms to mask
        n_real:  dimensions of map to create, e.g., existing map_data.all()
        map_manager: alternate source of information for n_real. origin (0, 0, 0)
+         and source of wrapping
+       wrapping:  Whether map wraps around unit cell boundaries, where unit
+         cell is that defined by xray_structure or model
     '''
 
     assert (model is not None) or (xray_structure is not None)
     assert mask_atoms_atom_radius is not None
     assert (n_real is not None) or (map_manager is not None)
+    assert (map_manager is not None) or isinstance(wrapping, bool)
 
     if not n_real:
       assert map_manager.map_data().origin() == (0, 0, 0)
@@ -46,17 +51,29 @@ class create_mask_around_atoms(object):
     else:
       self._crystal_symmetry = xray_structure.crystal_symmetry()
 
-    import boost.python
-    cctbx_maptbx_ext = boost.python.import_ext("cctbx_maptbx_ext")
+    if map_manager and wrapping is None:
+      wrapping = map_manager.wrapping()
+
+    assert wrapping is not None
+
+    if (not wrapping) or (self._crystal_symmetry.space_group_number==1):
+      # usual
+      sites_frac = xray_structure.sites_frac()
+    else:  # wrapping and cs: need to expand
+      sites_frac = xray_structure.expand_to_p1().sites_frac()
+
+    import boost_adaptbx.boost.python as bp
+    cctbx_maptbx_ext = bp.import_ext("cctbx_maptbx_ext")
     radii = flex.double(
-      xray_structure.sites_frac().size(), mask_atoms_atom_radius)
+      sites_frac.size(), mask_atoms_atom_radius)
     self._mask = cctbx_maptbx_ext.mask(
-      sites_frac                  = xray_structure.sites_frac(),
+      sites_frac                  = sites_frac,
       unit_cell                   = xray_structure.unit_cell(),
       n_real                      = n_real,
       mask_value_inside_molecule  = 1,
       mask_value_outside_molecule = 0,
-      radii                       = radii)
+      radii                       = radii,
+      wrapping                    = wrapping)
     # Set up map_manager with this mask
     if map_manager:
       self._map_manager = map_manager.customized_copy(map_data = self._mask)
@@ -64,7 +81,11 @@ class create_mask_around_atoms(object):
       from iotbx.map_manager import map_manager as map_man
       self._map_manager = map_man(map_data = self._mask,
         unit_cell_crystal_symmetry = self.crystal_symmetry(),
-        unit_cell_grid = self._mask.all())
+        unit_cell_grid = self._mask.all(),
+        wrapping = wrapping)
+
+    self._map_manager.set_is_mask(True)
+
     # Initialize soft mask
     self._is_soft_mask = False
     self._is_soft_mask_around_edges = False
@@ -93,47 +114,29 @@ class create_mask_around_atoms(object):
     Make the mask a soft mask
     Parameter:
       soft_mask_radius:   defines distance over which mask is smoothed
+    This has to be done in P1 as the mask might not follow map symmetry
+      (for example a mask around edges does not)
     '''
     assert soft_mask_radius is not None
     assert not self.is_soft_mask()  # do not do it twice
 
     from cctbx.maptbx.segment_and_split_map import smooth_mask_data
 
+    if self._crystal_symmetry.space_group_number() != 1:
+      from cctbx import crystal
+      crystal_symmetry = crystal.symmetry(
+          self._crystal_symmetry.unit_cell().parameters(), 1)
+    else:
+      crystal_symmetry = self._crystal_symmetry
+
     self._mask = smooth_mask_data(mask_data = self._mask,
-    crystal_symmetry = self._crystal_symmetry,
-    rad_smooth = soft_mask_radius)
+      crystal_symmetry = crystal_symmetry,
+       rad_smooth = soft_mask_radius)
 
-  def soft_mask_around_edges(self,
-      resolution = None,
-      soft_mask_radius = None, ):
-    '''
-    Create a new soft mask around the edges of box
+    # Note that mask still might not follow map symmetry if it did not before
 
-    Parameters:
-      resolution:    Resolution to be used in smoothing
-      soft_mask_radius:   Distance over which the edge mask affects the map
-
-    '''
-    # Checks:
-    assert resolution is not None
-
-    if soft_mask_radius is None:
-      soft_mask_radius = resolution
-    assert not self.is_soft_mask_around_edges()  # do not do it twice
-
-    from cctbx.maptbx.segment_and_split_map import get_zero_boundary_map, \
-        smooth_mask_data
-
-    zero_boundary_map = get_zero_boundary_map(
-      map_data = self._map_manager.map_data(),
-      crystal_symmetry = self.box_crystal_symmetry,
-      radius = soft_mask_radius)
-
-    original_mask_data = zero_boundary_map.deep_copy()
-
-    self._mask= smooth_mask_data(mask_data = zero_boundary_map,
-      crystal_symmetry = self.box_crystal_symmetry,
-      rad_smooth = soft_mask_radius)
+    self._map_manager = self._map_manager.customized_copy(map_data = self._mask)
+    self._map_manager.set_is_mask(True)
     self._is_soft_mask_around_edges = True
 
   def apply_mask_to_other_map_manager(self, other_map_manager = None,
@@ -154,7 +157,6 @@ class create_mask_around_atoms(object):
     assert other_map_manager.is_similar(self.map_manager())
     assert other_map_manager.map_data().origin() == (0, 0, 0)
 
-    assert not self.is_soft_mask()
     from cctbx.maptbx.segment_and_split_map import apply_mask_to_map
     new_map_data = apply_mask_to_map(mask_data = self._mask,
       smoothed_mask_data = self._mask,
@@ -165,6 +167,36 @@ class create_mask_around_atoms(object):
 
     return self.map_manager().customized_copy(map_data = new_map_data)
 
+class create_mask_with_map_data(create_mask_around_atoms):
+
+  '''
+    Class to create a map_manager object containing a supplied mask
+
+  '''
+
+  def __init__(self, map_data,
+      map_manager = None):
+
+    '''
+     Create a mask (map object) with values supplied in map_data
+    '''
+    assert isinstance(map_data, flex.double)
+    assert map_manager.map_data().all() == map_data.all()
+    assert map_data.origin() == (0,0,0)
+    assert map_manager.origin_is_zero()
+
+    self._crystal_symmetry = map_manager.crystal_symmetry()
+
+    self._mask = map_data
+
+    # Set up map_manager with this mask
+    self._map_manager = map_manager.customized_copy(map_data = self._mask)
+    self._map_manager.set_is_mask(True)
+
+    # Initialize soft mask
+    self._is_soft_mask = False
+    self._is_soft_mask_around_edges = False
+
 class create_mask_around_edges(create_mask_around_atoms):
 
   '''
@@ -174,19 +206,22 @@ class create_mask_around_edges(create_mask_around_atoms):
   '''
 
   def __init__(self,
-      soft_mask_radius = None,
+      boundary_radius = None,
       map_manager = None):
 
     '''
      Create a mask (map object) with values of 1 except at the map boundaries
 
+     This will not be a soft mask. To make it a soft mask, follow this with
+       soft_mask(soft_mask_radius = soft_mask_radius)
+
      Parameters are:
-       soft_mask_radius:  radius for masking
+       boundary_radius:  radius for masking
        map_manager: source of information for n_real and crystal_symmetryi
           . origin (0, 0, 0)
     '''
 
-    assert soft_mask_radius is not None
+    assert boundary_radius is not None
     assert (map_manager is not None)
 
     n_real = map_manager.map_data().all()
@@ -198,9 +233,10 @@ class create_mask_around_edges(create_mask_around_atoms):
     self._mask = get_zero_boundary_map(
       map_data = map_manager.map_data(),
       crystal_symmetry = self._crystal_symmetry,
-      radius = soft_mask_radius)
+      radius = boundary_radius)
     # Set up map_manager with this mask
     self._map_manager = map_manager.customized_copy(map_data = self._mask)
+    self._map_manager.set_is_mask(True)
 
     # Initialize soft mask
     self._is_soft_mask = False
@@ -225,14 +261,19 @@ class create_mask_around_density(create_mask_around_atoms):
 
      Parameters are:
        map_manager: source of information about density
-       resolution : required resolution of map
+       resolution : optional resolution of map
        molecular_mass: optional mass (Da) of object in density
        sequence: optional sequence of object in density
        solvent_content : optional solvent_content of map
     '''
 
-    assert resolution is not None
     assert (map_manager is not None)
+
+    if not resolution:
+      from cctbx.maptbx import d_min_from_map
+      resolution = d_min_from_map(
+           map_data=map_manager.map_data(),
+           unit_cell=map_manager.crystal_symmetry().unit_cell())
 
     self._crystal_symmetry = map_manager.crystal_symmetry()
 
@@ -252,7 +293,6 @@ class create_mask_around_density(create_mask_around_atoms):
     # Now use automatic procedure to get a mask
     from cctbx.maptbx.segment_and_split_map import \
           get_iterated_solvent_fraction
-
     self._mask, self._solvent_content = get_iterated_solvent_fraction(
           crystal_symmetry = self._crystal_symmetry,
           fraction_of_max_mask_threshold = 0.05, #
@@ -266,11 +306,91 @@ class create_mask_around_density(create_mask_around_atoms):
           out = null_out())
 
     if self._solvent_content is None:
+      from libtbx.utils import Sorry
       raise Sorry("Unable to get solvent content in auto-masking")
 
 
     # Set up map_manager with this mask
     self._map_manager = map_manager.customized_copy(map_data = self._mask)
+    self._map_manager.set_is_mask(True)
+
+    # Initialize soft mask
+    self._is_soft_mask = False
+    self._is_soft_mask_around_edges = False
+
+class expand_mask(create_mask_around_atoms):
+
+  '''
+    Class to create a map_manager object containing a mask expanded from
+     previous mask
+
+  '''
+
+  def __init__(self,
+      map_manager = None,
+      resolution = None,
+      buffer_radius = 5,
+      minimum_fraction_of_max = 0.01):
+
+
+    '''
+     Create a mask (map object) with values of 1 expanded by buffer_radius
+
+     Parameters are:
+       map_manager: source of previous mask.
+       resolution : optional resolution of map
+       buffer_radius:  radius to expand in A
+       minimum_fraction_of_max: smallest-sized region to expand
+         as ratio to biggest
+    '''
+
+    assert (map_manager is not None)
+
+    if not resolution:
+      from cctbx.maptbx import d_min_from_map
+      resolution = d_min_from_map(
+           map_data=map_manager.map_data(),
+           unit_cell=map_manager.crystal_symmetry().unit_cell())
+
+    self._crystal_symmetry = map_manager.crystal_symmetry()
+
+    from cctbx.maptbx.segment_and_split_map import estimate_expand_size, get_co
+
+    expand_size = estimate_expand_size(
+         crystal_symmetry = map_manager.crystal_symmetry(),
+         map_data = map_manager.map_data(),
+         expand_target = buffer_radius,
+         minimum_expand_size = 0,
+         out = null_out())
+
+    if expand_size < 1:
+      return # do nothing
+    co, sorted_by_volume, min_b, max_b = get_co(
+       map_data = map_manager.map_data(),
+       threshold = 0.5, wrapping = False)
+    if len(sorted_by_volume)<2:
+      return # do nothing
+
+    minimum_size = sorted_by_volume[1][0] * minimum_fraction_of_max
+    s = None
+    for v1, i1 in sorted_by_volume[1:]:
+      if v1 < minimum_size: break
+      bool_region_mask = co.expand_mask(
+        id_to_expand = i1, expand_size = expand_size)
+      if s is None:
+        s = (bool_region_mask == True)
+      else:
+        s |=  (bool_region_mask == True)
+    self._mask = map_manager.deep_copy().map_data()
+    self._mask.set_selected(s, 1)
+    self._mask.set_selected(~s, 0)
+
+    self._solvent_content = s.count(False)/s.size()
+
+
+    # Set up map_manager with this mask
+    self._map_manager = map_manager.customized_copy(map_data = self._mask)
+    self._map_manager.set_is_mask(True)
 
     # Initialize soft mask
     self._is_soft_mask = False

@@ -48,10 +48,21 @@ mp_phil_str = '''
       .type = str
       .multiple = True
       .help = Path to script sourcing a particular environment (optional)
+    local {
+      include_mp_in_command = True
+        .type = bool
+        .help = Whether to decorate command with appropiate multiprocessing \
+                arguments. If False, it's assumed the multiprocessing  \
+                arguments are provided by the calling program.
+    }
     shifter {
       submit_command = "sbatch "
         .type = str
         .help = Command used to run the zero-level script sbatch.sh.
+      shifter_image = None
+        .type = str
+        .help = Name of Shifter image to use for processing, as you would use \
+                in an sbatch script. Example: docker:dwpaley/cctbx-xfel:fix18
       sbatch_script_template = None
         .type = path
         .help = Script template to be run with sbatch. The script will be copied \
@@ -71,13 +82,20 @@ mp_phil_str = '''
         .help = Partition to run jobs on, e.g. regular or debug.
       jobname = LCLS_EXP
         .type = str
-        .help = Jobname
-      nnodes = 1
-        .type = int
-        .help = Number of nodes to request with sbatch -N <nnodes>.
-      nproc = 32
-        .type = int
-        .help = Number of processors (total) to request with srun -n <nproc>.
+        .help = Job Name
+      project = None
+        .type = str
+        .help = Name of NERSC project -- formerly "repo"
+      reservation = None
+        .type = str
+        .help = Name of NERSC reservation
+      constraint = haswell
+        .type = str
+        .help = Haswell or KNL
+      staging = DataWarp *None
+        .type = choice
+        .help = Optionally stage logs to the DataWarp burst buffer. Only works \
+                when writing to Cori cscratch.
     }
     htcondor {
       executable_path = None
@@ -157,6 +175,10 @@ class get_submit_command(object):
     else:
       return template
 
+  def delete(self, template, marker):
+    template_lines = template.split('\n')
+    return '\n'.join([l for l in template_lines if marker not in l])
+
   def make_executable(self, file):
     import stat
     st = os.stat(file)
@@ -164,15 +186,14 @@ class get_submit_command(object):
 
   def write_script(self):
     command_str = " ".join([self.command] + self.args)
-    f = open(self.submit_path, 'wb')
-    f.write("#! %s\n" % self.shell_path)
-    for line in self.options_inside_submit_script:
-      f.write("%s\n" % line)
-    for line in self.source_env_scripts:
-      f.write("%s\n" % line)
-    f.write("\n")
-    f.write("%s\n" % command_str)
-    f.close()
+    with open(self.submit_path, 'w') as f:
+      f.write("#! %s\n" % self.shell_path)
+      for line in self.options_inside_submit_script:
+        f.write("%s\n" % line)
+      for line in self.source_env_scripts:
+        f.write("%s\n" % line)
+      f.write("\n")
+      f.write("%s\n" % command_str)
     self.make_executable(self.submit_path)
 
   def generate_submit_command(self):
@@ -181,10 +202,10 @@ class get_submit_command(object):
   def encapsulate_submit(self):
     path, ext = os.path.splitext(self.submit_path)
     encapsulate_path = path + "_submit" + ext
-    f = open(encapsulate_path, 'wb')
-    f.write("#! /bin/%s\n\n" % ext[1:])
-    f.write(self.generate_submit_command())
-    f.write("\n")
+    with open(encapsulate_path, 'w') as f:
+      f.write("#! /bin/%s\n\n" % ext[1:])
+      f.write(self.generate_submit_command())
+      f.write("\n")
 
   def __call__(self):
     self.customize_for_method()
@@ -197,10 +218,11 @@ class get_submit_command(object):
 class get_local_submit_command(get_submit_command):
 
   def customize_for_method(self):
-    if self.params.use_mpi:
-      self.command = "mpirun -n %d %s mp.method=mpi" % (self.params.nproc, self.command)
-    elif self.params.nproc > 1:
-      self.command += " mp.nproc=%d" % self.params.nproc
+    if self.params.local.include_mp_in_command:
+      if self.params.use_mpi:
+        self.command = "mpirun -n %d %s mp.method=mpi" % (self.params.nproc, self.command)
+      elif self.params.nproc > 1:
+        self.command += " mp.nproc=%d" % self.params.nproc
 
   def generate_submit_command(self):
     return self.submit_path
@@ -441,12 +463,12 @@ class get_slurm_submit_command(get_submit_command):
       self.options_inside_submit_script.append(nproc_str)
 
     # -o <outfile>
-    out_str = "#SBATCH --output=%s.%%j" % os.path.join(self.stdoutdir, self.log_name)
+    out_str = "#SBATCH --output=%s" % os.path.join(self.stdoutdir, self.log_name)
     self.options_inside_submit_script.append(out_str)
 
     # [-j oe/-e <errfile>] (optional)
     if self.err_name is not None:
-      err_str = "#SBATCH --error=%s.%%j" % os.path.join(self.stdoutdir, self.err_name)
+      err_str = "#SBATCH --error=%s" % os.path.join(self.stdoutdir, self.err_name)
       self.options_inside_submit_script.append(err_str)
 
     # -q <queue>
@@ -486,38 +508,63 @@ class get_slurm_submit_command(get_submit_command):
     for arg in self.params.extra_args:
       self.args.append(arg)
 
+
 class get_shifter_submit_command(get_submit_command):
+
+  # No need for constructor -- the interited constructor is just fine for shifter
 
   def customize_for_method(self):
     # template for sbatch.sh
     self.sbatch_template = self.params.shifter.sbatch_script_template
-    if self.sbatch_template is None:
-      raise Sorry("sbatch script template required for shifter")
-    sb = open(self.sbatch_template, "rb")
-    self.sbatch_contents = sb.read()
     self.destination = os.path.dirname(self.submit_path)
-    sb.close()
+    if not self.sbatch_template:
+      from xfel.ui.db.cfgs import shifter_templates
+      self.sbatch_contents = shifter_templates.sbatch_template
+    else:
+      with open(self.sbatch_template, "r") as sb:
+        self.sbatch_contents = sb.read()
     self.sbatch_path = os.path.join(self.destination, "sbatch.sh")
 
     # template for srun.sh
     self.srun_template = self.params.shifter.srun_script_template
-    if self.srun_template is None:
-      raise Sorry("srun script template required for shifter")
-    sr = open(self.srun_template, "rb")
-    self.srun_contents = sr.read()
-    sr.close()
+    if not self.srun_template:
+      from xfel.ui.db.cfgs import shifter_templates
+      self.srun_contents = shifter_templates.srun_template
+    else:
+      with open(self.srun_template, "r") as sr:
+        self.srun_contents = sr.read()
+    if self.params.use_mpi:
+      self.command = "%s mp.method=mpi" % (self.command)
     self.srun_path = os.path.join(self.destination, "srun.sh")
 
-#    self.destination = os.path.dirname(self.submit_path)
 
   def eval_params(self):
-    # -N <nnodes> (optional)
+
+    # --image <shifter_image>
+    if self.params.shifter.shifter_image:
+      self.sbatch_contents = self.substitute(
+          self.sbatch_contents,
+          "<shifter_image>",
+          self.params.shifter.shifter_image
+      )
+    else:
+      raise Sorry("Must supply a shifter image")
+
+    # -N <nnodes>
     self.sbatch_contents = self.substitute(self.sbatch_contents, "<nnodes>",
-      str(self.params.shifter.nnodes))
+      str(self.params.nnodes))
+
+    # --tasks-per-node <nproc_per_node> (optional)
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<nproc_per_node>",
+      str(self.params.nproc_per_node))
+
+    # For now use nproc = nnodes*nproc_per_node
+    # TODO: find a way for the user to specify _either_ nproc_per_node, or nproc
+    nproc = self.params.nnodes * self.params.nproc_per_node
 
     # -n <nproc> (optional)
     self.sbatch_contents = self.substitute(self.sbatch_contents, "<nproc>",
-      str(self.params.shifter.nproc))
+      str(nproc))
 
     # -W <walltime> (optional)
     if self.params.wall_time is not None:
@@ -527,12 +574,46 @@ class get_shifter_submit_command(get_submit_command):
       self.sbatch_contents = self.substitute(self.sbatch_contents, "<walltime>",
         wt_str)
 
-    # -p <partition>
+    # --qos <queue>
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<queue>",
+      self.params.queue)
+
+    # --partition <partition>
     self.sbatch_contents = self.substitute(self.sbatch_contents, "<partition>",
       self.params.shifter.partition)
+
     # --job-name
     self.sbatch_contents = self.substitute(self.sbatch_contents, "<jobname>",
       self.params.shifter.jobname)
+
+    # -A
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<project>",
+      self.params.shifter.project)
+
+    # --reservation
+    if self.params.shifter.reservation:
+      self.sbatch_contents = self.substitute(
+          self.sbatch_contents, "<reservation>", self.params.shifter.reservation
+      )
+    else:
+      self.sbatch_contents = self.delete(self.sbatch_contents, "<reservation>")
+
+    # --constraint
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<constraint>",
+      self.params.shifter.constraint)
+
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<out_log>",
+      os.path.join(self.destination , "out.log"))
+
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<err_log>",
+      os.path.join(self.destination , "err.log"))
+
+    self.sbatch_contents = self.substitute(self.sbatch_contents, "<output_dir>",
+      self.destination)
+
+    # Delete datawarp instructions if we're not staging logs
+    if self.params.shifter.staging != "DataWarp":
+      self.sbatch_contents = self.delete(self.sbatch_contents, "#DW")
 
     # <srun_script>
     self.sbatch_contents = self.substitute(self.sbatch_contents, "<srun_script>",
@@ -544,6 +625,8 @@ class get_shifter_submit_command(get_submit_command):
         "<command> %s" % " ".join(self.params.extra_args))
     self.srun_contents = self.substitute(self.srun_contents, "<command>",
       self.command)
+
+
   def generate_submit_command(self):
     return self.params.shifter.submit_command + self.sbatch_path
 
@@ -551,17 +634,15 @@ class get_shifter_submit_command(get_submit_command):
     pass
 
   def generate_sbatch_script(self):
-    sb = open(self.sbatch_path, "wb")
-    sb.write(self.sbatch_contents)
-    sb.write("\n")
-    sb.close()
+    with open(self.sbatch_path, "w") as sb:
+      sb.write(self.sbatch_contents)
+      sb.write("\n")
     self.make_executable(self.sbatch_path)
 
   def generate_srun_script(self):
-    sr = open(self.srun_path, "wb")
-    sr.write(self.srun_contents)
-    sr.write("\n")
-    sr.close()
+    with open(self.srun_path, "w") as sr:
+      sr.write(self.srun_contents)
+      sr.write("\n")
     self.make_executable(self.srun_path)
 
   def write_script(self):
@@ -669,9 +750,8 @@ class get_custom_submit_command(get_submit_command):
 
   def eval_params(self):
     # any changes to the script to be submitted
-    script = open(self.script_template, "rb")
-    self.script_contents = script.read()
-    script.close()
+    with open(self.script_template, "r") as script:
+      self.script_contents = script.read()
 
     # <command> and any <args>
     if len(self.params.extra_args) > 0:
@@ -709,10 +789,9 @@ class get_custom_submit_command(get_submit_command):
       self.submit_command_contents = self.substitute(self.submit_command_contents, marker, value)
 
   def write_script(self):
-    f = open(self.submit_path, "wb")
-    f.write(self.script_contents)
-    f.write("\n")
-    f.close()
+    with open(self.submit_path, "w") as f:
+      f.write(self.script_contents)
+      f.write("\n")
 
   def generate_submit_command(self):
     return self.submit_command_contents

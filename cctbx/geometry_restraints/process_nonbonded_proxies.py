@@ -547,6 +547,8 @@ class manager():
     Process nonbonded_proxies to find bonds, interactions and clashes.
     Clashes code refactored from Youval Dar's code for nonbonded_overlaps (LBNL 2013)
     """
+    if(self.model.get_restraints_manager() is None):
+      self.model.process_input_model(make_restraints=True)
     grm = self.model.get_restraints_manager().geometry
     xrs = self.model.get_xray_structure()
     sites_cart  = self.model.get_sites_cart()
@@ -664,6 +666,11 @@ class manager():
       return is_hbond
 
     crystal_symmetry = self.model.crystal_symmetry()
+    if crystal_symmetry is not None:
+      fm = crystal_symmetry.unit_cell().fractionalization_matrix()
+      om = crystal_symmetry.unit_cell().orthogonalization_matrix()
+    else:
+      fm, om = None, None
     rt_mx_ji = None
     if symop is not None:
       rt_mx_ji = sgtbx.rt_mx(str(symop))
@@ -674,8 +681,8 @@ class manager():
       Hs       = self.Hs,
       fsc0     = fsc0,
       rt_mx_ji = rt_mx_ji,
-      fm       = crystal_symmetry.unit_cell().fractionalization_matrix(),
-      om       = crystal_symmetry.unit_cell().orthogonalization_matrix(),
+      fm       = fm,
+      om       = om,
       atoms    = self.atoms)
 
     d_HA = A.distance(H)

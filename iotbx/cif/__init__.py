@@ -11,11 +11,11 @@ http://cctbx.sourceforge.net/iotbx_cif
 """
 from __future__ import absolute_import, division, print_function
 
-import boost.python
+import boost_adaptbx.boost.python as bp
 from six.moves import range
 from six.moves import zip
 import six
-ext = boost.python.import_ext("iotbx_cif_ext")
+ext = bp.import_ext("iotbx_cif_ext")
 
 from cctbx.array_family import flex
 from cctbx import miller
@@ -58,6 +58,7 @@ class reader(object):
       file_path = "memory"
     if file_object is not None:
       input_string = file_object.read()
+      file_object.close()
     # check input_string for binary, and abort if necessary
     binary_detector = detect_binary_file()
     binary_detector.monitor_initial = min(

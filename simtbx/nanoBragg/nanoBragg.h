@@ -120,12 +120,6 @@ double ran1(long *idum);
 /* ln of the gamma function */
 double gammln(double xx);
 
-/* return Gaussian deviate with rms=1 and FWHM = 2/sqrt(log(2)) */
-double gaussdev(long *idum);
-/* return Poissonian deviate given expectation value */
-double poidev(double xm, long *idum);
-
-
 /* Fourier transform of a truncated lattice */
 double sincg(double x, double N);
 /* Fourier transform of a sphere */
@@ -135,7 +129,7 @@ double sinc_conv_sinc3(double x);
 
 /* typedefs to help remember options */
 typedef enum { SAMPLE, BEAM } pivot;
-typedef enum { UNKNOWN, SQUARE, ROUND, GAUSS, TOPHAT, FIBER } shapetype;
+typedef enum { UNKNOWN, SQUARE, ROUND, GAUSS, GAUSS_ARGCHK, TOPHAT, FIBER } shapetype;
 typedef enum { CUSTOM, ADXV, MOSFLM, XDS, DIALS, DENZO } convention;
 
 /* math functions for point spread */
@@ -281,6 +275,7 @@ class nanoBragg {
     double Fclose,Sclose; //=NAN;
     double ORGX,ORGY; //=NAN;
     double dials_origin[4];
+    double detector_is_righthanded; //true;
     double adc_offset; // = 40.0;
 
     /* use these to remember "user" inputs */
@@ -558,6 +553,7 @@ class nanoBragg {
     /* member functions for reconciling inter-related parameters */
     void update_oversample();   // automatic oversampling decision based on xtal size and pixel size
     void update_beamcenter();   // beam center, Xbeam, Fbeam, ORGX using selected convention
+    void set_dxtbx_detector_panel(const dxtbx::model::Panel& panel, const vec3& s0_vector);
 
     /* member functions for debugging */
     void show_phisteps();       // print out everything to screen, enumerate all phi steps
