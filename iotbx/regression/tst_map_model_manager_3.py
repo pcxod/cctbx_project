@@ -67,7 +67,7 @@ def exercise(file_name, out = sys.stdout):
 
   # Generate map data from this model (it has ncs)
   mmm=map_model_manager()
-  mmm.generate_map(box_cushion=0, file_name=file_name,n_residues=500)
+  mmm.generate_map(box_cushion=0, file_name=file_name,n_residues=500, d_min=3)
   ncs_mam=mmm.deep_copy()
   ncs_mam_copy=mmm.deep_copy()
 
@@ -278,7 +278,7 @@ def exercise(file_name, out = sys.stdout):
 
   # Make a new map and model, get mam and box with selection
   mmm=map_model_manager()
-  mmm.generate_map(box_cushion=0,wrapping=True)
+  mmm.generate_map(box_cushion=0,wrapping=True, d_min=3)
   mam=mmm
   mam_dc=mam.deep_copy()
 
@@ -326,14 +326,14 @@ def exercise(file_name, out = sys.stdout):
   dc.duplicate_map_manager(map_id='map_manager',new_map_id='filtered')
   dc.resolution_filter(d_min=3.5, d_max=6, map_id='filtered')
   cc=dc.map_map_cc('map_manager','filtered')
-  assert approx_equal(cc , 0.676687646486)
+  assert approx_equal(cc , 0.6504435255003295)
 
   # Get map-map CC with mask
   dc=mam_dc.deep_copy()
   dc.duplicate_map_manager(map_id='map_manager',new_map_id='filtered')
   dc.create_mask_around_density(mask_id='filtered')
   cc=dc.map_map_cc('map_manager','filtered',mask_id='mask')
-  assert approx_equal(cc , 0.443401641784)
+  assert approx_equal(cc , 0.4515628372038732)
 
   # box around model
   mam=mam_dc.deep_copy()
@@ -350,7 +350,7 @@ def exercise(file_name, out = sys.stdout):
       soft_mask_around_edges = True)
   new_mm_2=mam.map_manager()
   assert approx_equal( (mam_dc.map_data().all(),new_mm_2.map_data().all()),
-    ((18, 25, 20),(41,36,38)))
+    ((18, 25, 20),(40,35,38)))
 
   # extract_around_model (get new mam)
   new_mam_dc=mam_dc.extract_all_maps_around_model(
@@ -365,7 +365,7 @@ def exercise(file_name, out = sys.stdout):
       selection_string="resseq 221:221", soft_mask_around_edges = True)
   new_mm_2a=new_mam_dc.map_manager()
   assert approx_equal( (mam_dc.map_data().all(),new_mm_2a.map_data().all()),
-    ((18, 25, 20),(41,36,38)))
+    ((18, 25, 20),(40,35,38)))
   assert approx_equal(new_mm_2.map_data(),new_mm_2a.map_data())
 
   # box around_density
@@ -373,14 +373,14 @@ def exercise(file_name, out = sys.stdout):
   mam2.box_all_maps_around_density_and_shift_origin(box_cushion=0)
   new_mm_2=mam2.map_manager()
   assert approx_equal( (mam_dc.map_data().all(),new_mm_2.map_data().all()),
-    ((18, 25, 20),(16, 23, 18)))
+    ((18, 25, 20),(16, 18, 18)))
 
   # extract_around_density (get new mam)
   mam2=mam_dc.deep_copy()
   mam2_b=mam2.extract_all_maps_around_density(box_cushion=0)
   new_mm_2=mam2_b.map_manager()
   assert approx_equal( (mam_dc.map_data().all(),new_mm_2.map_data().all()),
-    ((18, 25, 20),(16, 23, 18)))
+    ((18, 25, 20),(16, 18, 18)))
 
   # Repeat as map_model_manager:
   mmm=mam_dc.as_map_model_manager().deep_copy()
@@ -396,7 +396,7 @@ def exercise(file_name, out = sys.stdout):
   mam.box_all_maps_around_density_and_shift_origin(box_cushion=0,soft_mask_around_edges=False)
   new_mm_1=mam.map_manager()
   assert approx_equal( (mam_dc.map_data().all(),new_mm_1.map_data().all()),
-    ((18,25 , 20),(16, 23, 18)))
+    ((18,25 , 20),(16, 18, 18)))
 
   # box around density and soft mask edges
   mam = mam_dc.deep_copy()
@@ -481,6 +481,14 @@ def exercise(file_name, out = sys.stdout):
         "and resseq 221:221", box_cushion=0)
   cc=dc.map_model_cc(resolution=3)
   assert approx_equal (cc, 0.817089390421)
+
+  # Get map-model density
+  dc=mam_dc.extract_all_maps_around_model(
+      selection_string="(name ca or name cb or name c or name o) "+
+        "and resseq 221:221", box_cushion=0)
+  density=dc.density_at_model_sites(selection_string = 'name ca')
+  assert approx_equal (density.min_max_mean().mean, 0.841152333991)
+
 
   # Remove model outside map
   dc.remove_model_outside_map(boundary=0)

@@ -67,18 +67,27 @@ reference_model
     .type = float
   hydrogens = False
     .type = bool
+    .help = Include dihedrals with hydrogen atoms
   main_chain = True
     .type = bool
+    .help = Include dihedrals formed by main chain atoms
   side_chain = True
     .type = bool
+    .help = Include dihedrals formed by side chain atoms
   fix_outliers = True
     .type = bool
+    .help = Try to fix rotamer outliers in refined model
   strict_rotamer_matching = False
     .type = bool
+    .help = Make sure that rotamers in refinement model matches those in \
+      reference model even when they are not outliers
   auto_shutoff_for_ncs = False
     .type = bool
+    .help = Do not apply to parts of structure covered by NCS restraints
   secondary_structure_only = False
     .type = bool
+    .help = Only apply reference model restraints to secondary structure \
+      elements (helices and sheets)
   reference_group
     .multiple=True
     .optional=True
@@ -87,10 +96,10 @@ reference_model
   {
     reference=None
       .type=atom_selection
-      .short_caption=Reference selection
+      .short_caption=Selection in the reference model
     selection=None
       .type=atom_selection
-      .short_caption=Restrained selection
+      .short_caption=Selection in the refined model
     file_name=None
       .type=path
       .optional=True
@@ -119,7 +128,7 @@ def add_reference_dihedral_restraints_if_requested(
     (len(params.file) > 0) and params.file[0] is not None):
     raise Sorry("Cannot not restrain working model to self and a "+
                     "reference model simultaneously")
-  reference_file_list = []
+  reference_file_list = set()
   reference_hierarchy_list = None
   if params.use_starting_model_as_reference:
     reference_hierarchy_list = [model.get_hierarchy()]
@@ -127,7 +136,10 @@ def add_reference_dihedral_restraints_if_requested(
     print("*** Restraining model using starting model ***", file=log)
   else:
     for file_name in params.file:
-      reference_file_list.append(file_name)
+      reference_file_list.add(file_name)
+    for rg in params.reference_group:
+      if rg.file_name is not None:
+        reference_file_list.add(rg.file_name)
   print("*** Adding Reference Model Restraints (torsion) ***", file=log)
   #test for inserted TER cards in working model
   ter_indices = model._ter_indices
@@ -135,6 +147,8 @@ def add_reference_dihedral_restraints_if_requested(
     utils.check_for_internal_chain_ter_records(
       pdb_hierarchy=model.get_hierarchy(),
       ter_indices=ter_indices)
+  if reference_file_list is not None:
+    reference_file_list = list(reference_file_list)
   rm = reference_model(
     model,
     reference_file_list=reference_file_list,

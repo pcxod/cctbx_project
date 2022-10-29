@@ -250,7 +250,7 @@ def gzip_open(file_name, mode):
   RuntimeError
       If gzip is not available.
   """
-  assert mode in ["r", "rb", "w", "wb", "a", "ab"]
+  assert mode in ["r", "rb", "rt", "w", "wb", "wt", "a", "ab"]
   if (gzip is None):
     un = ""
     if (mode[0] == "r"): un = "un"
@@ -2010,7 +2010,7 @@ def show_development_warning(out=sys.stdout):
   !!                                                                        !!
   !! This program is still in development - some functionality may be       !!
   !! missing and/or untested.  Use at your own risk!  For bug reports, etc. !!
-  !! email bugs@phenix-online.org.                                          !!
+  !! email help@phenix-online.org.                                          !!
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 """, file=out)
 

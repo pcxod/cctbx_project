@@ -169,14 +169,19 @@ class table(slots_getstate_setstate):
 
   def format_as_csv(self):
     rows = []
-    rows.append([""] + [ column.label for column in self.columns ])
+    rows.append([""] + [ column.label if column.label is not None else "" for column in self.columns ])
     for (stat_name, label, fstring, cif_tag) in keywords :
       row = []
       for column in self.columns :
-        row.append(column.format_stat(stat_name))
+        stat = column.format_stat(stat_name)
+        if stat is None:
+          stat = ""
+        row.append(stat)
       if ( (row == [ None for x in range(len(row)) ]) or
            (row is None) ):
         continue
+      if label is None:
+        label = ""
       row.insert(0, label)
       rows.append(row)
     return "\n".join([ ",".join(row) for row in rows ])
@@ -266,7 +271,7 @@ def format_d_max_min(d_max_min):
   else :
     (d_max, d_min) = d_max_min
     d_max_str = "%.4g " % d_max
-    d_min_str = re.sub("\.$", ".0", re.sub("0*$", "", "%.3f" % d_min))
+    d_min_str = re.sub(r"\.$", ".0", re.sub("0*$", "", "%.3f" % d_min))
     return "%s - %s" % (d_max_str, d_min_str)
 
 def resize_column(cell_values, alignment="right"):

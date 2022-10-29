@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 
 import os
+import platform
 import re
 import shutil
 import subprocess
@@ -49,7 +50,7 @@ class empty(object):
 def set_python_include_and_libs(env_etc):
   env_etc.python_include = libtbx.env_config.python_include_path()
   if (sys.platform == "win32"):
-    env_etc.libs_python = ["python" + sys.version[0] + sys.version[2]]
+    env_etc.libs_python = ["python" + str(sys.version_info.major) + str(sys.version_info.minor)]
     env_etc.libpath_python = [sys.prefix + r"\libs"]
   else:
     env_etc.libs_python = []
@@ -363,6 +364,11 @@ if (sys.platform == "win32" or
         ENV=os.environ, MSVC_VERSION="14.2", TARGET_ARCH=target_arch, tools=['msvc','mslink', 'mslib'])
       env_etc.have_manifest_tool = True
       env_etc.msvc_version = 16
+    elif visual_studio_version.startswith("19.3"):
+      env_base = Environment(
+        ENV=os.environ, MSVC_VERSION="14.3", TARGET_ARCH=target_arch, tools=['msvc','mslink', 'mslib'])
+      env_etc.have_manifest_tool = True
+      env_etc.msvc_version = 17
     else:
       raise RuntimeError("""\
 Unknown or unsupported cl.exe version.
@@ -927,7 +933,10 @@ int main() {
       print(xcode_version)
       # store just the version of Xcode (e.g. 11.4 becomes [11, 4])
       try:
-        xcode_version = [int(i) for i in xcode_version.split()[1].split('.')]
+        for line in xcode_version.split('\n'):
+          if line.startswith('Xcode'):
+            xcode_version = [int(i) for i in line.split()[1].split('.')]
+            break
       except Exception:
         pass
     except subprocess.CalledProcessError:
@@ -938,6 +947,9 @@ int main() {
     env_etc.static_bpl = 0
 
     min_macos = 10.9
+    # check for Apple Silicon (only works for natively compiled Python)
+    if platform.mac_ver()[-1] == 'arm64':
+      min_macos = 11.0
     base_macos_flags = ['-stdlib=libc++', '-mmacosx-version-min=%s' % min_macos]
 
     link_flags = ["-w"] # suppress "source/lib does not exist" warning
@@ -1071,7 +1083,7 @@ if (libtbx.env.build_options.use_conda):
       os.path.join(abs(libtbx.env.build_path), 'lib')
     ]
     env_base.Append(SHLINKFLAGS=env_etc.conda_shlinkflags)
-  env_base.Prepend(CPPPATH=env_etc.conda_cpppath)
+  env_base.Append(CPPPATH=env_etc.conda_cpppath)
   env_base.Append(LIBPATH=env_etc.conda_libpath)
 
 # local build header and library paths
@@ -1084,8 +1096,8 @@ if local_env is not None:
       if os.path.isdir(new_path):
         cpppath.append(new_path)
   if len(cpppath) > 0:
-    env_base.Append(CPPPATH=cpppath)
-  env_base.Append(LIBPATH=[os.path.join(abs(local_env.build_path), 'lib')])
+    env_base.Prepend(CPPPATH=cpppath)
+  env_base.Prepend(LIBPATH=[os.path.join(abs(local_env.build_path), 'lib')])
 
 # C++11 flags for any compiler
 # XXX feautre duplication, see determine_cpp0x_flag
@@ -1192,7 +1204,7 @@ if ARGUMENTS.get('TERSE') == '1':
   env_base['SHLINKCOMSTR'] = linking_message
   env_base['ARCOMSTR']     = "Archiving $TARGET"
 
-env_base.Replace(LIBPATH=["#lib"])
+env_base.Append(LIBPATH=["#lib"])
 env_base.Replace(SHOBJSUFFIX=env_base["OBJSUFFIX"])
 
 # XXX backward compatibility 2009-08-21
@@ -1377,9 +1389,7 @@ def enable_cuda_if_possible():
                         '--generate-code=arch=compute_72,code=sm_72']
 
     elif cuda_version >= 10 and cuda_version <= 10.2:
-        arch_flags = ['--generate-code=arch=compute_30,code=sm_30',
-                        '--generate-code=arch=compute_32,code=sm_32',
-                        '--generate-code=arch=compute_35,code=sm_35',
+        arch_flags = ['--generate-code=arch=compute_35,code=sm_35',
                         '--generate-code=arch=compute_50,code=sm_50',
                         '--generate-code=arch=compute_52,code=sm_52',
                         '--generate-code=arch=compute_53,code=sm_53',
@@ -1398,7 +1408,10 @@ def enable_cuda_if_possible():
                       '--generate-code=arch=compute_72,code=sm_72',
                       '--generate-code=arch=compute_75,code=sm_75',
                       '--generate-code=arch=compute_80,code=sm_80',
-                      '--generate-code=arch=compute_80,code=sm_86']
+                      '--generate-code=arch=compute_86,code=sm_86']
+        # cuda 11.0 does not support compute_86, remove last entry
+        if cuda_version < 11.1:
+            arch_flags.pop()
     else:
         raise Sorry("cctbx only supports cuda versions 6-11")
 
@@ -1439,7 +1452,13 @@ def enable_cuda_if_possible():
     env_base['BUILDERS']['cudaSharedLibrary'] = shared_library_builder
     env_base['BUILDERS']['cudaSharedLibrary'].add_src_builder(shared_object_builder)
 
+def enable_kokkos_if_possible():
+  env_etc.enable_kokkos = False
+  if (libtbx.env.build_options.enable_kokkos):
+    env_etc.enable_kokkos = True
+
 enable_openmp_if_possible()
 enable_cuda_if_possible()
+enable_kokkos_if_possible()
 
 Export("env_base", "env_etc")

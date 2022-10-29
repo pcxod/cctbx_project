@@ -678,13 +678,13 @@ def run(
 
   chain_id_and_resseq_list=[] # Instead set up chain_id and resseq (range)
   from mmtbx.secondary_structure.find_ss_from_ca import \
-      split_model,get_first_resno, get_last_resno,get_chain_id
+      split_model
   model_list=split_model(hierarchy=hierarchy,only_first_model=True)
   for m in model_list:
     h=m.hierarchy
-    first_resno=get_first_resno(h)
-    last_resno=get_last_resno(h)
-    chain_id=get_chain_id(h)
+    first_resno=h.first_resseq_as_int()
+    last_resno=h.last_resseq_as_int()
+    chain_id=h.first_chain_id()
     residue_range=[first_resno,last_resno]
     chain_id_and_resseq=[chain_id,residue_range]
     if not chain_id_and_resseq in chain_id_and_resseq_list:
@@ -792,8 +792,8 @@ def run(
       if not sorted_working_model_list:
          break # nothing to do
 
-      sorted_working_model_list.sort()
-      sorted_working_model_list.reverse()
+      sorted_working_model_list = sorted(sorted_working_model_list,
+         key = lambda wm: wm[0], reverse = True)
       sorted_working_model_list=sorted_working_model_list[:max_keep]
 
       new_working_score,new_working_model=sorted_working_model_list[0]

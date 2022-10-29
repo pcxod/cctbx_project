@@ -1,23 +1,21 @@
 
 from __future__ import absolute_import, division, print_function
-from mmtbx.secondary_structure import proteins, nucleic_acids
+from scitbx.array_family import flex
+from libtbx.utils import null_out, Sorry
+from libtbx.test_utils import approx_equal
+from libtbx import easy_run
+import libtbx.load_env
 from cctbx import geometry_restraints
 import iotbx.pdb
 import iotbx.pdb.secondary_structure
 import iotbx.phil
-from scitbx.array_family import flex
-from libtbx.utils import null_out
-from libtbx import easy_run
-import libtbx.load_env
+import mmtbx.secondary_structure
+from mmtbx.secondary_structure import proteins, nucleic_acids
 import sys, os
 import time
 
-from libtbx.test_utils import approx_equal
-import mmtbx.secondary_structure
-from libtbx.utils import null_out
 from itertools import groupby
 from operator import itemgetter
-import iotbx.phil
 from six.moves import range
 
 def contiguous_ss_selections(pdb_hierarchy):
@@ -118,39 +116,43 @@ secondary_structure
       .help = Turn on secondary structure restraints for nucleic acids
     %s
   }
-    ss_by_chain = True
-      .type = bool
-      .help = Find secondary structure only within individual chains. \
-              Alternative is to allow H-bonds between chains. Can be \
-              much slower with ss_by_chain=False. If your model is complete \
-              use ss_by_chain=True. If your model is many fragments, use \
-              ss_by_chain=False.
-      .short_caption = Secondary structure by chain
-      .expert_level = 1
-    from_ca_conservative = False
-      .type = bool
-      .help = various parameters changed to make from_ca method more \
-        conservative, hopefully to closer resemble ksdssp.
-      .short_caption = Conservative mode of from_ca
-    max_rmsd = 1
-      .type = float
-      .help = Maximum rmsd to consider two chains with identical sequences \
-              as the same for ss identification
-      .short_caption = Maximum rmsd
-      .expert_level = 3
-    use_representative_chains = True
-      .type = bool
-      .help = Use a representative of all chains with the same sequence. \
-              Alternative is to examine each chain individually. Can be \
-              much slower with use_representative_of_chain=False if there \
-              are many symmetry copies. Ignored unless ss_by_chain is True.
-      .short_caption = Use representative chains
-      .expert_level = 3
-    max_representative_chains = 100
-      .type = float
-      .help = Maximum number of representative chains
-      .short_caption = Maximum representative chains
-      .expert_level = 3
+  ss_by_chain = True
+    .type = bool
+    .help = Only applies if search_method = from_ca. \
+            Find secondary structure only within individual chains. \
+            Alternative is to allow H-bonds between chains. Can be \
+            much slower with ss_by_chain=False. If your model is complete \
+            use ss_by_chain=True. If your model is many fragments, use \
+            ss_by_chain=False.
+    .short_caption = Secondary structure by chain
+    .expert_level = 1
+  from_ca_conservative = False
+    .type = bool
+    .help = various parameters changed to make from_ca method more \
+      conservative, hopefully to closer resemble ksdssp.
+    .short_caption = Conservative mode of from_ca
+  max_rmsd = 1
+    .type = float
+    .help = Only applies if search_method = from_ca. \
+            Maximum rmsd to consider two chains with identical sequences \
+            as the same for ss identification
+    .short_caption = Maximum rmsd
+    .expert_level = 3
+  use_representative_chains = True
+    .type = bool
+    .help = Only applies if search_method = from_ca. \
+            Use a representative of all chains with the same sequence. \
+            Alternative is to examine each chain individually. Can be \
+            much slower with use_representative_of_chain=False if there \
+            are many symmetry copies. Ignored unless ss_by_chain is True.
+    .short_caption = Use representative chains
+    .expert_level = 3
+  max_representative_chains = 100
+    .type = float
+    .help = Only applies if search_method = from_ca. \
+            Maximum number of representative chains
+    .short_caption = Maximum representative chains
+    .expert_level = 3
 
   enabled = False
     .short_caption = Use secondary structure restraints
@@ -166,7 +168,6 @@ secondary_structure
 master_phil_str = sec_str_master_phil_str # for docs
 
 sec_str_master_phil = iotbx.phil.parse(sec_str_master_phil_str)
-default_params = sec_str_master_phil.fetch().extract()
 
 class manager(object):
   def __init__(self,
@@ -190,6 +191,28 @@ class manager(object):
     if params is not None:
       self.params.secondary_structure = params
 
+    # checking params
+    default_params = sec_str_master_phil.extract()
+    ss_by_chain_set = self.params.secondary_structure.ss_by_chain != \
+        default_params.secondary_structure.ss_by_chain
+    max_rmsd_set = self.params.secondary_structure.max_rmsd != \
+        default_params.secondary_structure.max_rmsd
+    use_representative_chains_set = self.params.secondary_structure.use_representative_chains != \
+        default_params.secondary_structure.use_representative_chains
+    max_representative_chains_set = self.params.secondary_structure.max_representative_chains != \
+        default_params.secondary_structure.max_representative_chains
+    from_ca_conservative_set = self.params.secondary_structure.from_ca_conservative != \
+        default_params.secondary_structure.from_ca_conservative
+    from_ca_method_selected = self.params.secondary_structure.protein.search_method != "from_ca"
+    for par, s in [(ss_by_chain_set, 'ss_by_chain'),
+        (max_rmsd_set, 'max_rmsd'),
+        (from_ca_conservative_set, 'from_ca_conservative'),
+        (use_representative_chains_set, 'use_representative_chains'),
+        (max_representative_chains_set, 'max_representative_chains')]:
+      if par and from_ca_method_selected:
+        raise Sorry("%s parameter is only used when search_method=from_ca.\n" % s +\
+            "Please do not set it for other methods to avoid confusion." )
+
     self.verbose = verbose
     self.show_summary_on = show_summary_on
     self.log = log
@@ -209,6 +232,10 @@ class manager(object):
       self.selection_cache = pdb_hierarchy.atom_selection_cache()
     self.pdb_atoms = atoms
     self.initialize()
+
+  @staticmethod
+  def get_default_ss_params():
+    return sec_str_master_phil.fetch().extract()
 
   def as_phil_str(self, master_phil=sec_str_master_phil):
     # used in secondary_structure_restraints...
@@ -409,7 +436,7 @@ class manager(object):
     if not use_segid:
       base_pairs = ""
       stacking_pairs = ""
-      if self.pdb_hierarchy.contains_nucleic_acid():
+      if self.pdb_hierarchy.contains_nucleic_acid(min_content=0.01):
         stacking_pairs = nucleic_acids.get_phil_stacking_pairs(
           pdb_hierarchy=self.pdb_hierarchy,
           prefix="secondary_structure.nucleic_acid",
@@ -434,7 +461,7 @@ class manager(object):
         stacking_pairs = ""
         isel = self.selection_cache.selection("segid '%s'" % segid).iselection()
         selected_pdb_h = self.pdb_hierarchy.select(isel)
-        if selected_pdb_h.contains_nucleic_acid():
+        if selected_pdb_h.contains_nucleic_acid(min_content=0.01):
           stacking_pairs = nucleic_acids.get_phil_stacking_pairs(
             pdb_hierarchy=selected_pdb_h,
             prefix="secondary_structure.nucleic_acid",

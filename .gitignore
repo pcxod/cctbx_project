@@ -24,6 +24,14 @@ git-notifier.log
 # Ignores examples from cctbx website
 cctbx_website/examples
 
+# Ignore cctbx version files
+cctbx_version*
+setup.py
+
+# Ignore .yml files created by conda-devenv
+cctbx.yml
+cctbxlite.yml
+
 # Ignores copied over from subversion:
 cctbx/dev
 cctbx/doc
@@ -57,3 +65,7 @@ scitbx/array_family/detail/operator_functors.h
 scitbx/array_family/detail/std_imports.h
 sphinx/build
 xfel/clustering/test_cluster.py
+mmtbx/suitename/test/
+mmtbx/suitename/suitename.stderr.log
+mmtbx/suitename/assist/
+mmtbx/suitename/*.show.txt

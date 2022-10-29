@@ -7,6 +7,7 @@ Last Changed: 07/17/2019
 Description : PRIME GUI dialogs module
 '''
 
+import getpass
 import os
 import wx
 from wx.lib.scrolledpanel import ScrolledPanel
@@ -14,9 +15,9 @@ from wxtbx import bitmaps
 
 from iotbx import phil as ip
 
-from iota.components.iota_utils import WxFlags, Capturing
-from iota.components.gui.base import BaseBackendDialog, IOTABaseDialog
-import iota.components.gui.controls as ct
+from iota.utils.utils import WxFlags, Capturing
+from iota.gui.base import BaseBackendDialog, IOTABaseDialog
+import iota.gui.controls as ct
 
 # Platform-specific stuff
 # TODO: Will need to test this on Windows at some point
@@ -39,7 +40,7 @@ elif (wx.Platform == '__WXMSW__'):
   CAPTION_SIZE = 9
 
 f = WxFlags()
-user = os.getlogin()
+user = getpass.getuser()
 
 
 class PRIMEBaseBackendDialog(BaseBackendDialog):

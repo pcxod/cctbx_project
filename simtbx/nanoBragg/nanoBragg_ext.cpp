@@ -28,7 +28,7 @@ namespace boost_python { namespace {
   testuple()
   {
     double test = NAN;
-    return boost::python::make_tuple(isnan(test),2,3,4);
+    return boost::python::make_tuple(boost::math::isnan(test),2,3,4);
   }
 
   /* getter/setter functions for convenient python-side members
@@ -194,14 +194,14 @@ namespace boost_python { namespace {
 
 
   /* number of unit cells along edge in each cell axis direction */
-  static scitbx::vec3<int> get_Nabc(nanoBragg const& nanoBragg) {
-      scitbx::vec3<int> value;
-      value[0]=static_cast<int>(nanoBragg.Na);
-      value[1]=static_cast<int>(nanoBragg.Nb);
-      value[2]=static_cast<int>(nanoBragg.Nc);
+  static scitbx::vec3<double> get_Nabc(nanoBragg const& nanoBragg) {
+      scitbx::vec3<double> value;
+      value[0]=static_cast<double>(nanoBragg.Na);
+      value[1]=static_cast<double>(nanoBragg.Nb);
+      value[2]=static_cast<double>(nanoBragg.Nc);
       return value;
   }
-  static void   set_Nabc(nanoBragg& nanoBragg, scitbx::vec3<int> const& value) {
+  static void   set_Nabc(nanoBragg& nanoBragg, scitbx::vec3<double> const& value) {
       nanoBragg.Na = value[0];
       nanoBragg.Nb = value[1];
       nanoBragg.Nc = value[2];
@@ -1365,7 +1365,7 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
 
        /* constructor that takes any and all parameters with sensible defaults */
       .def(init<scitbx::vec2<int>,
-                scitbx::vec3<int>,
+                scitbx::vec3<double>,
                 cctbx::uctbx::unit_cell,
                 vec3,
                 vec2,
@@ -1378,7 +1378,7 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
                 int,
                 int>(
         (arg_("detpixels_slowfast")=scitbx::vec2<int>(1024,1024),
-         arg_("Ncells_abc")=scitbx::vec3<int>(1,1,1),
+         arg_("Ncells_abc")=scitbx::vec3<double>(1,1,1),
          arg_("unit_cell_Adeg")=cctbx::uctbx::unit_cell(scitbx::af::double6(78.0,78.0,38.0,90.0,90.0,90.0)),
          arg_("misset_deg")=vec3(0.0,0.0,0.0),
          arg_("beam_center_mm")=vec2(NAN,NAN),
@@ -1935,12 +1935,12 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
       .def("add_nanoBragg_spots_nks",&nanoBragg::add_nanoBragg_spots_nks,
        "actually run the spot simulation, going pixel-by-pixel over the region-of-interest, restricted options, plus OpenMP")
 
-#ifdef NANOBRAGG_HAVE_CUDA
       .add_property("device_Id",
                      make_getter(&nanoBragg::device_Id,rbv()),
                      make_setter(&nanoBragg::device_Id,dcp()),
-                     "Which device to simulate on. ")
+                     "Which GPU device to simulate on (only relevant for CUDA enabled builds). ")
 
+#ifdef NANOBRAGG_HAVE_CUDA
       /* actual run of the spot simulation, CUDA version */
       .def("add_nanoBragg_spots_cuda",&nanoBragg::add_nanoBragg_spots_cuda,
        "actually run the spot simulation, going pixel-by-pixel over the region-of-interest, CUDA version")
@@ -1952,7 +1952,7 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
 
       /* actual run of the background simulation */
       .def("add_background",&nanoBragg::add_background,
-        (arg_("oversample")=-1,arg_("source")=-1),
+        (arg_("oversample")=-1,arg_("override_source")=-1),
        "run the non-Bragg simulation, adding background from speficied amorphous materials")
 
       /* retrieve radial-median filtered average background from the image */
@@ -1970,8 +1970,19 @@ printf("DEBUG: pythony_stolFbg[1]=(%g,%g)\n",nanoBragg.pythony_stolFbg[1][0],nan
        "apply specified Poisson, calibration, flicker and read-out noise to the pixels")
 
       .def("to_smv_format",&nanoBragg::to_smv_format,
-        (arg_("fileout"),arg_("intfile_scale")=0,arg_("debug_x")=-1,arg("debug_y")=-1),
-        "interally produce an SMV-format image file on disk from the raw pixel array\nintfile_scale is applied before rounding off to integral pixel values")
+        (arg_("fileout"),arg_("intfile_scale")=0,arg_("debug_x")=-1,arg_("debug_y")=-1),
+        "write an SMV-format image file to disk from the raw pixel array\n"
+        "intfile_scale: multiplicative factor applied to raw pixels before rounding off to integral pixel values\n"
+        "     intfile_scale > 0 : specify a value for the multiplicative factor\n"
+        "     intfile_scale = 1 : do not apply a factor\n"
+        "     intfile_scale = 0 (default): compute a reasonable scale factor to set max pixel to 55000; same value given by get_intfile_scale()"
+        )
+      .def("get_intfile_scale",&nanoBragg::get_intfile_scale,
+        (arg_("intfile_scale")=0),
+        "expose the intfile_scale multiplier to raw pixels that is normally hidden within the to_smv_format interface.\n"
+        "user can apply the return value to the output pixels using to_smv_format(<value>) or to_cbf(<value>)\n"
+        "     intfile_scale = 0 (default): compute a reasonable scale factor to set max pixel to 55000"
+        )
       .def("raw_pixels_unsigned_short_as_python_bytes",&raw_pixels_unsigned_short_as_python_bytes,
         (arg_("intfile_scale")=0,arg_("debug_x")=-1,arg("debug_y")=-1),
         "get the unsigned short raw pixels as a Python bytes object.  Intfile_scale is applied before rounding off to integral pixel values")

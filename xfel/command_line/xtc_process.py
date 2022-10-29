@@ -18,7 +18,7 @@ import pycbf, os, sys, copy, socket
 import libtbx.load_env
 from libtbx.utils import Sorry, Usage
 from dials.util import show_mail_on_error
-from dials.util.options import OptionParser
+from dials.util.options import ArgumentParser
 from libtbx.phil import parse
 from dxtbx.model.experiment_list import ExperimentListFactory
 from dials.array_family import flex
@@ -459,7 +459,7 @@ class InMemScript(DialsProcessScript, DialsProcessorWithLogging):
 %s input.experiment=experimentname input.run_num=N input.address=address
  format.file_format=pickle input.cfg=filename
     """%(libtbx.env.dispatcher_name, libtbx.env.dispatcher_name)
-    self.parser = OptionParser(
+    self.parser = ArgumentParser(
       usage = self.usage,
       phil = phil_scope)
 
@@ -1189,9 +1189,8 @@ class InMemScript(DialsProcessScript, DialsProcessorWithLogging):
         return
 
     # Load a dials mask from the trusted range and psana mask
-    from dials.util.masking import MaskGenerator
-    generator = MaskGenerator(self.params.border_mask)
-    mask = generator.generate(imgset)
+    import dials.util.masking
+    mask = dials.util.masking.generate_mask(imgset, self.params.border_mask)
     if self.params.format.file_format == "cbf" and self.dials_mask is not None:
       mask = tuple([a&b for a, b in zip(mask,self.dials_mask)])
     if self.spotfinder_mask is None:
@@ -1299,9 +1298,8 @@ class InMemScript(DialsProcessScript, DialsProcessorWithLogging):
       imgset = ImageSet(ImageSetData(MemReader([dxtbx_img]), None))
       imgset.set_beam(dxtbx_img.get_beam())
       imgset.set_detector(dxtbx_img.get_detector())
-      from dials.util.masking import MaskGenerator
-      generator = MaskGenerator(self.params.border_mask)
-      mask = generator.generate(imgset)
+      import dials.util.masking
+      mask = dials.util.masking.generate_mask(imgset, self.params.border_mask)
       if self.params.format.file_format == "cbf" and self.dials_mask is not None:
         mask = tuple([a&b for a, b in zip(mask,self.dials_mask)])
     if self.integration_mask is None:

@@ -74,6 +74,10 @@ conda_platform = {
   'Windows': 'win-64',
 }
 
+# check for Apple Silicon
+if platform.system() == 'Darwin' and 'arm64' in platform.platform():
+  conda_platform['Darwin'] = 'osx-arm64'
+
 version = 'PYTHON_VERSION'
 default_format = '{builder}_py{version}_{platform}.txt'
 default_filename = default_format.format(builder='cctbx',
@@ -159,11 +163,7 @@ class conda_manager(object):
     'phenix_voyager': os.path.join('phenix', 'conda_envs',
       default_format.format(builder='phenix', version=version,
                             platform=conda_platform[platform.system()])),
-    'xfel': os.path.join('dials', '.conda-envs',
-      default_format.format(builder='dials', version=version,
-                            platform=conda_platform[platform.system()])),
     'xfellegacy': default_file,
-    'labelit': default_file,
     'dials-old': os.path.join('dials', '.conda-envs',
       default_format.format(builder='dials', version=version,
                             platform=conda_platform[platform.system()])),
@@ -177,13 +177,14 @@ class conda_manager(object):
     'molprobity': default_file,
     'qrefine': default_file,
     'phaser': default_file,
-    'voyager': os.path.join('phaser', 'conda_envs',
-      default_format.format(builder='phaser_tng', version=version,
+    'voyager': os.path.join('phasertng', 'conda_envs',
+      default_format.format(builder='phasertng', version=version,
                             platform=conda_platform[platform.system()]))
   }
+  env_locations['xfel'] = env_locations['labelit'] = env_locations['dials']
   # A set of builders where the environment files do not specify the python
   # version
-  env_without_python = [ "dials" ]
+  env_without_python = [ "dials","xfel","labelit"]
 
   # ---------------------------------------------------------------------------
   def __init__(self, root_dir=root_dir, conda_base=None, conda_env=None,
@@ -353,7 +354,10 @@ an error is encountered, please check that your conda installation and
 environments exist and are working.
 """
         warnings.warn(message, RuntimeWarning)
-      if conda_info['conda_version'] < '4.4':
+      split_version = conda_info['conda_version'].split('.')
+      major_version = int(split_version[0])
+      minor_version = int(split_version[1])
+      if major_version < 4 or (major_version == 4 and minor_version < 4):
         raise RuntimeError("""
 CCTBX programs require conda version 4.4 and greater to make use of the
 common compilers provided by conda. Please update your version with
@@ -508,6 +512,9 @@ common compilers provided by conda. Please update your version with
     }
     filename = 'Miniconda3-latest-{platform}-x86_64'.format(
       platform=os_names[self.system])
+    if conda_platform[self.system] == 'osx-arm64':
+      filename = 'Miniconda3-latest-{platform}-arm64'.format(
+        platform=os_names[self.system])
     if self.system == 'Windows':
       filename += '.exe'
     else:
@@ -573,7 +580,7 @@ channel
       print(output)
 
   # ---------------------------------------------------------------------------
-  def _retry_command(self, command_list, text, prefix):
+  def _retry_command(self, command_list, text, prefix, verbose=None):
     """
     Internal convenience function for retrying creation/update of a
     conda environment.
@@ -586,6 +593,8 @@ channel
         Text to be printed. Usually "installion into" or "update of"
       prefix: str
         Directory of conda environment
+      verbose: bool
+        Used to override self.verbose
 
     Returns
     -------
@@ -593,7 +602,7 @@ channel
     """
 
     run_command = check_output
-    if self.verbose:
+    if self.verbose or verbose:
       run_command = call
 
     for retry in range(self.max_retries):
@@ -670,9 +679,9 @@ format(builder=builder, builders=', '.join(sorted(self.env_locations.keys()))))
       filename = os.path.join(
         self.root_dir, 'modules', self.env_locations[builder])
       if python is not None:
-        if python not in ['27', '36', '37', '38']:
+        if python not in ['27', '36', '37', '38', '39']:
           raise RuntimeError(
-            """Only Python 2.7, 3.6, 3.7, and 3.8 are currently supported.""")
+            """Only Python 2.7, 3.6, 3.7, 3.8, and 3.9 are currently supported.""")
         filename = filename.replace('PYTHON_VERSION', python)
     else:
       filename = os.path.abspath(filename)
@@ -695,6 +704,21 @@ builder.""".format(filename=filename, builder=builder))
     else:
       prefix = os.path.abspath(self.conda_env)
 
+    # compare time stamps of the filename and environment directory
+    # only install/update if the time stamp of the filename is more recent
+    file_stats = None
+    env_stats = None
+    if os.path.exists(filename):
+      file_stats = os.stat(filename)
+    if os.path.exists(prefix):
+      env_stats = os.stat(prefix)
+
+    if env_stats is not None and file_stats is not None:
+      if env_stats.st_mtime > file_stats.st_mtime:
+        print('The environment is newer than the environment file. Skipping update.',
+              file=self.log)
+        return
+
     # install a new environment or update and existing one
     if prefix in self.environments:
       command = 'install'
@@ -715,11 +739,11 @@ builder.""".format(filename=filename, builder=builder))
       command_list.append('--copy')
     if offline and not yaml_format:
       command_list.append('--offline')
-    if builder in ("dials", "dials-old", "xfel") and not yaml_format:
+    if builder in ("dials", "dials-old", "xfel", "labelit") and not yaml_format:
       command_list.append("-y")
     if builder in self.env_without_python:
       python_version = tuple(int(i) for i in (python or "36"))
-      python_requirement = "conda-forge::python>=%s.%s,<%s.%s" % (
+      python_requirement = '"conda-forge::python>=%s.%s,<%s.%s"' % (
           python_version[0],
           python_version[1],
           python_version[0],
@@ -731,7 +755,7 @@ builder.""".format(filename=filename, builder=builder))
           text=text_messages[0], builder=builder, filename=filename),
           file=self.log)
 
-    self._retry_command(command_list, text_messages[1], prefix)
+    self._retry_command(command_list, text_messages[1], prefix, verbose=True)
 
     # on Windows, also download the Visual C++ 2008 Redistributable
     # use the same version as conda-forge
@@ -790,7 +814,7 @@ builder.""".format(filename=filename, builder=builder))
     for package in package_list:
       print('  -', package, file=self.log)
 
-    self._retry_command(command_list, text_messages[1], prefix)
+    self._retry_command(command_list, text_messages[1], prefix, verbose=True)
 
     print('-'*79, file=self.log)
     return prefix
@@ -982,7 +1006,7 @@ Example usage:
       same as the ones for bootstrap.py. The default builder is "cctbx." """)
   parser.add_argument(
     '--python', default='27', type=str, nargs='?', const='27',
-    choices=['27', '36', '37', '38'],
+    choices=['27', '36', '37', '38', '39'],
     help="""When set, a specific Python version of the environment will be used.
     This only affects environments selected with the --builder flag.""")
   parser.add_argument(

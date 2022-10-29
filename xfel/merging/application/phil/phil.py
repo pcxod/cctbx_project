@@ -16,9 +16,34 @@ dispatch {
 
 input_phil = """
 input {
-  keep_imagesets = False
+  alist {
+    file = None
+      .type = str
+      .multiple = True
+      .help = Path to a txt file containing experiment tags or experiment filenames to merge (1 per line, all of same type)
+      .help = If contents are files: then only experiments whose filename is in the alist will be merged
+      .help = If contents are tags: then only experiments whose filename contains one of the alist tags will be merged
+    type = *tags files
+      .type = choice
+      .help = the contents of the input.alist_file, either dials.stills_process image_tags, or absolute expt file paths
+      .help = actually the tag can be any unique substring of the expt filenames found under input.path
+      .help = Note, for very large datasets, using type=files should perform better
+    op = *keep reject
+      .type = choice
+      .help = whether we keep or reject experiments according to the alist(s)
+  }
+  persistent_refl_cols = None
+    .type = str
+    .multiple = True
+    .help = Names of reflection table columns that will remain after all prune steps
+    .help = If output.save_experiments_and_reflections=True, then these columns will be in the saved tables.
+  keep_imagesets = True
     .type = bool
     .help = If True, keep imagesets attached to experiments
+  read_image_headers = False
+    .type = bool
+    .help = If True, when loading data also read image headers. Not needed when merging integrated data.
+    .help = Use when needing to read original image pixel data. Equivalent to check_format in other DIALS programs.
   path = None
     .type = str
     .multiple = True
@@ -53,12 +78,16 @@ input {
     ranks_per_node = 68
         .type = int
         .help = number of MPI ranks per node
-    balance = *global per_node
+    balance = *global1 global2 per_node
       .type = choice
       .multiple = False
-      .help = Balance the input file load by distributing experiments uniformly over all available ranks (global) or over the ranks on each node (per_node)
+      .help = Balance the input file load by distributing experiments uniformly over all available ranks (global1/2) or over the ranks on each node (per_node)
       .help = The idea behind the "per_node" method is that it doesn't require MPI communications across nodes. But if the input file load varies strongly
-      .help = between the nodes, "global" is a much better option.
+      .help = between the nodes, "global1/2" is a much better option. "global1" is accomplished by reshuffling all data across all ranks while "global2" is
+      .help = accomplished by sending the minimal necessary information between ranks to deterministically evenly balance the load.
+    balance_verbose = False
+      .type = bool
+      .help = print load balancing details to the main log
     balance_mpi_alltoall_slices = 1
       .type = int
       .expert_level = 2
@@ -75,6 +104,11 @@ mp {
   method = *mpi
     .type = choice
     .help = Muliprocessing method (only mpi at present)
+  debug {
+    cProfile = False
+      .type = bool
+      .help = Enable code profiling. Use (for example) runsnake to visualize processing performance
+  }
 }
 """
 
@@ -96,26 +130,13 @@ filter
   .help = or to modify the entire experiment by a reindexing operator
   .help = refer to the select section for filtering of individual reflections
   {
-  algorithm = n_obs a_list reindex resolution unit_cell report
+  algorithm = n_obs reindex resolution unit_cell report
     .type = choice
     .multiple = True
   n_obs {
     min = 15
       .type = int
       .help = Minimum number of observations for subsequent processing
-  }
-  a_list
-    .help = a_list is a text file containing a list of acceptable experiments
-    .help = for example, those not misindexed, wrong type, or otherwise rejected as determined separately
-    .help = suggested use, string matching, can include timestamp matching, directory name, etc
-    {
-    file = None
-      .type = path
-      .multiple = True
-    operation = *select deselect
-      .type = choice
-      .multiple = True
-      .help = supposedly have same number of files and operations. Different lists can be provided for select and deselect
   }
   reindex {
     data_reindex_op = h,k,l
@@ -208,6 +229,80 @@ modify
   algorithm = *polarization
     .type = choice
     .multiple = True
+  reindex_to_reference
+    .help = An algorithm to match input experiments against a reference model to
+    .help = break an indexing ambiguity
+    {
+    dataframe = None
+      .type = path
+      .help = if not None, save a list of which experiments were reindexed (requires pandas)
+      .help = and plot a histogram of correlation coefficients (matplotlib)
+    }
+  cosym
+    .help = Implement the ideas of Gildea and Winter doi:10.1107/S2059798318002978
+    .help = to determine Laue symmetry from individual symops
+    {
+    include scope dials.command_line.cosym.phil_scope
+    dataframe = None
+      .type = path
+      .help = if not None, save a list of which experiments were reindexed (requires pandas)
+      .help = and plot a histogram of correlation coefficients (matplotlib)
+    anchor = False
+      .type = bool
+      .help = Once the patterns are mutually aligned with the Gildea/Winter/Brehm/Diederichs methodology
+      .help = flip the whole set so that it is aligned with a reference model.  For simplicity, the
+      .help = reference model from scaling.model is used.  It should be emphasized that the scaling.model
+      .help = is only used to choose the overall alignment, which may be chosen arbitrarily, it does not
+      .help = bias the mutual alignment of the experimental diffraction patterns.
+    tranch_size = 600
+      .type = int(value_min=12)
+      .help = Best guess as to the ideal tranch size for generating embedding plots.  Total number of
+      .help = experiments will be divided among the MPI ranks so as to approximate the tranch size,
+      .help = referring to the composite size (each experiment appears in 3 composite tranches).
+      .help = Size represents a tradeoff,  larger size will take longer to compute but use fewer MPI ranks
+      .help = and converge to more accurate coset assignment (higher % consensus).  Ideal value is data
+      .help = dependent, default of 600 is good for a 200-Angstrom cell, but value should increase for smaller cell.
+    twin_axis = None
+      .type = ints(size=3)
+      .multiple = True
+      .help = Rotation axis to test as a reindexing operator. Given as a direct \
+          axis, e.g. 1,0,0 is a rotation around the a axis.
+    twin_rotation = None
+      .type = int
+      .multiple = True
+      .help = Rotation corresponding to a value of twin_axis. Given as an \
+          n-fold rotation, e.g. 2 denotes a twofold rotation.
+    single_cb_op_to_minimum = False
+      .type = bool
+      .help = Internally the lattices are transformed to a primitive cell \
+          before cosym analysis. Typically each cb_op_to_minimum is determined \
+          individually, but if the options twin_axis and twin_rotation are \
+          used, the transformation has to be the same for every lattice. \
+          Forcing this is probably harmless but has not been tested extensively.
+    plot
+      {
+      do_plot = True
+        .type = bool
+        .help = Generate embedding plots to assess quality of modify_cosym reindexing.
+      n_max = 1
+        .type = int
+        .help = If shots were divided into tranches for alignment, generate embedding plots for
+        .help = the first n_max tranches.
+      interactive = False
+        .type = bool
+        .help = Open embedding plot in Matplotlib window instead of writing a file, overrides do_plot
+      format = *png pdf
+        .type = choice
+        .multiple = False
+      filename = cosym_embedding
+        .type = str
+      }
+    }
+  reindex_to_abc
+    .help = Apply a reindexing operator
+    {
+      include scope dials.command_line.reindex.phil_scope
+    }
 }
 """
 
@@ -294,6 +389,9 @@ scaling {
       .type = float
       .help = If model is taken from coordinates, use b_sol for bulk solvent B-factor
       .help = default is approximate mean value in PDB (according to Pavel)
+    solvent_algorithm = *mosaic flat
+      .type = choice
+      .help = Mosaic solvent model is as in https://doi.org/10.1101/2021.12.09.471976
   }
   algorithm = *mark0 mark1
     .type = choice
@@ -305,7 +403,7 @@ scaling {
 
 postrefinement_phil = """
 postrefinement {
-  enable = False
+  enable = True
     .type = bool
     .help = enable the preliminary postrefinement algorithm (monochromatic)
     .expert_level = 3
@@ -366,7 +464,7 @@ merging {
     .type = int(value_min=2)
     .help = If defined, merged structure factors not produced for the Miller indices below this threshold.
   error {
-    model = ha14 ev11 errors_from_sample_residuals
+    model = ha14 *ev11 errors_from_sample_residuals
       .type = choice
       .multiple = False
       .help = ha14, formerly sdfac_auto, apply sdfac to each-image data assuming negative
@@ -416,6 +514,14 @@ merging {
 
 output_phil = """
 output {
+  expanded_bookkeeping = False
+    .type = bool
+    .help = if True, and if save_experiments_and_reflections=True, then include in the saved refl tabls:
+    .help = 1- modified exp_id column that contains the image number and lattice number
+    .help = 2- index corresponding to the particular reflection in the input file (usually something_integrated.refl)
+    .help = 3- the is_odd flag
+    .help = 4- the original exp id for the reflection
+    .help = 5- a unique number mapping the reflection to its input expFile, refFile pair (see output_dir/file_list_mapping.json)
   prefix = iobs
     .type = str
     .help = Prefix for all output file names
@@ -476,6 +582,9 @@ statistics {
   report_ML = True
     .type = bool
     .help = Report statistics on per-frame attributes modeled by max-likelihood fit (expert only).
+  uc_precision = 2
+    .type = int
+    .help = Decimal places for unit cell statistics
 }
 """
 
@@ -490,10 +599,48 @@ parallel {
 }
 """
 
+publish_phil = """
+publish {
+  include scope xfel.command_line.upload_mtz.phil_scope
+}
+"""
+
+lunus_phil = """
+lunus {
+  deck_file = None
+    .type = path
+}
+"""
+
+diffbragg_phil = """
+diffBragg {
+  include scope simtbx.command_line.hopper.phil_scope
+}
+"""
+
+# A place to override any defaults included from elsewhere
+program_defaults_phil_str = """
+modify.cosym.use_curvatures=False
+"""
+
 master_phil = dispatch_phil + input_phil + tdata_phil + filter_phil + modify_phil + \
               select_phil + scaling_phil + postrefinement_phil + merging_phil + \
-              output_phil + statistics_phil + group_phil
-phil_scope = parse(master_phil)
+              output_phil + statistics_phil + group_phil + lunus_phil + publish_phil + diffbragg_phil
+
+import os, importlib
+custom_phil_pathstr = os.environ.get('XFEL_CUSTOM_WORKER_PATH')
+if custom_phil_pathstr is not None and os.path.isdir(custom_phil_pathstr):
+  for dir in os.listdir(custom_phil_pathstr):
+    path = os.path.join(custom_phil_pathstr, dir, 'phil.py')
+    if not os.path.isfile(path): continue
+    spec = importlib.util.spec_from_file_location('_', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    master_phil += module.phil_str
+
+
+phil_scope = parse(master_phil, process_includes = True)
+phil_scope = phil_scope.fetch(parse(program_defaults_phil_str))
 
 class Script(object):
   '''A class for running the script.'''
@@ -506,9 +653,9 @@ class Script(object):
 
   def initialize(self):
     '''Initialise the script.'''
-    from dials.util.options import OptionParser
+    from dials.util.options import ArgumentParser
     # Create the parser
-    self.parser = OptionParser(
+    self.parser = ArgumentParser(
       usage=self.usage,
       phil=phil_scope,
       epilog=help_message)

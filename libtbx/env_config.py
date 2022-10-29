@@ -35,6 +35,7 @@ default_build_boost_python_extensions = True
 default_enable_openmp_if_possible = False
 default_enable_boost_threads = True
 default_enable_cuda = False
+default_enable_kokkos = False
 default_opt_resources = False
 default_enable_cxx11 = False
 default_use_conda = False
@@ -522,7 +523,7 @@ class environment:
 
   def as_relocatable_path(self, path):
     if isinstance(path, libtbx.path.path_mixin): return path
-    return relocatable_path(self.build_path, path)
+    return relocatable_path(self.build_path, path, resolve_symlinks=False)
 
   def set_derived_paths(self):
     r = self.as_relocatable_path
@@ -659,6 +660,19 @@ class environment:
     return result
 
   def has_module(self, name):
+    # check installed environment first
+    result = self.check_installed_env('_has_module', name)
+    if result:
+      return result
+    # check current environment
+    result = self._has_module(name)
+    if result:
+      return result
+    # then check local environment
+    result = self.check_local_env('_has_module', name)
+    return result
+
+  def _has_module(self, name):
     return name in self.module_dist_paths
 
   def require_module(self, name, error=RuntimeError):
@@ -908,6 +922,7 @@ Wait for the command to finish, then try again.""" % vars())
         path = abs(self.build_path / path)
       self.add_repository(path=path)
     module_names = []
+    installed_env = get_installed_env()
     for module_name in command_line.args:
       if (len(module_name) == 0): continue # ignore arguments like ""
       if (module_name == ".."):
@@ -963,6 +978,7 @@ Wait for the command to finish, then try again.""" % vars())
         enable_boost_threads
           =command_line.options.enable_boost_threads,
         enable_cuda=command_line.options.enable_cuda,
+        enable_kokkos=command_line.options.enable_kokkos,
         use_conda=command_line.options.use_conda,
         opt_resources=command_line.options.opt_resources,
         use_environment_flags=command_line.options.use_environment_flags,
@@ -973,7 +989,6 @@ Wait for the command to finish, then try again.""" % vars())
       self.build_options.get_flags_from_environment()
       # if an installed environment exists, override with build_options
       # from installed environment
-      installed_env = get_installed_env()
       if installed_env is not None:
         self.build_options = installed_env.build_options
       if (self.build_options.use_conda):
@@ -989,7 +1004,6 @@ Wait for the command to finish, then try again.""" % vars())
     module_names.insert(0, "libtbx")
 
     # check for installed environment and remove installed modules
-    installed_env = get_installed_env()
     if installed_env is not None and not self.installed:
       module_set = set(module_names)
       installed_module_names = set([module.name for module in self.installed_modules])
@@ -1026,9 +1040,14 @@ Wait for the command to finish, then try again.""" % vars())
         pass
       else:
         self.scons_dist_path = self.as_relocatable_path(sys.prefix)
-    self.path_utility = self.under_dist(
-      "libtbx", "command_line/path_utility.py",
-      return_relocatable_path=True)
+    if installed_env is not None and not self.installed:
+      self.path_utility = installed_env.under_dist(
+        "libtbx", "command_line/path_utility.py",
+        return_relocatable_path=True)
+    else:
+      self.path_utility = self.under_dist(
+        "libtbx", "command_line/path_utility.py",
+        return_relocatable_path=True)
     assert self.path_utility.isfile()
 
   def dispatcher_precall_commands(self):
@@ -1233,11 +1252,21 @@ Wait for the command to finish, then try again.""" % vars())
           % show_string(self.under_build("dispatcher_include_template.sh")), file=f)
         print('#', file=f)
         print(_SHELLREALPATH_CODE, file=f)
-        print('unset PYTHONHOME', file=f)
         print('LIBTBX_PREFIX="$(shellrealpath "$0" && cd "$(dirname "$RESULT")/.." && pwd)"', file=f)
         print('export LIBTBX_PREFIX', file=f)
         print('LIBTBX_PYEXE_BASENAME="%s"' % self.python_exe.basename(), file=f)
         print('export LIBTBX_PYEXE_BASENAME', file=f)
+        print('# Set the CCTBX_CONDA_USE_ENVIRONMENT_VARIABLES environment variable', file=f)
+        print('# if you want python to use the following environment variables.', file=f)
+        print('# Otherwise, this environment takes priority at runtime.', file=f)
+        print('if [ -z "${CCTBX_CONDA_USE_ENVIRONMENT_VARIABLES}" ]; then', file=f)
+        print('  unset PYTHONHOME', file=f)
+        print('  unset PYTHONPATH', file=f)
+        print('  unset LD_LIBRARY_PATH', file=f)
+        print('  unset DYLD_LIBRARY_PATH', file=f)
+        print('  unset DYLD_FALLBACK_LIBRARY_PATH', file=f)
+        print('  export PATH="${LIBTBX_PREFIX}/bin:${PATH}"', file=f)
+        print('fi', file=f)
         source_is_py = False
         if (source_file is not None):
           dispatcher_name = target_file.basename()
@@ -1427,36 +1456,37 @@ Wait for the command to finish, then try again.""" % vars())
     print('OPENBLAS_NUM_THREADS="%s"' % openblas_num_threads, file=f)
     print('export OPENBLAS_NUM_THREADS', file=f)
 
-    pangorc = abs(self.build_path / '..' / 'base' / 'etc' / 'pango' / 'pangorc')
-    if os.path.exists(pangorc):
-      print('PANGO_RC_FILE="$LIBTBX_BUILD/../base/etc/pango/pangorc"', file=f)
-      print('export PANGO_RC_FILE', file=f)
-    fontconfig = abs(self.build_path / '..' / 'base' / 'etc' / 'fonts')
-    if os.path.exists(fontconfig):
-      print('FONTCONFIG_PATH="$LIBTBX_BUILD/../base/etc/fonts"', file=f)
-      print('export FONTCONFIG_PATH', file=f)
+    if sys.version_info[0] == 2:
+      pangorc = abs(self.build_path / '..' / 'base' / 'etc' / 'pango' / 'pangorc')
+      if os.path.exists(pangorc):
+        print('PANGO_RC_FILE="$LIBTBX_BUILD/../base/etc/pango/pangorc"', file=f)
+        print('export PANGO_RC_FILE', file=f)
+      fontconfig = abs(self.build_path / '..' / 'base' / 'etc' / 'fonts')
+      if os.path.exists(fontconfig):
+        print('FONTCONFIG_PATH="$LIBTBX_BUILD/../base/etc/fonts"', file=f)
+        print('export FONTCONFIG_PATH', file=f)
 
-    # set paths for fontconfig and gdk-pixbuf due to gtk2
-    # checks the location of the conda environment
-    if self.build_options.use_conda and sys.platform.startswith('linux'):
-      fontconfig_path = '{conda_base}/etc/fonts'
-      fontconfig_file = '$FONTCONFIG_PATH/fonts.conf'
-      gdk_pixbuf_module_file = '{conda_base}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache'
-      gtk_path = '{conda_base}/lib/gtk-2.0/2.10.0'
-      conda_base = get_conda_prefix()
-      if (os.path.exists(fontconfig_path.format(conda_base=conda_base)) and
-          os.path.exists(gdk_pixbuf_module_file.format(conda_base=conda_base))):
-        if conda_base == abs(self.build_path / '..' / 'conda_base'):
-          conda_base = '$LIBTBX_BUILD/../conda_base'
-        print('unset GTK_MODULES', file=f)
-        print('unset GTK2_RC_FILES', file=f)
-        print('unset GTK_RC_FILES', file=f)
-        print('export FONTCONFIG_PATH=' +
-              fontconfig_path.format(conda_base=conda_base), file=f)
-        print('export FONTCONFIG_FILE=' + fontconfig_file, file=f)
-        print('export GDK_PIXBUF_MODULE_FILE=' +
-              gdk_pixbuf_module_file.format(conda_base=conda_base), file=f)
-        print('export GTK_PATH=' + gtk_path.format(conda_base=conda_base), file=f)
+      # set paths for fontconfig and gdk-pixbuf due to gtk2
+      # checks the location of the conda environment
+      if self.build_options.use_conda and sys.platform.startswith('linux'):
+        fontconfig_path = '{conda_base}/etc/fonts'
+        fontconfig_file = '$FONTCONFIG_PATH/fonts.conf'
+        gdk_pixbuf_module_file = '{conda_base}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache'
+        gtk_path = '{conda_base}/lib/gtk-2.0/2.10.0'
+        conda_base = get_conda_prefix()
+        if (os.path.exists(fontconfig_path.format(conda_base=conda_base)) and
+            os.path.exists(gdk_pixbuf_module_file.format(conda_base=conda_base))):
+          if conda_base == abs(self.build_path / '..' / 'conda_base'):
+            conda_base = '$LIBTBX_BUILD/../conda_base'
+          print('unset GTK_MODULES', file=f)
+          print('unset GTK2_RC_FILES', file=f)
+          print('unset GTK_RC_FILES', file=f)
+          print('export FONTCONFIG_PATH=' +
+                fontconfig_path.format(conda_base=conda_base), file=f)
+          print('export FONTCONFIG_FILE=' + fontconfig_file, file=f)
+          print('export GDK_PIXBUF_MODULE_FILE=' +
+                gdk_pixbuf_module_file.format(conda_base=conda_base), file=f)
+          print('export GTK_PATH=' + gtk_path.format(conda_base=conda_base), file=f)
 
     for n,v in essentials:
       if (len(v) == 0): continue
@@ -1632,7 +1662,7 @@ Wait for the command to finish, then try again.""" % vars())
           + "   =%s\n" % reg
           + "    %s\n" % show_string(abs(source_file))
           + "   =%s" % source_file)
-    if abs(self.build_path) == get_conda_prefix() or \
+    if abs(self.build_path) == os.path.abspath(get_conda_prefix()) or \
       (os.name == "nt" and abs(self.build_path).lower().endswith('library')):
       action = self.write_conda_dispatcher
     elif (os.name == "nt"):
@@ -2071,7 +2101,7 @@ selfx:
       import pkg_resources
     except ImportError:
       return
-    if self.build_options.use_conda:
+    if self.build_options.use_conda and os.name != "nt":
       paths = {
         os.path.normpath(os.path.join(sys.prefix, "bin")),
         os.path.normpath(os.path.join(get_conda_prefix(), "bin")),
@@ -2230,8 +2260,21 @@ selfx:
 
       for path in self.pythonpath:
         sys.path.insert(0, abs(path))
+
+      # Some libtbx_refresh scripts do a `pip install --editable`. The default
+      # behavior was changed in setuptools 64 and currently we expect the old
+      # behavior. See: https://github.com/pypa/setuptools/pull/3265
+      sef_previous = os.environ.get('SETUPTOOLS_ENABLE_FEATURES')
+      os.environ['SETUPTOOLS_ENABLE_FEATURES'] = 'legacy_editable'
+
       for module in self.module_list:
         module.process_libtbx_refresh_py()
+
+      if sef_previous is not None:
+          os.environ['SETUPTOOLS_ENABLE_FEATURES'] = sef_previous
+      else:
+          os.environ.pop('SETUPTOOLS_ENABLE_FEATURES')
+
       self.write_python_and_show_path_duplicates()
       self.generate_entry_point_dispatchers()
       self.process_exe()
@@ -2239,19 +2282,20 @@ selfx:
       if (os.name != "nt"):     # LD_LIBRARY_PATH for dependencies
         os.environ[self.ld_library_path_var_name()] = ":".join(
           [abs(p) for p in self.ld_library_path_additions()])
-      if self.build_options.use_conda:
-        # refresh loaders.cache for gdk-pixbuf on linux due to gtk2
-        if sys.platform.startswith("linux"):
-          conda_base = get_conda_prefix()
-          command = "{conda_base}/bin/gdk-pixbuf-query-loaders"
-          loaders = "{conda_base}/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.so"
-          cache = "{conda_base}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
-          if os.path.isfile(command.format(conda_base=conda_base)):
-            command = command + " " + loaders + " > " + cache
-            command = command.format(conda_base=conda_base)
-            call(command)
-      else:
-        regenerate_module_files.run(libtbx.env.under_base('.'), only_if_needed=True)
+      if sys.version_info[0] == 2:
+        if self.build_options.use_conda:
+          # refresh loaders.cache for gdk-pixbuf on linux due to gtk2
+          if sys.platform.startswith("linux"):
+            conda_base = get_conda_prefix()
+            command = "{conda_base}/bin/gdk-pixbuf-query-loaders"
+            loaders = "{conda_base}/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.so"
+            cache = "{conda_base}/lib/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+            if os.path.isfile(command.format(conda_base=conda_base)):
+              command = command + " " + loaders + " > " + cache
+              command = command.format(conda_base=conda_base)
+              call(command)
+        else:
+          regenerate_module_files.run(libtbx.env.under_base('.'), only_if_needed=True)
       self.pickle()
       print("libtbx_refresh_is_completed", file=completed_file_name.open("w"))
 
@@ -2401,6 +2445,9 @@ class module:
         path = dist_path / sub_dir / "__init__.py"
         if path.isfile():
           result.append(path.dirname().dirname())
+      path = dist_path / "src"
+      if (path / self.name).isdir() or (path / "__init__.py").isfile():
+        result.append(path)
     return result
 
   def has_top_level_directory(self, directory_name):
@@ -2589,6 +2636,7 @@ class build_options:
         enable_openmp_if_possible=default_enable_openmp_if_possible,
         enable_boost_threads=True,
         enable_cuda=default_enable_cuda,
+        enable_kokkos=default_enable_kokkos,
         use_conda=default_use_conda,
         opt_resources=default_opt_resources,
         precompile_headers=False,
@@ -2652,6 +2700,7 @@ class build_options:
     print("Enable OpenMP if possible:", self.enable_openmp_if_possible, file=f)
     print("Boost threads enabled:", self.enable_boost_threads, file=f)
     print("Enable CUDA:", self.enable_cuda, file=f)
+    print("Enable KOKKOS:", self.enable_kokkos, file=f)
     print("Use conda:", self.use_conda, file=f)
     print("Use opt_resources if available:", self.opt_resources, file=f)
     print("Use environment flags:", self.use_environment_flags, file=f)
@@ -2836,6 +2885,11 @@ class pre_process_args:
       default=default_enable_cuda,
       help="Use optimized CUDA routines for certain calculations.  Requires at least one NVIDIA GPU with compute capability of 2.0 or higher, and CUDA Toolkit 4.0 or higher (default: %s)"
         % default_enable_cuda)
+    parser.option(None, "--enable_kokkos",
+      action="store_true",
+      default=default_enable_kokkos,
+      help="Use optimized KOKKOS routines for certain calculations. Which backend (CUDA/HIP/OpenMP) is used, depends on the system (default: %s)"
+        % default_enable_kokkos)
     parser.option(None, "--use_conda",
       action="store_true",
       default=default_use_conda,
@@ -3019,7 +3073,7 @@ def unpickle(build_path=None, env_name="libtbx_env"):
   if build_path is None:
     build_path = os.getenv("LIBTBX_BUILD")
   # try default installed location
-  if build_path is None:
+  if not build_path:
     build_path = get_installed_path()
   set_preferred_sys_prefix_and_sys_executable(build_path=build_path)
   with open(op.join(build_path, env_name), "rb") as libtbx_env:
@@ -3039,6 +3093,9 @@ def unpickle(build_path=None, env_name="libtbx_env"):
     env.installed_modules = []
   if not hasattr(env, "installed_order"):
     env.installed_order = []
+  # XXX backward compatibility 2022-01-19
+  if not hasattr(env.build_options, "enable_kokkos"):
+    env.build_options.enable_kokkos = False
   # update installed location
   if env.installed:
     sys_prefix = get_conda_prefix()
@@ -3051,6 +3108,12 @@ def unpickle(build_path=None, env_name="libtbx_env"):
     env.exe_path._anchor = sys_prefix
     env.include_path._anchor = sys_prefix
     env.lib_path._anchor = sys_prefix
+    env.path_utility._anchor = sys_prefix
+    if sys.platform == 'win32':
+      for module in env.module_list:
+        for dist_path in module.dist_paths:
+          if dist_path is not None:
+            dist_path._anchor = sys_prefix
   return env
 
 def warm_start(args):

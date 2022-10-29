@@ -481,12 +481,15 @@ class structure_base(object):
     end_present = False
     start_resseq = self.start_resseq if isinstance(self.start_resseq, str) else self.convert_resseq(self.start_resseq)
     end_resseq = self.end_resseq if isinstance(self.end_resseq, str) else self.convert_resseq(self.end_resseq)
+    if len(hierarchy.models()) == 0:
+      return False
     for chain in hierarchy.models()[0].chains():
       if chain.id == self.start_chain_id:
         for rg in chain.residue_groups():
-          if rg.resseq == start_resseq:
+          resname = rg.atom_groups()[0].resname
+          if rg.resseq == start_resseq and self.start_resname == resname:
             start_present = True
-          if rg.resseq == end_resseq:
+          if rg.resseq == end_resseq and self.end_resname == resname:
             end_present = True
           if start_present and end_present:
             return True
@@ -1532,8 +1535,7 @@ class annotation(structure_base):
          max_h_bond_length=self.max_h_bond_length,
          keep_self=None)
       score_list.append([score_1,s1])
-    score_list.sort()
-    score_list.reverse()
+    score_list = sorted(score_list, key = lambda s: s[0], reverse = True)
 
     remove_list=[]
     keep_list=[]

@@ -13,6 +13,7 @@ import wx
 import numpy as np
 from scitbx.array_family import flex
 
+import matplotlib as mpl
 from matplotlib import pyplot as plt
 from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_wxagg import FigureCanvasWxAgg as FigureCanvas
@@ -119,10 +120,11 @@ class PopUpCharts(object):
   ''' Class to generate chargs and graphs that will appear in separate
   windows when user requests them, e.g. unit cell histogram chart '''
 
-  def __init__(self, interactive = True):
+  def __init__(self, interactive = True, figure = None):
     import matplotlib.pyplot as plt
     self.plt=plt
     self.interactive = interactive
+    self.figure = figure
 
   def reject_outliers(self, data, iqr_ratio = 1.5):
     eps = 1e-6
@@ -139,7 +141,7 @@ class PopUpCharts(object):
     #print "Rejecting", outliers.count(True), "out of", len(outliers)
     return outliers
 
-  def plot_uc_histogram(self, info_list, legend_list, extra_title = None, xsize = 10, ysize = 10, high_vis = False, iqr_ratio = 1.5, ranges = None, title = None):
+  def plot_uc_histogram(self, info_list, legend_list, extra_title = None, xsize = 10, ysize = 10, high_vis = False, iqr_ratio = 1.5, ranges = None, title = None, image_fname=None, hist_scale=None):
     """
     Plot a 3x3 grid of plots showing unit cell dimensions.
     @param info list of lists of dictionaries. The outer list groups seperate lists
@@ -169,7 +171,10 @@ class PopUpCharts(object):
       separator = "\n"
 
     # Initialize figure
-    fig = plt.figure(figsize=(xsize, ysize))
+    if self.figure:
+      fig = self.figure
+    else:
+      fig = plt.figure(figsize=(xsize, ysize))
     gsp = GridSpec(3, 4)
     legend_sub_a = fig.add_subplot(gsp[3])
     legend_sub_b = fig.add_subplot(gsp[7])
@@ -263,7 +268,11 @@ class PopUpCharts(object):
          ('b', 'c', b, c, blim, clim, sub_cb),
          ('c', 'a', c, a, clim, alim, sub_ac)]:
         if len(info_list) == 1:
-          sub.hist2d(d1, d2, bins=100, range=[lim1, lim2] if ranges is not None else None)
+          if hist_scale=="log":
+            hist_kwargs = {'norm': mpl.colors.LogNorm()}
+          else:
+            hist_kwargs = {}
+          sub.hist2d(d1, d2, bins=100, range=[lim1, lim2] if ranges is not None else None, **hist_kwargs)
         else:
           sub.plot(d1.as_numpy_array(), d2.as_numpy_array(), '.', alpha=0.1, markeredgewidth=0, markersize=2)
           if ranges is not None:
@@ -337,8 +346,9 @@ class PopUpCharts(object):
     fig.suptitle(title + " (%d xtals)" % total)
 
     if not self.interactive:
+      image_fname = image_fname or "ucell_tmp.png"
       fig.set_size_inches(xsize*1.05+.5, ysize*.95)
-      fig.savefig("ucell_tmp.png", bbox_inches='tight', dpi=100)
+      fig.savefig(image_fname, bbox_inches='tight', dpi=100)
       plt.close(fig)
       return "ucell_tmp.png"
 

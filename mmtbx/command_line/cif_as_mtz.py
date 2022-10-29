@@ -7,6 +7,7 @@ from iotbx import crystal_symmetry_from_any
 import iotbx.phil
 import iotbx.mtz
 import iotbx.pdb
+from iotbx import cif_mtz_data_labels
 from cctbx.array_family import flex
 from cctbx import crystal
 from libtbx import runtime_utils
@@ -113,7 +114,7 @@ def run(args, command_name = "phenix.cif_as_mtz", out=sys.stdout,
     raise Sorry("File is not found: %s"%file_name)
   output_r_free_label = command_line.options.output_r_free_label
   if ((not output_r_free_label[0] in string.ascii_uppercase) or
-      (re.search("[^a-zA-Z0-9_\-]", output_r_free_label))):
+      (re.search(r"[^a-zA-Z0-9_\-]", output_r_free_label))):
     raise Sorry(("%s is not a suitable column label.  MTZ format requires "+
       "an uppercase letter as the first character, and only alphanumeric "+
       "characters or hyphens in the rest of the string.")% output_r_free_label)
@@ -183,7 +184,13 @@ def process_files(file_name,
 def get_label(miller_array, output_r_free_label):
   label = None
   for l in miller_array.info().labels:
-    if ('_meas' in l):
+    if miller_array.anomalous_flag():
+      if miller_array.is_xray_amplitude_array():
+        label = "F"
+      elif miller_array.is_xray_intensity_array():
+        label = "I"
+      break
+    elif ('_meas' in l):
       if miller_array.is_xray_amplitude_array():
         label = "FOBS"
       elif miller_array.is_xray_intensity_array():
@@ -196,36 +203,35 @@ def get_label(miller_array, output_r_free_label):
         label = "FC"
       elif miller_array.is_xray_intensity_array():
         label = "ICALC"
-      elif l.endswith(".F_calc"):
+      elif ".F_calc" in l: # cope with _refln.F_calc_au  and _refln.F_calc labels
         label = "FC"
       elif l.endswith(".phase_calc"):
         label = "PHIC"
-      break
-    elif miller_array.anomalous_flag():
-      if miller_array.is_xray_amplitude_array():
-        label = "F"
-      elif miller_array.is_xray_intensity_array():
-        label = "I"
       break
     elif 'status' in l or '_free' in l:
       label = output_r_free_label
       break
     elif miller_array.is_hendrickson_lattman_array():
       label = "HL"
+      break
     elif (miller_array.is_complex_array()):
-      if (l.endswith("DELFWT")):
+      if "DELFWT" in l:
         label = "DELFWT"
         break
-      elif (l.endswith("FWT")):
+      elif "FWT" in l:
         label = "FWT"
         break
     elif (miller_array.is_real_array()):
-      if ("pdbx_anom_difference" in l):
+      if (l.endswith( "pdbx_anom_difference")):
         label = "DANO"
         break
       elif (l.endswith(".fom")):
         label = "FOM"
         break
+    # as a last resort try find a match in cif_mtz_data_labels dictionary
+    label = cif_mtz_data_labels.ccp4_label_from_cif(l)
+    if label:
+      return label
   return label
 
 def extract(file_name,
@@ -296,10 +302,14 @@ def extract(file_name,
   complete_set = make_joined_set(all_arrays)
   if return_as_miller_arrays:
     miller_array_list=[]
+  current_i = -1
+  uc = None
   for i, (data_name, miller_arrays) in enumerate(six.iteritems(all_miller_arrays)):
     for ma in miller_arrays.values():
-      ma = ma.customized_copy(
-        crystal_symmetry=crystal_symmetry).set_info(ma.info())
+      #ma = ma.customized_copy(
+      #  crystal_symmetry=crystal_symmetry).set_info(ma.info())
+      if ma._space_group_info is None:
+        ma._space_group_info = crystal_symmetry.space_group_info()
       labels = ma.info().labels
       label = get_label(miller_array=ma, output_r_free_label=output_r_free_label)
       if label is None:
@@ -325,12 +335,22 @@ def extract(file_name,
         label += "%i" %crys_id
       if crystal_id is not None and crys_id > 0 and crys_id != crystal_id:
         continue
-      if crys_id not in mtz_crystals:
+
+      if ma.unit_cell() is not None: # use symmetry file on the command line if it's None
+        unit_cell = ma.unit_cell()
+
+      if crys_id not in mtz_crystals or \
+        (i > current_i and unit_cell is not None and uc is not None and unit_cell.parameters() != uc.parameters()):
+        # Ensure new mtz crystals are created if miller_array objects have different unit cells
+        # Can happen if there are more datasets in the same cif file, like MAD datasets
+        uc = unit_cell
+        current_i = i
+        # Use unique project and crystal names so that MtzGet() in cmtzlib.c picks up individual unit cells
         mtz_crystals[crys_id] = (
           mtz_object.add_crystal(
-            name="crystal_%i" %crys_id,
-            project_name="project",
-            unit_cell=unit_cell), {})
+            name="crystal_%i" %i,
+            project_name="project_%i" %i,
+            unit_cell =uc), {})
       crystal, datasets = mtz_crystals[crys_id]
       w_id = 0
       for l in labels:
@@ -456,9 +476,8 @@ def extract(file_name,
       dec = None
       if ("FWT" in label):
         dec = iotbx.mtz.ccp4_label_decorator()
-      # XXX what about DANO,SIGDANO?
       column_types = None
-      if ("PHI" in label) and (ma.is_real_array()):
+      if ("PHI" in label or "PHWT" in label) and (ma.is_real_array()):
         column_types = "P"
       elif (label.startswith("DANO") and ma.is_real_array()):
         if (ma.sigmas() is not None):
@@ -472,6 +491,7 @@ def extract(file_name,
         i += 1
       if(ma is not None):
         column_labels.add(label)
+        if("FWT-1" in label): dec=None
         dataset.add_miller_array(ma,
           column_root_label=label,
           label_decorator=dec,
@@ -638,8 +658,10 @@ def run2(args,
   return (params.output_file_name, n_refl)
 
 def validate_params(params):
-  if (params.input.cif_file is None) and (params.input.pdb_id is None):
+  if params.input.cif_file is None and params.input.pdb_id is None:
     raise Sorry("No CIF file provided!")
+  if params.input.cif_file == [] and params.input.pdb_id is None:
+    raise Sorry("No structure factors found!")
   if (params.input.pdb_id is not None):
     if (params.input.cif_file is not None):
       raise Sorry("Please specify either a PDB ID or a CIF file, not both.")
@@ -673,4 +695,4 @@ def finish_job(results):
   return ([], [])
 
 if(__name__ == "__main__"):
-   run(sys.argv[1:])
+  run(sys.argv[1:])

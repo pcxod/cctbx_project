@@ -15,6 +15,8 @@ Import("env_base", "env_etc")
 env_etc.boost_dist = libtbx.env.dist_path("boost")
 env_etc.boost_include = env_etc.boost_dist
 build_boost_libs = True
+env_etc.boost_python_lib = 'boost_python'
+env_etc.boost_numpy_lib = 'boost_numpy'
 # Boost source does not exist, headers and libraries exist
 # boost directory in cctbx_project is picked up by find_in_repositories
 if not os.path.isdir(env_etc.boost_dist) or 'cctbx_project' in env_etc.boost_dist \
@@ -37,6 +39,8 @@ if not os.path.isdir(env_etc.boost_dist) or 'cctbx_project' in env_etc.boost_dis
     env_base.Prepend(LIBPATH=[os.path.join(sys.prefix, 'lib'),
                               os.path.join(sys.prefix, 'lib64')])
   build_boost_libs = False
+  env_etc.boost_python_lib = get_boost_library_with_python_version("boost_python", env_base['LIBPATH'])
+  env_etc.boost_numpy_lib = get_boost_library_with_python_version("boost_numpy", env_base['LIBPATH'])
 env_etc.boost_adaptbx_dist = libtbx.env.dist_path("boost_adaptbx")
 env_etc.boost_adaptbx_include = os.path.dirname(env_etc.boost_adaptbx_dist)
 
@@ -89,8 +93,7 @@ if (not env_etc.no_boost_python):
     SHLIBPREFIX="")
   # Do not override the libraries linked by env_base
   env_no_includes_boost_python_ext.Append(
-    LIBS=[get_boost_library_with_python_version(
-      "boost_python", env_base['LIBPATH'])] + env_etc.libs_python + env_etc.libm)
+    LIBS=[env_etc.boost_python_lib] + env_etc.libs_python + env_etc.libm)
   env_no_includes_boost_python_ext.Append(
     LIBPATH=env_etc.libpath_python)
   env_no_includes_boost_python_ext.Append(
@@ -243,13 +246,18 @@ e.g. with "yum install python-dev" or "apt-get install python-dev".
     env_etc.include_registry.prepend(env=env_fs, paths=[env_etc.boost_include])
     fs_root = '#' + os.path.join(
       os.path.basename(env_etc.boost_dist), 'libs', 'filesystem', 'src')
-    fs_src = [os.path.join(fs_root, path) for path in
-              ['operations.cpp', 'path.cpp', 'path_traits.cpp', 'portability.cpp',
-              'unique_path.cpp', 'utf8_codecvt_facet.cpp',
-              'codecvt_error_category.cpp']]
+    fs_src_base = ['operations.cpp', 'path.cpp', 'path_traits.cpp', 'portability.cpp',
+                   'unique_path.cpp', 'utf8_codecvt_facet.cpp',
+                   'codecvt_error_category.cpp',
+                  ]
+    if env_etc.boost_version >= 107200:
+      fs_src_base.extend(['directory.cpp', 'exception.cpp'])
+      env_fs.Append(LIBS=['boost_system'])
+    fs_src = [os.path.join(fs_root, path) for path in fs_src_base]
     if (sys.platform == 'win32'):     # Windows
       fs_src.append(os.path.join(fs_root, 'windows_file_codecvt.cpp'))
-      env_fs.Append(CPPDEFINES={'BOOST_FILESYSTEM_DYN_LINK':1})
+      #env_fs.Append(CPPDEFINES={'BOOST_FILESYSTEM_DYN_LINK':1})
+      env_fs.Append(CPPDEFINES={'BOOST_FILESYSTEM_STATIC_LINK':1})
       env_fs.StaticLibrary(
         target='#lib/boost_filesystem',
         source=fs_src)

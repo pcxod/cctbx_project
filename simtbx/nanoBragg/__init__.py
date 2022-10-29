@@ -108,7 +108,7 @@ class _():
   @property
   def beam(self):
     # Does this handle the conventions ? Im always confused about where the beam is pointing, whats s0 and whats beam_vector
-    beam_dict = {'direction': tuple([-1*x for x in self.beam_vector]),  # TODO: is this correct?
+    beam_dict = {'direction': self.beam_vector,
                   'divergence': 0.0,  # TODO
                   'flux': self.flux,
                   'polarization_fraction': self.polarization,  #TODO
@@ -178,24 +178,106 @@ class _():
 
     return imageset
 
-  def as_explist(self):
+  def as_explist(self, fname=None, toggle_conventions=False):
     """
     return experiment list for simulated image
     """
+    C = self.crystal
+    if toggle_conventions:
+      # switch to DIALS convention before writing CBF
+      # also change basis of crystal
+      CURRENT_CONV = self.beamcenter_convention
+      FSO = sqr(self.fdet_vector + self.sdet_vector + self.pix0_vector_mm)
+      self.beamcenter_convention=DIALS
+      FSO2 = sqr(self.fdet_vector + self.sdet_vector + self.dials_origin_mm)
+      xtal_transform = FSO.inverse()*FSO2
+
+      # transform the crystal vectors
+      a,b,c = map(lambda x: xtal_transform*col(x) , C.get_real_space_vectors())
+      Cdict = C.to_dict()
+      Cdict['real_space_a'] = a
+      Cdict['real_space_b'] = b
+      Cdict['real_space_b'] = c
+      C = CrystalFactory.from_dict(Cdict)
+
     exp = Experiment()
-    exp.crystal = self.crystal
+    exp.crystal = C
     exp.beam = self.beam
     exp.detector = self.detector
     exp.imageset = self.imageset
     explist = ExperimentList()
     explist.append(exp)
+    if fname is not None:
+        explist.as_file(fname)
+    if toggle_conventions:
+      self.beamcenter_convention=CURRENT_CONV
 
     return explist
 
-  def to_cbf(self, cbf_filename):
+  def to_cbf(self, cbf_filename, toggle_conventions=False, intfile_scale=1.0):
+    """write a CBF-format image file to disk from the raw pixel array
+    intfile_scale: multiplicative factor applied to raw pixels before output
+         intfile_scale > 0 : value of the multiplicative factor
+         intfile_scale = 1 (default): do not apply a factor
+         intfile_scale = 0 : compute a reasonable scale factor to set max pixel to 55000; given by get_intfile_scale()"""
+
+    if intfile_scale != 1.0:
+      cache_pixels = self.raw_pixels
+      if intfile_scale > 0: self.raw_pixels = self.raw_pixels * intfile_scale
+      else: self.raw_pixels = self.raw_pixels * self.get_intfile_scale()
+      # print("switch to scaled")
+
+    if toggle_conventions:
+      # switch to DIALS convention before writing CBF
+      CURRENT_CONV = self.beamcenter_convention
+      self.beamcenter_convention=DIALS
+
     writer = cbf_writer.FullCBFWriter(imageset=self.imageset)
     writer.write_cbf(cbf_filename, index=0)
 
+    if toggle_conventions:
+      self.beamcenter_convention=CURRENT_CONV
+
+    if intfile_scale != 1.0:
+      self.raw_pixels = cache_pixels
+      # print("switch back to cached")
+
+def make_imageset(data, beam, detector):
+  format_class = FormatBraggInMemoryMultiPanel(data)
+  reader = MemReaderNamedPath("virtual_Bragg_path", [format_class])
+  reader.format_class = FormatBraggInMemory
+  imageset_data = ImageSetData(reader, None)
+  imageset = ImageSet(imageset_data)
+  imageset.set_beam(beam)
+  imageset.set_detector(detector)
+  return imageset
+
+class FormatBraggInMemoryMultiPanel:
+
+  def __init__(self, raw_pixels_lst):
+    if not isinstance(raw_pixels_lst[0], flex.double):
+      raw_pixels_lst = [flex.double(data) for data in raw_pixels_lst]
+    self.raw_pixels_panels = tuple(raw_pixels_lst)
+    panel_shape = self.raw_pixels_panels[0].focus()
+    self.mask = tuple([flex.bool(flex.grid(panel_shape), True)]*len(self.raw_pixels_panels) )  # TODO: use nanoBragg internal mask
+
+  def get_path(self, index):
+    if index == 0:
+      return "Virtual"
+    else:
+      raise ValueError("index must be 0 for format %s" % self.__name__)
+
+  def get_raw_data(self):
+    """
+    return as a tuple, multi panel with 1 panel
+    currently nanoBragg doesnt support simulating directly to a multi panel detector
+    so this is the best we can do..
+    """
+    return self.raw_pixels_panels
+
+  def get_mask(self, goniometer=None):
+    """dummie place holder for mask, consider using internal nanoBragg mask"""
+    return self.mask
 
 class FormatBraggInMemory:
 

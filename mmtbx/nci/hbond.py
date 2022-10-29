@@ -56,6 +56,7 @@ def make_atom_id(atom, index):
     altloc = atom.parent().altloc)
 
 def get_stats(data):
+  if(data.size()<10): return None
   mean=data.min_max_mean().mean
   sd=data.standard_deviation_of_the_sample()
   assert data.size(), 'no data - may mean no Hydrogen atoms'
@@ -165,16 +166,15 @@ def stats(model, prefix, no_ticks=True):
   # Create model; this is a single-model pure protein with new H added
   pdb_inp = iotbx.pdb.input(source_info = None, lines = rr.stdout_lines)
   model = mmtbx.model.manager(
-    model_input      = None,
-    build_grm        = True,
-    pdb_hierarchy    = pdb_inp.construct_hierarchy(),
-    process_input    = True,
+    model_input      = pdb_inp,
     log              = null_out())
-  box = uctbx.non_crystallographic_unit_cell_with_the_sites_in_its_center(
-    sites_cart   = model.get_sites_cart(),
-    buffer_layer = 5)
-  model.set_sites_cart(box.sites_cart)
-  model._crystal_symmetry = box.crystal_symmetry()
+  if(model.crystal_symmetry() is None):
+    box = uctbx.non_crystallographic_unit_cell_with_the_sites_in_its_center(
+      sites_cart   = model.get_sites_cart(),
+      buffer_layer = 5)
+    model.set_sites_cart(box.sites_cart)
+    model._crystal_symmetry = box.crystal_symmetry()
+  model.process(make_restraints = True)
   #
   N = 10
   #
@@ -526,10 +526,14 @@ class find(object):
       d_HA   .append(r.d_HA)
     bpr=float(len(self.result))/\
       len(list(self.model.get_hierarchy().residue_groups()))
+    theta_1 = get_stats(theta_1)
+    theta_2 = get_stats(theta_2)
+    d_HA    = get_stats(d_HA)
+    if([theta_1, theta_2, d_HA].count(None)>0): return None
     return group_args(
-      theta_1 = get_stats(theta_1),
-      theta_2 = get_stats(theta_2),
-      d_HA    = get_stats(d_HA),
+      theta_1 = theta_1,
+      theta_2 = theta_2,
+      d_HA    = d_HA,
       n       = len(self.result),
       n_sym   = n_sym,
       bpr     = bpr)

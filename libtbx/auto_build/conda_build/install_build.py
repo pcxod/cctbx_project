@@ -86,7 +86,7 @@ def fix_rpath(src):
   if platform == 'win32':
     return
   if platform.startswith('linux'):
-    libraries = list()
+    libraries = []
     env = dict(os.environ)
     if env.get('LD_LIBRARY_PATH', None) is not None:
       del env['LD_LIBRARY_PATH']
@@ -101,7 +101,7 @@ def fix_rpath(src):
 def copy_build(env, prefix=None, ext_dir=None, sp_dir=None, copy_egg=False, link=False):
   """
   Copies the following items,
-    1) Binaries from build/exe_dev to $PREFIX/bin
+    1) Binaries from build/exe_dev and build/*/exe to $PREFIX/bin
     2) Headers from build/include to $PREFIX/include
     3) Libraries from build/lib to $PREFIX/lib
     4) Python extensions from build/lib to $PREFIX/lib/$PYTHON/lib-dynload
@@ -166,14 +166,27 @@ def copy_build(env, prefix=None, ext_dir=None, sp_dir=None, copy_egg=False, link
     if os.path.isdir(src_path):
       filenames = os.listdir(src_path)
       loop_copy(src_path, dst_path, name, filenames)
+  src_path = abs(env.build_path)
+  dst_path = os.path.join(prefix, 'bin')
+  os.chdir(src_path)
+  all_names = glob.iglob('*/exe/*')
+  module_names = set()
+  for name in all_names:
+    split_name = name.split(os.sep)
+    module_names.add(split_name[0])
+  for module_name in module_names:
+    src_path = os.path.join(abs(env.build_path), module_name, 'exe')
+    filenames = os.listdir(src_path)
+    loop_copy(src_path, dst_path, '{} binaries'.format(module_name), filenames)
 
   # libraries
   # ---------------------------------------------------------------------------
   src_path = os.path.join(abs(env.build_path), 'lib')
   dst_path = os.path.join(prefix, 'lib')
   os.chdir(src_path)
-  all_names = glob.iglob('lib*')
-  lib_names = list()
+  all_names = glob.glob('lib*') \
+              + [f for f in glob.glob('*.lib') if not f.endswith('_ext.lib')]
+  lib_names = []
   for name in all_names:
     if name.endswith('egg-info'):
       continue
@@ -185,7 +198,7 @@ def copy_build(env, prefix=None, ext_dir=None, sp_dir=None, copy_egg=False, link
   src_path = os.path.join(abs(env.build_path), 'lib')
   dst_path = ext_dir
   all_names = glob.iglob('*ext.*')
-  ext_names = list()
+  ext_names = []
   for name in all_names:
     if name.endswith('egg-info'):
       continue
@@ -248,6 +261,41 @@ def copy_modules(env, sp_dir=None, link=False):
           # skip boost
           if module == 'boost' and src.endswith('boost'):
             continue
+          # copy subdirectories for some modules
+          elif module == 'phenix':
+            for subdir in ['phenix', 'wxGUI2']:
+              src = abs(dist_path / subdir)
+              dst = os.path.join(sp_dir, subdir)
+              if os.path.exists(dst):
+                print('  {dst} already exists'.format(dst=dst))
+                continue
+              if os.path.isdir(src):
+                print('  source:      ' + src)
+                print('  destination: ' + dst)
+                copy_cmd(src, dst, link)
+              else:
+                print('  Nothing done')
+                continue
+              # phenix/wxGUI2 is also an expected path (fix upstream)
+              if subdir == 'wxGUI2':
+                dst = os.path.join(sp_dir, 'phenix', subdir)
+                print('  source:      ' + src)
+                print('  destination: ' + dst)
+                if os.path.exists(dst):
+                  print('  {dst} already exists'.format(dst=dst))
+                  continue
+                copy_cmd(src, dst, link)
+            continue
+          elif module in ['elbow', 'phaser', 'phasertng', 'PyQuante']:
+            # yacc.py
+            if module == 'elbow':
+              yacc = 'yacc.py'
+              src = abs(dist_path / yacc)
+              dst = os.path.join(sp_dir, yacc)
+              print('  source:      ' + src)
+              print('  destination: ' + dst)
+              copy_cmd(src, dst, link)
+            src = abs(dist_path / module)
           dst = os.path.join(sp_dir, os.path.basename(src))
           if os.path.exists(dst):
             print('  {dst} already exists'.format(dst=dst))
@@ -314,14 +362,27 @@ def remove_build(env, prefix=None, ext_dir=None, sp_dir=None):
     dst_path = os.path.join(prefix, name_dir)
     filenames = os.listdir(src_path)
     loop_remove(dst_path, name, filenames)
+  src_path = abs(env.build_path)
+  dst_path = os.path.join(prefix, 'bin')
+  os.chdir(src_path)
+  all_names = glob.iglob('*/exe/*')
+  module_names = set()
+  for name in all_names:
+    split_name = name.split(os.sep)
+    module_names.add(split_name[0])
+  for module_name in module_names:
+    src_path = os.path.join(abs(env.build_path), module_name, 'exe')
+    filenames = os.listdir(src_path)
+    loop_remove(dst_path, '{} binaries'.format(module_name), filenames)
 
   # libraries
   # ---------------------------------------------------------------------------
   src_path = os.path.join(abs(env.build_path), 'lib')
   dst_path = os.path.join(prefix, 'lib')
   os.chdir(src_path)
-  all_names = glob.iglob('lib*')
-  lib_names = list()
+  all_names = glob.glob('lib*') \
+              + [f for f in glob.glob('*.lib') if not f.endswith('_ext.lib')]
+  lib_names = []
   for name in all_names:
     lib_names.append(name)
   loop_remove(dst_path, 'libraries', lib_names)
@@ -330,7 +391,7 @@ def remove_build(env, prefix=None, ext_dir=None, sp_dir=None):
   # ---------------------------------------------------------------------------
   dst_path = ext_dir
   all_names = glob.iglob('*ext.*')
-  ext_names = list()
+  ext_names = []
   for name in all_names:
     ext_names.append(name)
   loop_remove(dst_path, 'Python extensions', ext_names)
@@ -390,6 +451,14 @@ by the LIBTBX_BUILD environment variable''')
         remove_cmd(src)
       else:
         print('  {name} not found'.format(name=name))
+
+    # extra stuff
+    for module_name, extra_stuff in [('elbow', 'yacc.py'), ('phenix', 'wxGUI2')]:
+      if module == module_name:
+        src = os.path.join(sp_dir, extra_stuff)
+        if os.path.exists(src):
+          print('  ' + src)
+          remove_cmd(src)
 
     print('Done')
     print()

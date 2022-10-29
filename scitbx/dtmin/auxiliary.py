@@ -83,7 +83,7 @@ class Auxiliary:
       return reparameterized_bounds
 
   def reparameterized_target_gradient(self):
-    """
+    r"""
     Returns the function and the reparameterized gradient
 
     When we are finding the gradient of f with respect to the reparameterized
@@ -226,7 +226,7 @@ class Auxiliary:
     print("")
     print("Study behaviour of parameters near current values")
 
-    fmin = self.target() # so called becuase it should be at the mininum
+    fmin = self.target() # so called because it should be at the minimum
 
     # First check that function values from F, FG and FGH agree
     reparameterized_f_g = self.reparameterized_target_gradient()
@@ -239,8 +239,7 @@ class Auxiliary:
 
     f_g_h = self.reparameterized_target_gradient_hessian()
     hessLogLike = f_g_h[0]
-    h           = f_g_h[1]
-    is_diagonal = f_g_h[2]
+    is_diagonal = f_g_h[3]
     if abs(fmin-hessLogLike) >= 0.1:
       print("Likelihoods from target() and reparameterized_f_g_h() disagree")
       print("Likelihood from                target(): " + str(-fmin))
@@ -250,7 +249,7 @@ class Auxiliary:
     assert(abs(fmin-hessLogLike) < 0.1)
     fmin = gradLogLike # Use function value from gradient for consistency below
 
-    outstream = open("studyWhatAmI", "wb")
+    outstream = open("studyWhatAmI", "w")
     for i in range(self.nmp):
       outstream.write(" \"" + parameter_names[i] + " \"\n")
     outstream.close()
@@ -260,9 +259,9 @@ class Auxiliary:
     dxgh = [0.] * self.nmp # Finite diff shift for grad & hess
     for i in range(self.nmp):
       if i+1 < 10:
-        outstream = open(filename + ".0" + str(i+1), "wb")
+        outstream = open(filename + ".0" + str(i+1), "w")
       else:
-        outstream = open(filename + "."  + str(i+1), "wb")
+        outstream = open(filename + "."  + str(i+1), "w")
       print("\nRefined Parameter #:" + str(i+1) + " " + self.macrocycle_parameter_names()[i])
       print("Centered on " + self.to_sci_format(old_x[i]))
       xmin = old_x[i] - 2.*ls[i]
@@ -308,17 +307,14 @@ class Auxiliary:
         df = gradLogLike - fmin
         f_g_h = self.reparameterized_target_gradient_hessian()
         h           = f_g_h[2].deep_copy()
-        is_diagonal = f_g_h[3]
         thisx = x[i] # Save before finite diffs
         x[i] = x[i] + dxgh[i]
-        xplus = x[i]
         self.set_reparameterized_parameters(x)
 
         f_g = self.reparameterized_target_gradient()
         fplus = f_g[0]
         gplus = f_g[1]
         x[i] = x[i] - 2*dxgh[i] # Other side of original x
-        xminus = x[i]
         self.set_reparameterized_parameters(x)
 
         f_g = self.reparameterized_target_gradient()
@@ -344,8 +340,6 @@ class Auxiliary:
       first = True
       self.set_reparameterized_parameters(x)
       f_g = self.reparameterized_target_gradient()
-      unrepar_g = f_g[1]
-
       f_g_h = self.reparameterized_target_gradient_hessian()
       h = f_g_h[2].deep_copy()
       for i in range(self.nmp-1):

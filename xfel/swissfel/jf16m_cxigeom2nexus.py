@@ -8,6 +8,7 @@ from libtbx.phil import parse
 import six
 from libtbx.utils import Sorry
 import datetime
+from xfel.util.jungfrau import pad_stacked_format
 
 phil_scope = parse("""
   unassembled_file = None
@@ -37,6 +38,9 @@ phil_scope = parse("""
     .type = float
     .help = If set, add this offset (in eV) to the energy axis in the \
             spectra in the beam file and to the per-shot wavelength.
+  pulse_offset = 0
+    .type = int
+    .help = If set, index into beam pulse_ids with this offset.
   mask_file = None
     .type = str
     .help = Path to file with external bad pixel mask.
@@ -44,6 +48,11 @@ phil_scope = parse("""
     .type = bool
     .help = Whether to split the 4x2 modules into indivdual asics \
             accounting for borders and gaps.
+  include_separate_leaf_transformation = False
+    .type = bool
+    .expert_level = 2
+    .help = Whether to add an extra hierarchy level for the last level. \
+            Generally not needed.
   trusted_range = None
     .type = floats(size=2)
     .help = Set the trusted range
@@ -51,6 +60,28 @@ phil_scope = parse("""
     .type = bool
     .help = Whether the data being analyzed is raw data from the JF16M or has \
             been corrected and padded.
+  unassembled_data_key = None
+    .type = str
+    .expert_level = 2
+    .help = Override hdf5 key name in unassembled file
+  spectral_data_key = None
+    .type = str
+    .expert_level = 2
+    .help = Override beam hdf5 file key for spectral data
+  pedestal_file = None
+    .type = str
+    .help = path to Jungfrau pedestal file
+  gain_file = None
+    .type = str
+    .help = path to Jungfrau gain file
+  raw_file = None
+    .type = str
+    .help = path to Jungfrau raw file
+  recalculate_wavelength = False
+    .type = bool
+    .help = If True, the incident_wavelength is recalculated from the \
+            spectrum. The original wavelength is saved as \
+            incident_wavelength_fitted_spectrum_average.
   nexus_details {
     instrument_name = SwissFEL ARAMIS BEAMLINE ESB
       .type = str
@@ -99,6 +130,8 @@ The assumed parameters for the detector can be seen in the __init__ function and
 if they are modified at in the future
 
 '''
+
+
 
 
 class jf16m_cxigeom2nexus(object):
@@ -160,11 +193,65 @@ class jf16m_cxigeom2nexus(object):
     data = entry.create_group('data')
     data.attrs['NX_class'] = 'NXdata'
     data_key = 'data'
-    if self.params.raw:
-      data[data_key] = h5py.ExternalLink(self.params.unassembled_file, "data/JF07T32V01/data")
+    if self.params.unassembled_data_key:
+      unassembled_data_key = self.params.unassembled_data_key
     else:
-      data[data_key] = h5py.ExternalLink(self.params.unassembled_file, "data/data")
-    # --> sample
+      if self.params.raw:
+        unassembled_data_key = "data/JF07T32V01"
+      else:
+        unassembled_file = h5py.File(self.params.unassembled_file, "r")
+        unassembled_data_key = "data"
+        if not unassembled_file.get(unassembled_data_key):
+          unassembled_data_key = "data/JF07T32V01"
+        if not unassembled_file.get(unassembled_data_key):
+          raise Sorry("couldn't find unassembled data in the indicated file")
+        unassembled_file.close()
+    data[data_key] = h5py.ExternalLink(self.params.unassembled_file, unassembled_data_key+"/data")
+
+    if self.params.raw_file is not None:
+      assert not self.params.raw
+      with h5py.File(self.params.pedestal_file, "r") as pedh5:
+        print("Padding raw pedestal data")
+        mean_pedestal = [pad_stacked_format(raw) for raw in pedh5["gains"]]
+        print("Padding raw pedestal RMS  data")
+        sigma_pedestal = [pad_stacked_format(raw) for raw in pedh5["gainsRMS"]]
+        data.create_dataset("pedestal", data=mean_pedestal, dtype=np.float32)
+        data.create_dataset('pedestalRMS', data=sigma_pedestal, dtype=np.float32)
+
+      with h5py.File(self.params.gain_file, "r") as gainh5:
+        print("Padding gains")
+        gains = [pad_stacked_format(raw) for raw in gainh5["gains"]]
+        data.create_dataset("gains", data=gains, dtype=np.float32)
+
+      data.attrs['signal'] = 'data'
+
+      raw_file_handle = h5py.File(self.params.raw_file, "r")
+      res_file_handle = h5py.File(self.params.unassembled_file, "r")
+      raw_dset = raw_file_handle["data/JF07T32V01/data"]
+      raw_shape = raw_dset.shape
+      _, raw_slowDim, raw_fastDim = raw_shape
+      raw_type = raw_dset.dtype
+      num_imgs = res_file_handle['data/data'].shape[0]
+      raw_layout = h5py.VirtualLayout(shape=(num_imgs, raw_slowDim, raw_fastDim), dtype=raw_type)
+      raw_pulses = raw_file_handle['data/JF07T32V01/pulse_id'][()][:, 0]
+      assert np.all(raw_pulses == np.sort(raw_pulses))  # NOTE; this is quick, however I think this is always the case
+      res_pulses = h5py.File(self.params.unassembled_file, 'r')['data/pulse_id'][()]
+      raw_source = h5py.VirtualSource(self.params.raw_file, 'data/JF07T32V01/data', shape=raw_shape)
+      for res_imgnum, raw_imgnum in enumerate(np.searchsorted(raw_pulses, res_pulses)):
+        raw_layout[res_imgnum] = raw_source[raw_imgnum]
+      data.create_virtual_dataset('raw', raw_layout)
+
+    if self.params.raw:
+      if self.params.pedestal_file:
+        # named gains instead of pedestal in JF data files
+        data['pedestal'] = h5py.ExternalLink(self.params.pedestal_file, 'gains')
+        data['pedestalRMS'] = h5py.ExternalLink(self.params.pedestal_file, 'gainsRMS')
+      if self.params.gain_file:
+        data['gains'] = h5py.ExternalLink(self.params.gain_file, 'gains')
+      if self.params.pedestal_file or self.params.gain_file:
+        data.attrs['signal'] = 'data'
+
+    #--> sample
     sample = entry.create_group('sample')
     sample.attrs['NX_class'] = 'NXsample'
     if self.params.nexus_details.sample_name: sample['name'] = self.params.nexus_details.sample_name
@@ -190,42 +277,84 @@ class jf16m_cxigeom2nexus(object):
     elif self.params.beam_file is not None:
       # data file has pulse ids, need to match those to the beam file, which may have more pulses
       if self.params.raw:
-        data_pulse_ids = h5py.File(self.params.unassembled_file, 'r')['data/JF07T32V01/pulse_id'][()]
+        data_pulse_ids = h5py.File(self.params.unassembled_file, 'r')[unassembled_data_key+'/pulse_id'][()]
       else:
-        data_pulse_ids = h5py.File(self.params.unassembled_file, 'r')['data/pulse_id'][()]
+        data_pulse_ids = h5py.File(self.params.unassembled_file, 'r')[unassembled_data_key+'/pulse_id'][()]
       beam_h5 = h5py.File(self.params.beam_file, 'r')
-      beam_pulse_ids = beam_h5['data/SARFE10-PSSS059:SPECTRUM_CENTER/pulse_id'][()]
-      beam_energies = beam_h5['data/SARFE10-PSSS059:SPECTRUM_CENTER/data'][()]
+      if self.params.spectral_data_key:
+        spectral_data_key = self.params.spectral_data_key
+      else:
+        spectral_data_key = "SARFE10-PSSS059"
+        if not beam_h5.get(spectral_data_key+":SPECTRUM_CENTER/pulse_id"):
+          spectral_data_key = "data/SARFE10-PSSS059"
+      if not beam_h5.get(spectral_data_key+":SPECTRUM_CENTER/pulse_id"):
+        raise Sorry("couldn't find spectral data at the indicated address")
+
+      beam_pulse_ids = beam_h5[spectral_data_key+':SPECTRUM_CENTER/pulse_id'][()]
+      beam_pulse_ids += self.params.pulse_offset
+      beam_energies = beam_h5[spectral_data_key+':SPECTRUM_CENTER/data'][()]
       energies = np.ndarray((len(data_pulse_ids),), dtype='f8')
+      if self.params.recalculate_wavelength:
+        orig_energies = np.ndarray((len(data_pulse_ids),), dtype='f8')
       if self.params.include_spectra:
-        beam_spectra_x = beam_h5['data/SARFE10-PSSS059:SPECTRUM_X/data'][()]
-        beam_spectra_y = beam_h5['data/SARFE10-PSSS059:SPECTRUM_Y/data'][()]
+        beam_spectra_x = beam_h5[spectral_data_key+':SPECTRUM_X/data'][()]
+        beam_spectra_y = beam_h5[spectral_data_key+':SPECTRUM_Y/data'][()]
         spectra_x = np.ndarray((len(data_pulse_ids),beam_spectra_x.shape[1]), dtype='f8')
         spectra_y = np.ndarray((len(data_pulse_ids),beam_spectra_y.shape[1]), dtype='f8')
 
       for i, pulse_id in enumerate(data_pulse_ids):
-        where = np.where(beam_pulse_ids==pulse_id)[0][0]
-        energies[i] = beam_energies[where]
-        if self.params.include_spectra:
-          spectra_x[i] = beam_spectra_x[where]
-          spectra_y[i] = beam_spectra_y[where]
+        try:
+          where = np.where(beam_pulse_ids==pulse_id)[0][0]
+        except IndexError:
+          # No spectrum in file. Add bogus energy to fail in indexing
+          energies[i] = .00001
+          if self.params.recalculate_wavelength:
+            orig_energies[i] = .00001
+          if self.params.include_spectra:
+            spectra_x[i] = np.zeros(beam_spectra_x[0].size)+0.00001
+            spectra_y[i] = np.zeros(beam_spectra_y[0].size)+0.00001
+          print("filling zero spectrum for missing pulse id ", pulse_id)
+        else:
+          if self.params.recalculate_wavelength:
+            assert self.params.beam_file is not None, "Must provide beam file to recalculate wavelength"
+            x = beam_spectra_x[where]
+            y = beam_spectra_y[where].astype(float)
+            # super basic baseline subtraction
+            ycorr = y - np.percentile(y, 10)
+            # weighted mean
+            e = sum(x*ycorr) / sum(ycorr)
+            energies[i] = e
+            orig_energies[i] = beam_energies[where]
+          else:
+            energies[i] = beam_energies[where]
+          if self.params.include_spectra:
+            spectra_x[i] = beam_spectra_x[where]
+            spectra_y[i] = beam_spectra_y[where]
 
       if self.params.energy_offset:
         energies += self.params.energy_offset
       wavelengths = 12398.4187/energies
+      if self.params.recalculate_wavelength:
+        orig_wavelengths = 12398.4187/orig_energies
 
+      beam.create_dataset('incident_wavelength', wavelengths.shape, data=wavelengths, dtype=wavelengths.dtype)
+      if self.params.recalculate_wavelength:
+        beam.create_dataset(
+            'incident_wavelength_fitted_spectrum_average',
+            orig_wavelengths.shape,
+            data=orig_wavelengths,
+            dtype=orig_wavelengths.dtype
+        )
+        beam['incident_wavelength_fitted_spectrum_average'].attrs['variant'] = 'incident_wavelength'
       if self.params.include_spectra:
         if self.params.energy_offset:
           spectra_x += self.params.energy_offset
-        beam.create_dataset('incident_wavelength', wavelengths.shape, data=wavelengths, dtype=wavelengths.dtype)
         if (spectra_x == spectra_x[0]).all(): # check if all rows are the same
           spectra_x = spectra_x[0]
         beam.create_dataset('incident_wavelength_1Dspectrum', spectra_x.shape, data=12398.4187/spectra_x, dtype=spectra_x.dtype)
         beam.create_dataset('incident_wavelength_1Dspectrum_weight', spectra_y.shape, data=spectra_y, dtype=spectra_y.dtype)
         beam['incident_wavelength_1Dspectrum'].attrs['units'] = 'angstrom'
         beam['incident_wavelength'].attrs['variant'] = 'incident_wavelength_1Dspectrum'
-      else:
-        beam.create_dataset('incident_wavelength', wavelengths.shape, data=wavelengths, dtype=wavelengths.dtype)
     else:
       assert self.params.wavelength is not None, "Provide a wavelength"
       beam.create_dataset('incident_wavelength', (1,), data=self.params.wavelength, dtype='f8')
@@ -341,8 +470,12 @@ class jf16m_cxigeom2nexus(object):
                 asic_vector = -offset + (fast * pixel_size * (asic_fast * asic_fast_number + border + (asic_fast_number * gap))) + \
                                         (slow * pixel_size * (asic_slow * asic_slow_number + border + (asic_slow_number * gap)))
 
-              self.create_vector(transformations, a_name, 0.0, depends_on=m_name, equipment='detector', equipment_component='detector_asic',
-                                 transformation_type='rotation', units='degrees', vector=(0., 0., -1.), offset = asic_vector.elems, offset_units = 'mm')
+              if self.params.include_separate_leaf_transformation:
+                self.create_vector(transformations, a_name, 0.0, depends_on=m_name, equipment='detector', equipment_component='detector_asic',
+                                   transformation_type='rotation', units='degrees', vector=(0., 0., -1.), offset = asic_vector.elems, offset_units = 'mm')
+                fs_depends_on = transformations.name+'/'+a_name
+              else:
+                fs_depends_on = transformations.name+'/'+m_name
 
               asicmodule = detector.create_group(array_name+'Q%dM%dA%d'%(quad,module_num,asic_num))
               asicmodule.attrs['NX_class'] = 'NXdetector_module'
@@ -355,17 +488,23 @@ class jf16m_cxigeom2nexus(object):
               asicmodule.create_dataset('data_size', (2,), data=[asic_slow - border*2, asic_fast - border*2], dtype='i')
 
               self.create_vector(asicmodule, 'fast_pixel_direction',pixel_size,
-                                 depends_on=transformations.name+'/AXIS_D0Q%dM%dA%d'%(quad,module_num,asic_num),
-                                 transformation_type='translation', units='mm', vector=fast.elems, offset=(0. ,0., 0.))
+                                 depends_on=fs_depends_on,
+                                 transformation_type='translation', units='mm', vector=fast.elems,
+                                 offset=(0.,0.,0.) if self.params.include_separate_leaf_transformation else asic_vector)
               self.create_vector(asicmodule, 'slow_pixel_direction',pixel_size,
-                                 depends_on=transformations.name+'/AXIS_D0Q%dM%dA%d'%(quad,module_num,asic_num),
-                                 transformation_type='translation', units='mm', vector=slow.elems, offset=(0., 0., 0.))
+                                 depends_on=fs_depends_on,
+                                 transformation_type='translation', units='mm', vector=slow.elems,
+                                 offset=(0.,0.,0.) if self.params.include_separate_leaf_transformation else asic_vector)
         else:
           module_vector = self.hierarchy[q_key][m_key]['local_origin'].elems
-          self.create_vector(transformations, m_name, 0.0, depends_on=q_name,
-                             equipment='detector', equipment_component='detector_module',
-                             transformation_type='rotation', units='degrees', vector=(0. ,0., -1.),
-                             offset = module_vector, offset_units = 'mm')
+          if self.params.include_separate_leaf_transformation:
+            self.create_vector(transformations, m_name, 0.0, depends_on=q_name,
+                               equipment='detector', equipment_component='detector_module',
+                               transformation_type='rotation', units='degrees', vector=(0. ,0., -1.),
+                               offset = module_vector, offset_units = 'mm')
+            fs_depends_on = transformations.name+'/'+m_name
+          else:
+            fs_depends_on = transformations.name+'/'+q_name
 
           modulemodule = detector.create_group(array_name+'Q%dM%d'%(quad,module_num))
           modulemodule.attrs['NX_class'] = 'NXdetector_module'
@@ -376,11 +515,13 @@ class jf16m_cxigeom2nexus(object):
           fast = self.hierarchy[q_key][m_key]['local_fast'].elems
           slow = self.hierarchy[q_key][m_key]['local_slow'].elems
           self.create_vector(modulemodule, 'fast_pixel_direction',pixel_size,
-                             depends_on=transformations.name+'/AXIS_D0Q%dM%d'%(quad,module_num),
-                             transformation_type='translation', units='mm', vector=fast, offset=(0. ,0., 0.))
+                             depends_on=fs_depends_on,
+                             transformation_type='translation', units='mm', vector=fast,
+                             offset=(0.,0.,0.) if self.params.include_separate_leaf_transformation else module_vector)
           self.create_vector(modulemodule, 'slow_pixel_direction',pixel_size,
-                             depends_on=transformations.name+'/AXIS_D0Q%dM%d'%(quad,module_num),
-                             transformation_type='translation', units='mm', vector=slow, offset=(0., 0., 0.))
+                             depends_on=fs_depends_on,
+                             transformation_type='translation', units='mm', vector=slow,
+                             offset=(0.,0.,0.) if self.params.include_separate_leaf_transformation else module_vector)
     f.close()
 
 if __name__ == '__main__':

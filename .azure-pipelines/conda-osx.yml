@@ -23,11 +23,6 @@ jobs:
         OS: osx-64
         PYTHON_VERSION: py27
         MODULES: ${{ parameters.modules }}
-      python3.6:
-        CONDA: MacOSX
-        OS: osx-64
-        PYTHON_VERSION: py36
-        MODULES: ${{ parameters.modules }}
       python3.7:
         CONDA: MacOSX
         OS: osx-64
@@ -43,10 +38,18 @@ jobs:
         OS: osx-64
         PYTHON_VERSION: py39
         MODULES: ${{ parameters.modules }}
+      python3.10:
+        CONDA: MacOSX
+        OS: osx-64
+        PYTHON_VERSION: py310
+        MODULES: ${{ parameters.modules }}
 
   variables:
-    artifact_name: ${{ parameters.prefix }}${{ format('xcode_{0}', join('_', parameters.xcode_version))  }}_$(PYTHON_VERSION)
-    day: $(Get-Date -Format dddd)
+    - name: artifact_name
+      value: ${{ parameters.prefix }}${{ format('xcode_{0}', join('_', parameters.xcode_version))  }}_$(PYTHON_VERSION)
+    - name: day
+      value: $(Get-Date -Format dddd)
+    - group: Settings
 
   steps:
   - powershell: |
@@ -84,12 +87,14 @@ jobs:
       path: $(Pipeline.Workspace)
     displayName: Download cached build
     condition: >
-      or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
-             ne(variables['day'], 'Sunday')),
-         eq(variables['Build.DefinitionName'], 'CI'),
-         eq(variables['Build.DefinitionName'], 'CI branch'),
-         eq(variables['Build.DefinitionName'], 'XFEL CI'),
-         eq(variables['Build.DefinitionName'], 'Full'))
+      and(or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
+                 ne(variables['day'], 'Sunday')),
+             eq(variables['Build.DefinitionName'], 'CI'),
+             eq(variables['Build.DefinitionName'], 'CI branch'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI branch'),
+             eq(variables['Build.DefinitionName'], 'Full')),
+          ne(variables['SKIP_CACHED_BUILD'], 'true'))
     continueOnError: true
 
   - script: |
@@ -97,19 +102,20 @@ jobs:
       tar -xf build.tar
     displayName: Extract build tarball
     condition: >
-      or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
-             ne(variables['day'], 'Sunday')),
-         eq(variables['Build.DefinitionName'], 'CI'),
-         eq(variables['Build.DefinitionName'], 'CI branch'),
-         eq(variables['Build.DefinitionName'], 'XFEL CI'),
-         eq(variables['Build.DefinitionName'], 'Full'))
+      and(or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
+                 ne(variables['day'], 'Sunday')),
+             eq(variables['Build.DefinitionName'], 'CI'),
+             eq(variables['Build.DefinitionName'], 'CI branch'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI branch'),
+             eq(variables['Build.DefinitionName'], 'Full')),
+          ne(variables['SKIP_CACHED_BUILD'], 'true'))
     continueOnError: true
     failOnStderr: false
 
   - script: |
       rm -f $(Pipeline.Workspace)/build/lib/scitbx_array_family_flex_ext.so
-    displayName: Fix broken cache on macOS 10.15
-    condition: and(eq('${{ parameters.vmImage[0] }}', 10), eq('${{ parameters.vmImage[1] }}', 15))
+    displayName: Fix broken cache on macOS
     continueOnError: true
     failOnStderr: false
 

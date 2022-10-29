@@ -1,5 +1,7 @@
 from __future__ import absolute_import, division, print_function
 import json, h5py, numpy as np
+from scipy.stats import binned_statistic
+from scipy import signal
 from scipy import constants
 from scipy.signal import argrelmax, argrelmin, savgol_filter
 import time
@@ -8,17 +10,29 @@ from simtbx.nanoBragg import nanoBragg
 from simtbx.nanoBragg.nanoBragg_beam import NBbeam
 from simtbx.nanoBragg.nanoBragg_crystal import NBcrystal
 from simtbx.nanoBragg.sim_data import SimData
+from scitbx.matrix import sqr
 
 ENERGY_CONV = 10000000000.0 * constants.c * constants.h / constants.electron_volt
+
+
+def ensure_p1(Crystal, Famp):
+  high_symm_symbol = Famp.space_group_info().type().lookup_symbol()
+  cb_op = Famp.space_group_info().change_of_basis_op_to_primitive_setting()
+  dtrm = sqr(cb_op.c().r().as_double()).determinant()
+  if not dtrm == 1:
+    Crystal = Crystal.change_basis(cb_op)
+    Famp = Famp.change_basis(cb_op)
+  return Crystal, Famp
+
 
 def flexBeam_sim_colors(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
                         pids=None, cuda=False, oversample=0, Ncells_abc=(50, 50, 50),
                         mos_dom=1, mos_spread=0, beamsize_mm=0.001, device_Id=0, omp=False,
-                        show_params=False, crystal_size_mm=0.01, printout_pix=None, time_panels=True,
+                        show_params=True, crystal_size_mm=0.01, printout_pix=None, time_panels=True,
                         verbose=0, default_F=0, interpolate=0, recenter=True, profile="gauss",
                         spot_scale_override=None, background_raw_pixels=None, include_noise=False,
                         add_water = False, add_air=False, water_path_mm=0.005, air_path_mm=0, rois_perpanel=None,
-                        adc_offset=0, readout_noise=3, psf_fwhm=0, gain=1, mosaicity_random_seeds=None):
+                        adc_offset=0, readout_noise=3, psf_fwhm=0, gain=1, mosaicity_random_seeds=None, nopolar=False):
   """
   :param CRYSTAL: dxtbx Crystal model
   :param DETECTOR: dxtbx detector model
@@ -57,8 +71,11 @@ def flexBeam_sim_colors(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
   :param psf_fwhm: point spread kernel FWHM
   :param gain: photon gain
   :param mosaicity_random_seeds: random seeds to simulating mosaic texture
+  :param nopolar: switch of polarization
   :return: list of [(panel_id0,simulated pattern0), (panel_id1, simulated_pattern1), ...]
   """
+
+  CRYSTAL, Famp = ensure_p1(CRYSTAL, Famp)
 
   if pids is None:
     pids = range(len(DETECTOR))
@@ -113,6 +130,10 @@ def flexBeam_sim_colors(CRYSTAL, DETECTOR, BEAM, Famp, energies, fluxes,
     S.update_nanoBragg_instance("printout_pixel_fastslow", printout_pix)
   if spot_scale_override is not None:
     S.update_nanoBragg_instance("spot_scale", spot_scale_override)
+  S.update_nanoBragg_instance("nopolar", nopolar)
+
+  if show_params:
+    S.D.show_params()
 
   for pid in pids:
     t_panel = time.time()
@@ -285,7 +306,8 @@ def fcalc_from_pdb(resolution, algorithm=None, wavelength=0.9, anom=True, ucell=
   return fcalc
 
 
-def downsample_spectrum(energies, fluences, total_flux=1e12, nbins=100, method=0, ev_width=1.5, baseline_sigma=3.5):
+def downsample_spectrum(energies, fluences, total_flux=1e12, nbins=100, method=0, ev_width=1.5, baseline_sigma=3.5,
+                        method2_param=None):
   """
   :param energies:
   :param fluences:
@@ -296,6 +318,8 @@ def downsample_spectrum(energies, fluences, total_flux=1e12, nbins=100, method=0
   :param baseline_sigma:
   :return:
   """
+  if method2_param is None:
+    method2_param = {"filt_freq": 0.07, "filt_order": 3, "tail": 50, "delta_en": 1}
   if method == 0:
     energy_bins = np.linspace(energies.min() - 1e-6, energies.max() + 1e-6, nbins + 1)
     fluences = np.histogram(energies, bins=energy_bins, weights=fluences)[0]
@@ -306,7 +330,7 @@ def downsample_spectrum(energies, fluences, total_flux=1e12, nbins=100, method=0
     is_finite = fluences > cutoff
     fluences = fluences[is_finite]
     energies = energies[is_finite]
-  else:  # method==1:
+  elif method==1:
     w = fluences
     med = np.median(np.hstack((w[:100] ,w[-100:])))
     sigma = np.std(np.hstack((w[:100] ,w[-100:])))
@@ -318,6 +342,21 @@ def downsample_spectrum(energies, fluences, total_flux=1e12, nbins=100, method=0
     kept_idx = [i for i in idx if w[i] > baseline]
     energies = energies[kept_idx]
     fluences = fluences[kept_idx]
+  elif method==2:
+    delta_en = method2_param["delta_en"]
+    tail = method2_param["tail"]
+    filt_order = method2_param["filt_order"]
+    filt_freq = method2_param["filt_freq"]
+    xdata = np.hstack((energies[:tail], energies[-tail:]))
+    ydata = np.hstack((fluences[:tail], fluences[-tail:]))
+    pfit = np.polyfit(xdata, ydata, deg=1)
+    baseline = np.polyval(pfit, energies)
+    denz = signal.filtfilt(*signal.butter(filt_order, filt_freq,'low'), x=fluences-baseline)
+    enbin = np.arange(energies.min(), energies.max(), delta_en)
+    fluences, _, _ = binned_statistic(energies, denz, bins=enbin)
+    energies = (enbin[1:] + enbin[:-1])*0.5
+    fluences[fluences < 0] = 0  # probably ok
+
   fluences /= fluences.sum()
   fluences *= total_flux
   return energies, fluences

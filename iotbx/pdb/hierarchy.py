@@ -6,7 +6,7 @@ from libtbx.str_utils import show_sorted_by_counts
 from libtbx.utils import Sorry, plural_s, null_out
 from libtbx import Auto, dict_with_default_0, group_args
 from iotbx.pdb import hy36encode, hy36decode, common_residue_names_get_class
-from iotbx.pdb import amino_acid_codes
+from iotbx.pdb.amino_acid_codes import one_letter_given_three_letter
 from iotbx.pdb.modified_aa_names import lookup as aa_3_as_1_mod
 from iotbx.pdb.modified_rna_dna_names import lookup as na_3_as_1_mod
 from iotbx.pdb.utils import all_chain_ids, all_label_asym_ids
@@ -450,13 +450,20 @@ class _():
   def only_atom(self):
     return self.only_atom_group().only_atom()
 
-  def overall_counts(self):
+  def overall_counts(self,
+    only_one_model = None):
     """
     Calculate basic statistics for contents of the PDB hierarchy, including
     number of residues of each type.
 
+    :parameter only_one_model:  return results for first model only
     :returns: iotbx.pdb.hierarchy.overall_counts object
     """
+    if only_one_model and len(list(self.models())) > 1:
+      one_model_ph = iotbx.pdb.hierarchy.root()
+      one_model_ph.append_model(self.models()[0].detached_copy())
+      return one_model_ph.overall_counts()
+
     result = overall_counts()
     self.get_overall_counts(result)
     return result
@@ -689,6 +696,98 @@ class _():
 
 # END_MARKED_FOR_DELETION_OLEG
 
+  def as_list_of_residue_names(self):
+    sequence=[]
+    for model in self.models():
+      for chain in model.chains():
+        seq = chain.as_list_of_residue_names()
+        if seq:
+          sequence += seq
+    return sequence
+
+  def as_model_manager(self, crystal_symmetry,
+       unit_cell_crystal_symmetry = None,
+       shift_cart = None):
+    ''' Returns simple version of model object based on this hierarchy
+     Requires crystal_symmetry.  Optional unit_cell_crystal_symmetry and
+     shift_cart
+     '''
+    import mmtbx.model
+    mm = mmtbx.model.manager(
+          model_input = self.deep_copy().as_pdb_input(),
+          crystal_symmetry = crystal_symmetry,
+          )
+    mm.set_unit_cell_crystal_symmetry_and_shift_cart(
+          unit_cell_crystal_symmetry = unit_cell_crystal_symmetry,
+          shift_cart = shift_cart)
+    return mm
+
+
+  def as_dict_of_resseq_as_int_residue_names(self):
+    max_models = 1
+    dd =  {}
+    for m in self.models()[:max_models]:
+      for c in m.chains():
+        new_dd = c.as_dict_of_resseq_as_int_residue_names()
+        dd[c.id] = new_dd
+    return dd
+
+  def as_sequence(self,
+      substitute_unknown='X',
+      substitute_unknown_na = 'N',
+      ignore_all_unknown = None,
+      as_string = False,
+      only_one_model = False):
+    ''' Uses chain.as_sequence() for all chains and returns the catenation
+    :param substitute_unknown: character to use for unrecognized 3-letter codes
+    :param substitute_unknown_na: character to use for unrecognized na codes
+    :param ignore_all_unknown: set substitute_unknown and substitute_unknown_na to ''
+    :param as_string: return string (default is to return list)
+    :param only_one_model: Only use the first model if more than one
+    '''
+
+    max_models = 1 if only_one_model else len(list(self.models()))
+    seq =  []
+    for m in self.models()[:max_models]:
+      for c in m.chains():
+        new_seq = c.as_sequence(
+          substitute_unknown =substitute_unknown,
+          substitute_unknown_na = substitute_unknown_na,
+          ignore_all_unknown =ignore_all_unknown,
+         )
+        if new_seq:
+          seq += new_seq
+    if as_string:
+      return "".join(seq)
+    else: # usual
+      return seq
+
+  def format_fasta(self,
+      substitute_unknown='X',
+      substitute_unknown_na = 'N',
+      ignore_all_unknown = None,
+      as_string = False):
+    ''' uses format_fasta for all chains and returns catenation
+    :param substitute_unknown: character to use for unrecognized 3-letter codes
+    :param substitute_unknown_na: character to use for unrecognized na codes
+    :param ignore_all_unknown: set substitute_unknown and substitute_unknown_na to ''
+    :param as_string: return string (default is to return list of lines)
+    '''
+    seq_fasta_lines = []
+    for m in self.models():
+      for c in m.chains():
+        new_lines = c.format_fasta(
+          substitute_unknown =substitute_unknown,
+          substitute_unknown_na = substitute_unknown_na,
+          ignore_all_unknown =ignore_all_unknown,
+         )
+        if new_lines:
+          seq_fasta_lines += new_lines
+    if as_string:
+      return "\n".join(seq_fasta_lines)
+    else: # usual
+      return seq_fasta_lines
+
   def extract_xray_structure(self, crystal_symmetry=None,
      min_distance_sym_equiv=None):
     """
@@ -821,7 +920,7 @@ class _():
     assert shift_best is not None # should never happen
     self.atoms().set_xyz(uc.orthogonalize(sites_frac+shift_best))
 
-  def expand_to_p1(self, crystal_symmetry):
+  def expand_to_p1(self, crystal_symmetry, exclude_self=False):
     # ANISOU will be invalid
     import string
     import scitbx.matrix
@@ -835,6 +934,7 @@ class _():
       for smx in crystal_symmetry.space_group().all_ops():
         m3 = smx.r().as_double()
         m3 = scitbx.matrix.sqr(m3)
+        if(exclude_self and m3.is_r3_identity_matrix()): continue
         t = smx.t().as_double()
         t = scitbx.matrix.col((t[0],t[1],t[2]))
         for c_ in m_.chains():
@@ -989,20 +1089,21 @@ class _():
       # make it
       prev_ac_key = ''
       self._label_seq_id_dict = {}
-      for chain in self.models()[0].chains():
-        label_seq_id = 0
-        for rg in chain.residue_groups():
-          for ag in rg.atom_groups():
-            cur_ac_key = chain.id + rg.resseq + rg.icode
-            if cur_ac_key != prev_ac_key:
-              label_seq_id += 1
-              prev_ac_key = cur_ac_key
-            label_seq_id_str='.'
-            comp_id = ag.resname.strip()
-            residue_class = common_residue_names_get_class(comp_id)
-            if residue_class in ['common_amino_acid', 'modified_amino_acid']:
-              label_seq_id_str = str(label_seq_id)
-            self._label_seq_id_dict[ag.memory_id()] = label_seq_id_str
+      for model in self.models():
+        for chain in model.chains():
+          label_seq_id = 0
+          for rg in chain.residue_groups():
+            for ag in rg.atom_groups():
+              cur_ac_key = chain.id + rg.resseq + rg.icode
+              if cur_ac_key != prev_ac_key:
+                label_seq_id += 1
+                prev_ac_key = cur_ac_key
+              label_seq_id_str='.'
+              comp_id = ag.resname.strip()
+              residue_class = common_residue_names_get_class(comp_id)
+              if residue_class in ['common_amino_acid', 'modified_amino_acid']:
+                label_seq_id_str = str(label_seq_id)
+              self._label_seq_id_dict[ag.memory_id()] = label_seq_id_str
     return self._label_seq_id_dict[atom_group.memory_id()]
 
   def as_cif_block(self,
@@ -1109,7 +1210,6 @@ class _():
     atom_site_anisotrop_U13 = aniso_loop['_atom_site_anisotrop.U[1][3]']
     atom_site_anisotrop_U23 = aniso_loop['_atom_site_anisotrop.U[2][3]']
 
-    model_ids = flex.std_string()
     unique_chain_ids = set()
     auth_asym_ids = flex.std_string()
     label_asym_ids = flex.std_string()
@@ -1365,7 +1465,7 @@ class _():
   def truncate_to_poly(self, atom_names_set=set()):
     pdb_atoms = self.atoms()
     pdb_atoms.reset_i_seq()
-    aa_resnames = iotbx.pdb.amino_acid_codes.one_letter_given_three_letter
+    aa_resnames = one_letter_given_three_letter
     for model in self.models():
       for chain in model.chains():
         for rg in chain.residue_groups():
@@ -1389,26 +1489,32 @@ class _():
         atom_names_set=set([" N  ", " CA ", " C  ", " O  ", " CB "]))
 
   def convert_semet_to_met(self):
-    for i_seq, atom in enumerate(self.atoms()):
-      if (atom.name.strip()=="SE") and (atom.element.strip().upper()=="SE"):
-        atom_group = atom.parent()
-        if(atom_group.resname == "MSE"):
-          atom_group.resname = "MET"
-          atom.name = " SD "
-          atom.element = " S"
-          for ag_atom in atom_group.atoms():
-            ag_atom.hetero = False
+    for model in self.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for atom_group in residue_group.atom_groups():
+            if(atom_group.resname == "MSE"):
+              atom_group.resname = "MET"
+              for atom in atom_group.atoms():
+                atom.hetero = False
+                if((atom.name.strip()=="SE") and (
+                    atom.element.strip().upper()=="SE")):
+                  atom.name = " SD "
+                  atom.element = " S"
 
   def convert_met_to_semet(self):
-    for i_seq, atom in enumerate(self.atoms()):
-      if((atom.name.strip()=="SD") and (atom.element.strip().upper()=="S")):
-        atom_group = atom.parent()
-        if(atom_group.resname == "MET"):
-          atom_group.resname = "MSE"
-          atom.name = " SE "
-          atom.element = "SE"
-          for ag_atom in atom_group.atoms():
-            ag_atom.hetero = True
+    for model in self.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for atom_group in residue_group.atom_groups():
+            if(atom_group.resname == "MET"):
+              atom_group.resname = "MSE"
+              for atom in atom_group.atoms():
+                atom.hetero = True
+                if((atom.name.strip()=="SD") and (
+                    atom.element.strip().upper()=="S")):
+                  atom.name = " SE "
+                  atom.element = "SE"
 
   def transfer_chains_from_other(self, other):
     i_model = 0
@@ -1429,6 +1535,12 @@ class _():
     from iotbx.pdb.atom_selection import cache
     return cache(root=self,
       special_position_settings=special_position_settings)
+
+  def apply_atom_selection(self, atom_selection):
+    ''' Apply atom selection string and return deep copy with selected atoms'''
+    asc=self.atom_selection_cache()
+    sel = asc.selection(string = atom_selection)
+    return self.deep_copy().select(sel)  # deep copy is required
 
   def occupancy_groups_simple(self, common_residue_name_class_only=None,
                               always_group_adjacent=True,
@@ -1474,6 +1586,28 @@ class _():
           assert residue_range_sel.size()>0
           result.append(residue_range_sel)
     return result
+
+  def merge_atoms_at_end_to_residues(self):
+    """Transfered from qrefine for merging single H/D atoms from the end of the
+    PDB input to the correct residue object
+    """
+    for model_id, model in enumerate(self.models()):
+      residues = {}
+      for ag in model.atom_groups():
+        # complication with alt.loc.
+        key = '%s %s' % (model_id, ag.id_str())
+        previous_instance = residues.setdefault(key, None)
+        if previous_instance:
+          # move atoms from here to there
+          for atom in ag.atoms():
+            previous_instance.append_atom(atom.detached_copy())
+            ag.remove_atom(atom)
+          rg = ag.parent()
+          rg.remove_atom_group(ag)
+          chain = rg.parent()
+          chain.remove_residue_group(rg)
+        else:
+          residues[key] = ag
 
   def flip_symmetric_amino_acids(self):
     import time
@@ -1633,11 +1767,12 @@ class _():
                   result.append(atom.i_seq)
     return result
 
-  def contains_protein(self, min_content=0.1):
+  def contains_protein(self, min_content=0, oc = None):
     """
     Inspect residue names and counts to determine if enough of them are protein.
     """
-    oc = self.overall_counts()
+    if not oc:
+      oc = self.overall_counts()
     n_prot_residues = oc.get_n_residues_of_classes(
         classes=['common_amino_acid', 'modified_amino_acid'])
     n_water_residues = oc.get_n_residues_of_classes(
@@ -1646,12 +1781,13 @@ class _():
       return n_prot_residues / (oc.n_residues-n_water_residues) > min_content
     return n_prot_residues > min_content
 
-  def contains_nucleic_acid(self, min_content=0.1):
+  def contains_nucleic_acid(self, min_content=0, oc = None):
     """
     Inspect residue names and counts to determine if enough of
     them are RNA or DNA.
     """
-    oc = self.overall_counts()
+    if not oc:
+      oc = self.overall_counts()
     n_na_residues = oc.get_n_residues_of_classes(
         classes=['common_rna_dna', 'modified_rna_dna'])
     n_water_residues = oc.get_n_residues_of_classes(
@@ -1660,17 +1796,96 @@ class _():
       return n_na_residues / (oc.n_residues-n_water_residues) > min_content
     return n_na_residues > min_content
 
-  def contains_rna(self):
+  def contains_rna(self, oc = None):
     """
     Inspect residue names and counts to determine if any of
     them are RNA.
     """
-    oc = self.overall_counts()
+    if not oc:
+      oc = self.overall_counts()
     for resname, count in oc.resnames.items():
       if ( common_residue_names_get_class(resname) == "common_rna_dna"
           and "D" not in resname.upper() ):
         return True
     return False
+
+  def contains_dna(self, oc = None):
+    """
+    Inspect residue names and counts to determine if any of
+    them are DNA.
+    """
+    if not oc:
+      oc = self.overall_counts()
+    for resname, count in oc.resnames.items():
+      if ( common_residue_names_get_class(resname) == "common_rna_dna"
+          and "D" in resname.upper() ):
+        return True
+    return False
+
+  def chain_types(self):
+    """
+    Inspect residue names and counts to determine what chain types are present
+    """
+    oc = self.overall_counts()
+    chain_types = []
+    if self.contains_protein(oc = oc):
+      chain_types.append("PROTEIN")
+    if self.contains_dna(oc = oc):
+      chain_types.append("DNA")
+    if self.contains_rna(oc = oc):
+      chain_types.append("RNA")
+    return chain_types
+
+  def chain_type(self):
+    """
+    Inspect residue names and counts to determine what chain types are present
+    If only one chain type, return it. Otherwise return None
+    """
+    chain_types = self.chain_types()
+    if chain_types and len(chain_types) == 1:
+      return chain_types[0]
+    else:
+      return None
+
+  def first_resseq_as_int(self, chain_id = None):
+    ''' Return residue number of first residue in specified chain, as integer.
+        If chain not specified, first residue in hierarchy.
+    '''
+    for model in self.models():
+      for chain in model.chains():
+        if (chain_id is not None) and chain.id != chain_id: continue
+        for rg in chain.residue_groups():
+          return rg.resseq_as_int()
+
+  def last_resseq_as_int(self, chain_id = None):
+    ''' Return residue number of last residue in specified chain, as integer.
+        If chain not specified, last residue in hierarchy.
+    '''
+    last_resno=None
+    for model in self.models():
+      for chain in model.chains():
+        if (chain_id is not None) and chain.id != chain_id: continue
+        for rg in chain.residue_groups():
+          last_resno=rg.resseq_as_int()
+    return last_resno
+
+
+  def chain_ids(self, unique_only = False):
+    ''' Get list of chain IDS, return unique set if unique_only=True'''
+    chain_ids=[]
+    for model in self.models():
+      for chain in model.chains():
+        if (not unique_only) or (not chain.id in chain_ids):
+          chain_ids.append(chain.id)
+    return chain_ids
+
+  def first_chain_id(self):
+    ''' Get first chain ID '''
+    chain_ids = self.chain_ids()
+    if chain_ids:
+      return chain_ids[0]
+    else:
+      return None
 
   def remove_hd(self, reset_i_seq=False):
     """
@@ -1697,6 +1912,77 @@ class _():
     if (reset_i_seq):
       self.atoms().reset_i_seq()
     return n_removed
+
+  def exchangeable_hd_selections(self):
+    result = []
+    for model in self.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for i_gr1, atom_group_1 in enumerate(residue_group.atom_groups()):
+            elements_group1 = atom_group_1.atoms().extract_element()
+            non_H_atoms_group1 = list(set(elements_group1) - set(['H','D']))
+            for i_gr2, atom_group_2 in enumerate(residue_group.atom_groups()):
+              elements_group2 = atom_group_2.atoms().extract_element()
+              non_H_atoms_group2 = list(set(elements_group2) - set(['H','D']))
+              if non_H_atoms_group1 and non_H_atoms_group2: continue
+              if(atom_group_1.altloc != atom_group_2.altloc and i_gr2 > i_gr1):
+                for atom1 in atom_group_1.atoms():
+                  e1 = atom1.element.strip()
+                  n1 = atom1.name.strip()[1:]
+                  for atom2 in atom_group_2.atoms():
+                    e2 = atom2.element.strip()
+                    n2 = atom2.name.strip()[1:]
+                    if(e1 in ["H","D"] and e2 in ["H","D"] and e1 != e2 and
+                       n1 == n2):
+                      result.append([[int(atom1.i_seq)], [int(atom2.i_seq)]])
+    return result
+
+  def de_deuterate(self):
+    """
+    Remove all D atoms and replace with H. Keep only H at hydrogen/deuterium
+    sites. Changes hierarchy in place.
+    """
+    atoms = self.atoms()
+    # Get exchanged sites
+    from mmtbx import utils
+    hd_group_selections = self.exchangeable_hd_selections()
+    hd_site_d_iseqs, hd_site_h_iseqs = [], []
+    for gsel in hd_group_selections:
+      i,j = gsel[0][0], gsel[1][0]
+      for _i in [i,j]:
+        if atoms[_i].element.strip().upper() == 'D':
+          hd_site_d_iseqs.append(_i)
+        if atoms[_i].element.strip().upper() == 'H':
+          hd_site_h_iseqs.append(_i)
+    #
+    get_class = iotbx.pdb.common_residue_names_get_class
+    for m in self.models():
+      for c in m.chains():
+        for rg in c.residue_groups():
+          for ag in rg.atom_groups():
+            for a in ag.atoms():
+              i = a.i_seq
+              # remove D atoms at exchanged sites
+              if a.element.strip().upper() == 'D' and i in hd_site_d_iseqs:
+                ag.remove_atom(a)
+                continue
+              # remove D/H atoms in water and rename residue to HOH
+              resname = (a.parent().resname).strip()
+              if(get_class(name = resname) == "common_water"):
+                if a.element.strip().upper() == 'O':
+                  a.parent().resname = 'HOH'
+                if a.element_is_hydrogen():
+                  ag.remove_atom(a)
+                  continue
+              # reset occ and altloc for H at exchanged sites
+              if a.element.strip().upper() == 'H' and i in hd_site_h_iseqs:
+                a.occ = 1.0
+                a.parent().altloc = ""
+              # transform all other D atoms to H: change element and rename
+              if a.element.strip().upper() == 'D':
+                a.element = 'H'
+                new_name = a.name.replace('D','H',1)
+                a.name = new_name
 
   def is_ca_only(self):
     """
@@ -1896,21 +2182,65 @@ class _():
       residue_classes[c] += 1
     return (rn_seq, residue_classes)
 
-  def as_sequence(self, substitute_unknown='X'):
+  def as_new_hierarchy(self):
+    new_h = iotbx.pdb.hierarchy.root()
+    mm = iotbx.pdb.hierarchy.model()
+    new_h.append_model(mm)
+    mm.append_chain(self.detached_copy())
+    return new_h
+
+  def as_list_of_residue_names(self):
+    sequence=[]
+    for rg in self.residue_groups():
+      for atom_group in rg.atom_groups():
+        sequence.append(atom_group.resname)
+        break
+    return sequence
+
+  def as_dict_of_resseq_as_int_residue_names(self):
+    dd = {}
+    for rg in self.residue_groups():
+      for atom_group in rg.atom_groups():
+        dd[rg.resseq_as_int()] = atom_group.resname
+        break
+    return dd
+
+  def as_sequence(self, substitute_unknown='X',
+     substitute_unknown_na = 'N',
+     ignore_all_unknown = None,
+     as_string = False):
     """
     Naively extract single-character protein or nucleic acid sequence, without
     accounting for residue numbering.
 
     :param substitute_unknown: character to use for unrecognized 3-letter codes
+    :param substitute_unknown_na: character to use for unrecognized na codes
+    :param ignore_all_unknown: set substitute_unknown and substitute_unknown_na to ''
+    :param as_string: return string (default is to return list)
     """
+
+    if ignore_all_unknown:
+      substitute_unknown = ''
+      substitute_unknown_na = ''
     assert ((isinstance(substitute_unknown, str)) and
             (len(substitute_unknown) == 1))
+    assert ((isinstance(substitute_unknown_na, str)) and
+            (len(substitute_unknown_na) == 1))
+    common_rna_dna_codes = {
+      "A": "A",
+      "C": "C",
+      "G": "G",
+      "U": "U",
+      "DA": "A",
+      "DC": "C",
+      "DG": "G",
+      "DT": "T"}
     rn_seq, residue_classes = self.get_residue_names_and_classes()
     n_aa = residue_classes["common_amino_acid"] + residue_classes["modified_amino_acid"]
     n_na = residue_classes["common_rna_dna"] + residue_classes["modified_rna_dna"]
     seq = []
     if (n_aa > n_na):
-      aa_3_as_1 = amino_acid_codes.one_letter_given_three_letter
+      aa_3_as_1 = one_letter_given_three_letter
       for rn in rn_seq:
         if (rn in aa_3_as_1_mod):
           seq.append(aa_3_as_1_mod.get(rn, substitute_unknown))
@@ -1918,21 +2248,75 @@ class _():
           seq.append(aa_3_as_1.get(rn, substitute_unknown))
     elif (n_na != 0):
       for rn in rn_seq:
-        if rn in na_3_as_1_mod:
+        if rn not in common_rna_dna_codes and rn in na_3_as_1_mod:
           rn = na_3_as_1_mod.get(rn, "N")
-        seq.append({
-          "A": "A",
-          "C": "C",
-          "G": "G",
-          "U": "U",
-          "DA": "A",
-          "DC": "C",
-          "DG": "G",
-          "DT": "T"}.get(rn, "N"))
-    return seq
+        seq.append(common_rna_dna_codes.get(rn, "N"))
+    if as_string:
+      return "".join(seq)
+    else: # usual
+      return seq
+
+  def format_fasta(self,
+      max_line_length=79,
+      substitute_unknown='X',
+      substitute_unknown_na = 'N',
+      ignore_all_unknown = None,
+      as_string = False):
+    ''' Format this chain as Fasta
+    :param max_line_length: length of lines in formatted output
+    :param substitute_unknown: character to use for unrecognized 3-letter codes
+    :param substitute_unknown_na: character to use for unrecognized na codes
+    :param ignore_all_unknown: set substitute_unknown and substitute_unknown_na to ''
+    :param as_string: return string (default is to return list of lines)
+    '''
+    seq = self.as_sequence(
+          substitute_unknown =substitute_unknown,
+          substitute_unknown_na = substitute_unknown_na,
+          ignore_all_unknown =ignore_all_unknown,
+    )
+    n = len(seq)
+    if (n == 0): return None
+    comment = [">"]
+    comment.append('chain "%2s"' % self.id)
+    seq_lines = [" ".join(comment)]
+    i = 0
+    while True:
+      j = min(n, i+max_line_length)
+      if (j == i): break
+      seq_lines.append("".join(seq[i:j]))
+      i = j
+
+    if as_string:
+      return "\n".join(seq_lines)
+    else:
+      return seq_lines
+
+  def _residue_is_aa_or_na(self, residue_name, include_modified=True):
+    """
+    Helper function for checking if a residue is an amino acid or
+    nucleic acid
+
+    Parameters
+    ----------
+      residue_name: str
+        The residue name
+      include_modified: bool
+        If set, include modified amino and nucleic acids
+
+    Returns
+    -------
+      bool
+        True if the residue is an amino or nucleic acid, false otherwise
+    """
+    residue_class = common_residue_names_get_class(residue_name)
+    acceptable_classes = ['common_amino_acid', 'common_rna_dna']
+    if include_modified:
+      acceptable_classes += ['d_amino_acid', 'modified_amino_acid', 'modified_rna_dna']
+    return residue_class in acceptable_classes
 
   def as_padded_sequence(self, missing_char='X', skip_insertions=False,
-                         pad=True, substitute_unknown='X', pad_at_start=True):
+                         pad=True, substitute_unknown='X', pad_at_start=True,
+                         ignore_hetatm=False):
     """
     Extract protein or nucleic acid sequence, taking residue numbering into
     account so that apparent gaps will be filled with substitute characters.
@@ -1945,6 +2329,8 @@ class _():
     for i, residue_group in enumerate(self.residue_groups()):
       if (skip_insertions) and (residue_group.icode != " "):
         continue
+      if ignore_hetatm and not self._residue_is_aa_or_na(residue_group.unique_resnames()[0]):
+        continue
       resseq = residue_group.resseq_as_int()
       if (pad) and (resseq > (last_resseq + 1)):
         for x in range(resseq - last_resseq - 1):
@@ -1954,12 +2340,15 @@ class _():
       padded_seq.append(seq[i])
     return "".join(padded_seq)
 
-  def get_residue_ids(self, skip_insertions=False, pad=True, pad_at_start=True):
+  def get_residue_ids(self, skip_insertions=False, pad=True, pad_at_start=True,
+                      ignore_hetatm=False):
     resids = []
     last_resseq = 0
     last_icode = " "
     for i, residue_group in enumerate(self.residue_groups()):
-      if (skip_insertions) and (residue.icode != " "):
+      if (skip_insertions) and (residue_group.icode != " "):
+        continue
+      if ignore_hetatm and not self._residue_is_aa_or_na(residue_group.unique_resnames()[0]):
         continue
       resseq = residue_group.resseq_as_int()
       if (pad) and (resseq > (last_resseq + 1)):
@@ -1971,12 +2360,15 @@ class _():
     return resids
 
   def get_residue_names_padded(
-      self, skip_insertions=False, pad=True, pad_at_start=True):
+      self, skip_insertions=False, pad=True, pad_at_start=True,
+      ignore_hetatm=False):
     resnames = []
     last_resseq = 0
     last_icode = " "
     for i, residue_group in enumerate(self.residue_groups()):
-      if (skip_insertions) and (residue.icode != " "):
+      if (skip_insertions) and (residue_group.icode != " "):
+        continue
+      if ignore_hetatm and not self._residue_is_aa_or_na(residue_group.unique_resnames()[0]):
         continue
       resseq = residue_group.resseq_as_int()
       if (pad) and (resseq > (last_resseq + 1)):
@@ -1986,6 +2378,7 @@ class _():
       last_resseq = resseq
       resnames.append(residue_group.unique_resnames()[0])
     return resnames
+
 
   def is_protein(self, min_content=0.8, ignore_water=True):
     """
@@ -2236,12 +2629,21 @@ class _():
     # this function
     assert ((isinstance(substitute_unknown, str)) and
             (len(substitute_unknown) == 1))
+    common_rna_dna_codes = {
+      "A": "A",
+      "C": "C",
+      "G": "G",
+      "U": "U",
+      "DA": "A",
+      "DC": "C",
+      "DG": "G",
+      "DT": "T"}
     rn_seq, residue_classes = self.get_residue_names_and_classes()
     n_aa = residue_classes["common_amino_acid"] + residue_classes["modified_amino_acid"]
     n_na = residue_classes["common_rna_dna"] + residue_classes["modified_rna_dna"]
     seq = []
     if (n_aa > n_na):
-      aa_3_as_1 = amino_acid_codes.one_letter_given_three_letter
+      aa_3_as_1 = one_letter_given_three_letter
       for rn in rn_seq:
         if (rn in aa_3_as_1_mod):
           seq.append(aa_3_as_1_mod.get(rn, substitute_unknown))
@@ -2249,17 +2651,9 @@ class _():
           seq.append(aa_3_as_1.get(rn, substitute_unknown))
     elif (n_na != 0):
       for rn in rn_seq:
-        if rn in na_3_as_1_mod:
+        if rn not in common_rna_dna_codes and rn in na_3_as_1_mod:
           rn = na_3_as_1_mod.get(rn, "N")
-        seq.append({
-          "A": "A",
-          "C": "C",
-          "G": "G",
-          "U": "U",
-          "DA": "A",
-          "DC": "C",
-          "DG": "G",
-          "DT": "T"}.get(rn, "N"))
+        seq.append(common_rna_dna_codes.get(rn, "N"))
     return seq
 
   def format_fasta(self, max_line_length=79):

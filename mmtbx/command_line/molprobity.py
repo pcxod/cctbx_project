@@ -204,10 +204,6 @@ def run(args,
     map_params=params)
   map_file = None
 
-  # model cannot be pickled
-  validation.model = None
-  validation.model_statistics_geometry.model=None
-
   # polygon statistics
   validation.polygon_stats = validation.get_polygon_statistics(
     params.polygon.keys_to_show)
@@ -249,6 +245,8 @@ def run(args,
       else :
         print("Kinemage output not available for multiple MODELs.", file=out)
     if (params.output.pickle):
+      if validation.hydrogens is not None:
+        validation.hydrogens.log = None
       easy_pickle.dump("%s.pkl" % params.output.prefix, validation)
       if (not params.output.quiet):
         print("Saved result to %s.pkl" % params.output.prefix, file=out)
@@ -289,6 +287,14 @@ def run(args,
       app.MainLoop()
   if (return_input_objects):
     return validation, cmdline
+
+  # remove unpicklable attributes
+  validation.model = None
+  validation.pdb_hierarchy = None
+  validation.model_statistics_geometry.model = None
+  if validation.hydrogens is not None:
+    validation.hydrogens.log = None
+
   return result(
     program_name="phenix.molprobity",
     job_title=params.output.job_title,

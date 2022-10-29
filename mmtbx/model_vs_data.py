@@ -12,6 +12,7 @@ from six.moves import cStringIO as StringIO
 import mmtbx.model
 import iotbx.phil
 import mmtbx.f_model
+from iotbx import extract_xtal_data
 
 if(1):
   random.seed(0)
@@ -92,21 +93,17 @@ def run(args,
   rfs = reflection_file_server(
     crystal_symmetry = crystal_symmetry,
     reflection_files = reflection_files)
-  parameters = utils.data_and_flags_master_params().extract()
+  parameters = extract_xtal_data.data_and_flags_master_params().extract()
   if(params.f_obs_label is not None):
     parameters.labels = params.f_obs_label
   if(params.r_free_flags_label is not None):
     parameters.r_free_flags.label = params.r_free_flags_label
   if (params.high_resolution is not None):
     parameters.high_resolution = params.high_resolution
-  determine_data_and_flags_result = utils.determine_data_and_flags(
-    reflection_file_server  = rfs,
-    parameters              = parameters,
-    data_parameter_scope    = "refinement.input.xray_data",
-    flags_parameter_scope   = "refinement.input.xray_data.r_free_flags",
-    data_description        = "X-ray data",
-    keep_going              = True,
-    log                     = StringIO())
+  determine_data_and_flags_result = extract_xtal_data.run(
+    reflection_file_server = rfs,
+    parameters             = parameters,
+    keep_going             = True)
   f_obs = determine_data_and_flags_result.f_obs
   # Data
   show_header(l="Data:", log=log)
@@ -225,3 +222,5 @@ def run(args,
     print(file=log)
     n_outl = f_obs.data().size() - fmodel.f_obs().data().size()
     print("  Number of F-obs outliers:", n_outl, file=log)
+  return fmodel
+

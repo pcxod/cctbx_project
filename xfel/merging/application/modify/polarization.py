@@ -23,6 +23,7 @@ class polarization(worker):
 
     for experiment in experiments:
       refls = reflections.select(reflections['exp_id'] == experiment.identifier)
+      if len(refls) == 0: continue
       beam = experiment.beam
       # Remove the need for pixel size within cxi.merge.  Allows multipanel detector with dissimilar panels.
       # Relies on new frame extractor code called by dials.stills_process that writes s0, s1 and polarization normal
@@ -82,7 +83,8 @@ class polarization(worker):
 
     # Remove 's1' column from the reflection table
     from xfel.merging.application.reflection_table_utils import reflection_table_utils
-    reflections = reflection_table_utils.prune_reflection_table_keys(reflections=result, keys_to_delete=['s1'])
+    reflections = reflection_table_utils.prune_reflection_table_keys(reflections=result, keys_to_delete=['s1'],
+                                                                     keys_to_ignore=self.params.input.persistent_refl_cols)
     self.logger.log("Pruned reflection table")
     self.logger.log("Memory usage: %d MB"%get_memory_usage())
 

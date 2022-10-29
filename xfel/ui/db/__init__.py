@@ -18,7 +18,7 @@ def get_run_path(rootpath, trial, rungroup, run, task=None):
     p = os.path.join(p, "task%03d"%task.id)
   return p
 
-def get_db_connection(params, block=True):
+def get_db_connection(params, block=True, autocommit=True):
   if params.db.password is None:
     password = ""
   else:
@@ -29,7 +29,14 @@ def get_db_connection(params, block=True):
   sleep_time = 0.1
   while retry_count < retry_max:
     try:
-      dbobj=MySQLdb.connect(passwd=password,user=params.db.user,host=params.db.host,db=params.db.name,port=params.db.port)
+      dbobj=MySQLdb.connect(
+          passwd=password,
+          user=params.db.user,
+          host=params.db.host,
+          db=params.db.name,
+          port=params.db.port,
+          autocommit=autocommit
+      )
       return dbobj
     except Exception as e:
       retry_count += 1
@@ -38,6 +45,8 @@ def get_db_connection(params, block=True):
         print("Too many connections, retry", retry_count)
       elif  "Can't connect to MySQL server" in str(e):
         print("Couldn't connect to MYSQL, retry", retry_count)
+      elif "Can't create a new thread" in str(e):
+        print("MySQL can't create a new thread. Retry", retry_count)
       else:
         raise e
       import time
@@ -70,7 +79,8 @@ class db_proxy(object):
         vals.append(value)
       query += "(%s) VALUES (%s)"%(", ".join(keys), ", ".join(vals))
       cursor = app.execute_query(query, commit=True)
-      self.id = cursor.lastrowid
+      if cursor:
+        self.id = cursor.lastrowid
 
       for key in app.columns_dict[table_name]:
         if key not in self._db_dict:
@@ -93,7 +103,8 @@ class db_proxy(object):
     # Called if the property is not found
     assert '_db_dict' in self.__dict__
     if key not in self._db_dict:
-      print(self.table_name, key, 'error!', self._db_dict)
+      if key not in ['_ipython_canary_method_should_not_exist_', '_repr_mimebundle_']: # things IPython checks for
+        print(self.table_name, key, 'error!', self._db_dict)
       raise AttributeError(key)
 
     return self._db_dict[key]
@@ -118,3 +129,9 @@ class db_proxy(object):
       self.table_name, key, v, self.id)
     self.app.execute_query(query, commit=True)
     self._db_dict[key] = value
+
+  def __str__(self):
+    return "db_proxy %s %d"%(self.table_name, self.id)
+
+  def __repr__(self):
+    return self.__str__()

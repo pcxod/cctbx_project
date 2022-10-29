@@ -404,7 +404,7 @@ class linking_mixins(object):
     Parameters for automatic linking
       Linking & cutoffs
         Metal                : %-5s - %0.2f
-        Amimo acid           : %-5s - %0.2f
+        Amino acid           : %-5s - %0.2f
         Carbohydrate         : %-5s - %0.2f
         Ligands              : %-5s - %0.2f
         Small molecules      : %-5s - %0.2f
@@ -587,6 +587,20 @@ Residue classes
       if atom2.element.strip() in hydrogens:
         done[atom1.id_str()] = atom2.id_str()
       # bond length cutoff & some logic
+      aa_rc = linking_utils.is_atom_pair_linked(
+          atom1,
+          atom2,
+          distance=distance,
+          max_bonded_cutoff=max_bonded_cutoff,
+          amino_acid_bond_cutoff=amino_acid_bond_cutoff,
+          inter_residue_bond_cutoff=inter_residue_bond_cutoff,
+          second_row_buffer=second_row_buffer,
+          saccharide_bond_cutoff=carbohydrate_bond_cutoff,
+          metal_coordination_cutoff=metal_coordination_cutoff,
+          use_only_bond_cutoff=use_only_bond_cutoff,
+          link_metals=link_metals,
+          verbose=verbose,
+          )
       if not linking_utils.is_atom_pair_linked(
           atom1,
           atom2,
@@ -730,6 +744,13 @@ Residue classes
         atom_group2,
         self.mon_lib_srv,
         )
+      if link is None:
+        link, swap, key = linking_utils.is_atom_pair_linked_tuple(atom1,
+                                                                  atom2,
+                                                                  )
+        if link=='TRANS':
+          key=link
+          link = self.mon_lib_srv.link_link_id_dict[link]
       if verbose:
         print('link',link)
         print('swap',swap)
@@ -750,6 +771,7 @@ Residue classes
         origin_id = origin_ids.get_origin_id('link_%s' % key,
                                              return_none_if_absent=True,
                                              )
+        if verbose: print('apply standard link', key, origin_id)
         if origin_id is None:
           # user defined links should not be applied here
           continue

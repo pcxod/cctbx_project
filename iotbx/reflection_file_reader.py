@@ -74,6 +74,11 @@ import re
 
 def unpickle_miller_arrays(file_name):
   result = easy_pickle.load(file_name)
+  # Python 3 pickle fix
+  # =========================================================================
+  if sys.version_info.major == 3:
+    result = easy_pickle.fix_py2_pickle(result)
+  # =========================================================================
   if (isinstance(result, miller.array)):
     return [result]
   result = list(result)
@@ -230,6 +235,7 @@ class any_reflection_file(object):
                        assume_shelx_observation_type_is=None,
                        enforce_positive_sigmas=False,
                        anomalous=None,
+                       reconstruct_amplitudes=True
      ):
     """
     Convert the contents of the reflection file into a list of
@@ -247,6 +253,11 @@ class any_reflection_file(object):
     :param assume_shelx_observation_type_is: if specified, instead of raising
       an exception if the SHELX file type is not known from the file name plus
       data type tag, the function will force the specified data type.
+    :param reconstruct_amplitudes: ignored by all other readers than mtz reader.
+      If set to True mean amplitudes and adjacent anomalous diffference columns will be
+      fused into anomalous miller_array object.
+      If False, tells the reader not to fuse mean amplitude and adjacent anomalous
+      difference columns into anomalous miller_array objects.
     """
     assert (assume_shelx_observation_type_is in
             [None, "amplitudes", "intensities"])
@@ -295,7 +306,7 @@ class any_reflection_file(object):
           raise Sorry("Can't open files %s.ins or %s.res"
                       "required by the option hklf+ins/res" % ((name,)*2))
         crystal_symmetry = crystal_symmetry_from_ins.extract_from(
-          file=shelx_file)
+          file=shelx_file, close_file=False)
         shelx_file.seek(0)
         remaining = shelx_file.read()
         shelx_file.close()
@@ -309,13 +320,23 @@ class any_reflection_file(object):
           self._observation_type = "amplitudes"
         else:
           raise Sorry("HKLF %s not supported" % m.group(1))
-    result = self._file_content.as_miller_arrays(
-      crystal_symmetry=crystal_symmetry,
-      force_symmetry=force_symmetry,
-      merge_equivalents=merge_equivalents,
-      base_array_info=base_array_info,
-      anomalous=anomalous,
-    )
+    if (self._file_type == "ccp4_mtz"):
+      result = self._file_content.as_miller_arrays(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=force_symmetry,
+        merge_equivalents=merge_equivalents,
+        base_array_info=base_array_info,
+        anomalous=anomalous,
+        reconstruct_amplitudes=reconstruct_amplitudes
+      )
+    else:
+      result = self._file_content.as_miller_arrays(
+        crystal_symmetry=crystal_symmetry,
+        force_symmetry=force_symmetry,
+        merge_equivalents=merge_equivalents,
+        base_array_info=base_array_info,
+        anomalous=anomalous,
+      )
     if (self.file_type() == "shelx_hklf"):
       if ((self._observation_type == "intensities") or
           (assume_shelx_observation_type_is == "intensities")):

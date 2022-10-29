@@ -30,10 +30,10 @@ def obtain_model(raw_records, stop_for_unknowns = True):
   pdb_inp = iotbx.pdb.input(lines=raw_records.split("\n"), source_info=None)
   model = mmtbx.model.manager(
     model_input = pdb_inp,
-    pdb_interpretation_params = params,
-    build_grm   = True,
     stop_for_unknowns = stop_for_unknowns,
     log         = null_out())
+  model.process(pdb_interpretation_params=params,
+    make_restraints=True)
   return model
 
 
@@ -47,9 +47,9 @@ def get_clashes_result(raw_records, sel=None):
   pdb_inp = iotbx.pdb.input(lines=raw_records.split("\n"), source_info=None)
   model = mmtbx.model.manager(
     model_input = pdb_inp,
-    pdb_interpretation_params = params,
-    build_grm   = True,
     log         = null_out())
+  model.process(pdb_interpretation_params=params,
+    make_restraints=True)
   if sel is not None:
     model = model.select(sel)
 
@@ -62,6 +62,7 @@ def test_overlap_atoms():
   '''
   Test that overlapping atoms are being counted
   '''
+  print(raw_records_5)
   clashes = get_clashes_result(raw_records=raw_records_5)
   results = clashes.get_results()
   assert(results.n_clashes == 6), 'Overlapping atoms are not counted properly.'
@@ -97,10 +98,10 @@ def test_manager_and_clashes_functions():
   clashes = pnps.get_clashes()
   # sorted by overlap (default)
   clashes.sort_clashes(by_value='overlap')
-  assert(clashes._clashes_dict.items()[11][0] == ((38, 39)))
+  assert(list(clashes._clashes_dict.items())[11][0] == ((38, 39)))
   # sorted by symmetry
   clashes.sort_clashes(by_value='symmetry')
-  assert(clashes._clashes_dict.items()[11][0] == (27, 27))
+  assert(list(clashes._clashes_dict.items())[11][0] == (27, 27))
 
   assert(clashes.iseq_is_clashing(iseq=27))
   assert(clashes.iseq_is_clashing(iseq=44))
@@ -236,25 +237,28 @@ def test_running_from_command_line():
   assert(not bool(r.stderr_lines))
 
 
-def test_file_with_unknown_pair_type():
-  '''
-  Verify that ready_set can fix issues with unknown_pair_type
-  '''
-  model = obtain_model(raw_records = unknown_pairs_pdb_str,
-                       stop_for_unknowns = False)
-  ph = model.get_hierarchy()
-  pdb_with_h, h_were_added = mvc.check_and_add_hydrogen(
-    pdb_hierarchy         = ph,
-    allow_multiple_models = False,
-    crystal_symmetry      = model.crystal_symmetry(),
-    log                   = null_out())
-  sorry = None
-  try:
-    model = obtain_model(raw_records=pdb_with_h)
-  except Sorry as e:
-    sorry = e
-  assert(sorry is not None)
-
+#def test_file_with_unknown_pair_type():
+#  '''
+#  Verify that file with unknown_pair_type fails
+#  --> retire this test as functionality is already tested above
+#      also, this test becomes a failure whenever the unknown entity is
+#      added to geostd.
+#  '''
+#  model = obtain_model(raw_records = unknown_pairs_pdb_str,
+#                       stop_for_unknowns = False)
+#  ph = model.get_hierarchy()
+#  pdb_with_h, h_were_added = mvc.check_and_add_hydrogen(
+#    pdb_hierarchy         = ph,
+#    allow_multiple_models = False,
+#    crystal_symmetry      = model.crystal_symmetry(),
+#    log                   = null_out())
+#  sorry = None
+#  try:
+#    model = obtain_model(raw_records=pdb_with_h)
+#  except Sorry as e:
+#    sorry = e
+#  assert(sorry is not None)
+#
 #  test = nbo.unknown_pairs_present(grm=grm,sites_cart=sites,site_labels=labels)
 #  # make sure we have unknown pairs
 #  self.assertTrue(test)
@@ -792,7 +796,7 @@ if (__name__ == "__main__"):
   test_show()
   test_unknown_pair_type()
   test_running_from_command_line()
-  test_file_with_unknown_pair_type()
+  #test_file_with_unknown_pair_type()
   test_small_cell()
   test_manager_and_clashes_functions()
   test_no_unit_cell()

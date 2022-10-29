@@ -13,8 +13,8 @@ import libtbx.utils
 import json
 import requests
 
-search_base_url = "https://search.rcsb.org/rcsbsearch/v1/query?json="
-report_base_url = "http://data.rcsb.org/graphql"
+search_base_url = "https://search.rcsb.org/rcsbsearch/v2/query?json="
+report_base_url = "https://data.rcsb.org/graphql"
 
 xray_only_filter = {
   "type": "terminal",
@@ -113,10 +113,12 @@ def post_query(query_json, xray_only=True, d_max=None, d_min=None,
     print("  will sort by resolution", file=log)
   print("  executing HTTP request...", file=log)
   r = requests.post(search_base_url, json=query_json)
-  r_json = r.json()
   res_ids = []
-  for res in r_json["result_set"]:
-    res_ids.append(str(res["identifier"].replace('_', ':')))
+  # print('r.status_code', r.status_code)
+  if r.status_code == 200:
+    r_json = r.json()
+    for res in r_json["result_set"]:
+      res_ids.append(str(res["identifier"].replace('_', ':')))
   return res_ids
 
 def sequence_search(

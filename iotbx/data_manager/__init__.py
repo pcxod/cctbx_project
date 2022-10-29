@@ -12,6 +12,7 @@ import sys
 from collections import OrderedDict
 from six.moves import range
 
+import iotbx.phil
 import libtbx.phil
 
 from iotbx.file_reader import any_file
@@ -52,7 +53,9 @@ default_datatypes = ['map_coefficients', 'miller_array', 'model', 'ncs_spec',
 # custom options for processing data
 # generally the format is <datatype>_<custom option>
 data_manager_options = [
+  'miller_array_skip_merge',       # does not merge Miller arrays
   'model_skip_expand_with_mtrix',  # does not expand a model using MTRIX
+  'model_skip_ss_annotations',     # ignore secondary structure annotations
   ]
 
 # =============================================================================
@@ -160,6 +163,10 @@ def DataManager(datatypes=None, phil=None, custom_options=None, logger=None):
     importlib.import_module('.common', package='iotbx.data_manager')
     mixin_classes.append(
       getattr(sys.modules['iotbx.data_manager.common'], 'map_model_mixins'))
+  if 'model' in datatypes and 'miller_array' in datatypes:
+    importlib.import_module('.common', package='iotbx.data_manager')
+    mixin_classes.append(
+      getattr(sys.modules['iotbx.data_manager.common'], 'fmodel_mixins'))
 
   # construct new class and return instance
   classes = tuple(manager_classes + parent_classes + mixin_classes)
@@ -230,7 +237,7 @@ options are {options}.\
       self.master_phil_str += '.type = path\n'
     self.master_phil_str += '}'
 
-    self.master_phil = libtbx.phil.parse(self.master_phil_str)
+    self.master_phil = iotbx.phil.parse(self.master_phil_str, process_includes=True)
 
     self._storage = '_%ss'
     self._default = '_default_%s'
@@ -267,13 +274,24 @@ options are {options}.\
       self.load_phil_scope(phil)
 
   # ---------------------------------------------------------------------------
-  def export_phil_scope(self):
+  def export_phil_scope(self, as_extract=False):
     '''
     Function for exporting DataManager information into a PHIL scope
     The returned PHIL scope can be used to recreate the DataManager object with
     the load_phil_scope function
 
     This assumes that the key names in the data structures are valid filenames.
+
+    Parameters
+    ----------
+      as_extract: bool
+        If True, a libtbx.phil.extract object is returned instead of a
+        libtbx.phil.scope object
+
+    Returns
+    -------
+      phil: libtbx.phil.scope or libtbx.phil.extract depending on as_extract parameter
+        The working scope or extract
     '''
     phil_extract = self.master_phil.extract()
     for datatype in self.datatypes:
@@ -286,6 +304,13 @@ options are {options}.\
 
       default = self._get_default_name(datatype)
       setattr(phil_extract.data_manager, 'default_%s' % datatype, default)
+
+    if self.supports('model') and self.supports('miller_array'):
+      if self._fmodel_phil_scope is not None:  # non-default fmodel parameters
+        phil_extract.data_manager.fmodel = self.get_fmodel_params()
+
+    if as_extract:
+      return phil_extract
 
     working_phil = self.master_phil.format(python_object=phil_extract)
 
@@ -406,6 +431,7 @@ options are {options}.\
       else:
         return self._get(datatype, filename=default_filename)
     elif filename not in self._get_current_storage().keys():
+      ok = True
       try:
         # try to load file if not already available
         # use type-specific function call instead of _process_file because
@@ -414,6 +440,8 @@ options are {options}.\
         getattr(self, 'process_%s_file' % datatype)(filename)
         return self._get_current_storage()[filename]
       except Sorry:
+        ok = False
+      if not ok:
         raise Sorry('"%s" is not a known %s type.' % (filename, datatype))
     else:
       return self._get_current_storage()[filename]
@@ -523,7 +551,7 @@ options are {options}.\
       raise Sorry('%s already exists and overwrite is set to %s.' %
                   (filename, overwrite))
     if not isinstance(text_str, str):
-      raise Sorry('Please provide a text string for writing.')
+      raise AssertionError('Please provide a text string for writing.')
 
     try:
       with open(filename, 'w') as f:
@@ -534,6 +562,8 @@ options are {options}.\
 
     self._output_files.append(filename)
     self._output_types.append(datatype)
+
+    return filename
 
 # =============================================================================
 # end

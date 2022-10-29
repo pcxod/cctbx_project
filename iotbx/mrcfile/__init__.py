@@ -152,9 +152,12 @@ class map_reader:
     # Labels
     self.labels=[]
     for i in range(mrc.header.nlabl):
-      text=mrc.header.label[i].strip()
-      if text:
-        self.labels.append(mrc.header.label[i])
+      text=mrc.header.label[i]
+      if not text:
+        continue
+      text = text.decode("utf-8")
+      text = text.strip()
+      self.labels.append(text)
 
     # NOTE phenix calls "origin" the position of the lower left corner
     #   of the map.
@@ -814,7 +817,10 @@ def select_output_labels(labels,max_labels=10, replace_backslash = None):
   if replace_backslash:
     new_labels = []
     for label in output_labels:
-      new_labels.append(label.replace("\\","/"))
+      new_label = label
+      if isinstance(label, str):
+        new_label = label.replace("\\","/")
+      new_labels.append(new_label)
     output_labels = new_labels
   return output_labels
 

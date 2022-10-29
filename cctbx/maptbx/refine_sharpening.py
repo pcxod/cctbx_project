@@ -241,7 +241,7 @@ def get_b_eff(si=None,out=sys.stdout):
     b_eff=None
   else:
     b_eff=8*3.14159*si.rmsd**2
-    print("Setting b_eff for fall-off at %5.1f A**2 based on model error of %5.1f A" \
+    print("Setting b_eff for fall-off at %5.1f A**2 based on model uncertainty of %5.1f A" \
        %( b_eff,si.rmsd), file=out)
   return b_eff
 
@@ -483,7 +483,7 @@ def calculate_fsc(**kw):
   resolution = kw.get('resolution',None)
   n_bins_use = kw.get('n_bins_use',None)
   fraction_complete = kw.get('fraction_complete',None)
-  min_fraction_complete = kw.get('min_fraction_complete',None)
+  min_fraction_complete = kw.get('min_fraction_complete', 0.05)
   is_model_based = kw.get('is_model_based',None)
   cc_cut = kw.get('cc_cut',None)
   scale_using_last = kw.get('scale_using_last',None)
@@ -802,16 +802,12 @@ def calculate_fsc(**kw):
   # Now apply analyses on each cc_list (if more than one)
   si_list = []
   for i in range(len(direction_vectors)):
-    if smooth_fsc:
-      ratio_list = remove_values_if_necessary(ratio_dict_by_dv[i])
-      rms_fo_list = remove_values_if_necessary(rms_fo_dict_by_dv[i])
-      rms_fc_list = remove_values_if_necessary(rms_fc_dict_by_dv[i])
-      cc_list = smooth_values(cc_dict_by_dv[i])
-    else:
-      ratio_list = remove_values_if_necessary(ratio_dict_by_dv[i])
-      rms_fo_list = remove_values_if_necessary(rms_fo_dict_by_dv[i])
-      rms_fc_list = remove_values_if_necessary(rms_fc_dict_by_dv[i])
-      cc_list = cc_dict_by_dv[i]
+    ratio_list = remove_values_if_necessary(ratio_dict_by_dv[i])
+    rms_fo_list = remove_values_if_necessary(rms_fo_dict_by_dv[i])
+    rms_fc_list = remove_values_if_necessary(rms_fc_dict_by_dv[i])
+    cc_list = smooth_values(cc_dict_by_dv[i],
+         overall_values=getattr(overall_si,'cc_list',None),
+         smooth=smooth_fsc)
     if len(direction_vectors) > 1:
       working_si = deepcopy(si)
       dv = direction_vectors[i]
@@ -1006,8 +1002,8 @@ def analyze_anisotropy(
   aniso_info = estimate_s_matrix(aniso_info)
 
   # Total correction
-  print("\nD matrix (Error-based scaling correction factor)\n"+
-       "(Negative means errors increase more in this direction)\n " +
+  print("\nD matrix (Uncertainty-based scaling correction factor)\n"+
+       "(Negative means uncertainties increase more in this direction)\n " +
       "(%.3f, %.3f, %.3f, %.3f, %.3f, %.3f) " %(
      tuple(aniso_info.dd_b_cart)), file = out)
 
@@ -1094,7 +1090,7 @@ def analyze_anisotropy(
   a_zero_values:  isotropic fall-off of the data
   fo_b_cart_as_u_cart: anisotropic fall-off of data
   aa_b_cart_as_u_cart: anisotropy of the data
-  bb_b_cart_as_u_cart: anisotropy of the errors
+  bb_b_cart_as_u_cart: anisotropy of the uncertainties
   ss_b_cart_as_u_cart: anisotropy of the scale factors
   uu_b_cart_as_u_cart: anisotropic fall-off of data relative to ideal
   overall_scale: radial part of overall correction factor
@@ -1189,7 +1185,7 @@ def get_overall_anisotropy(overall_si,
   n_bins_use,
   out = sys.stdout):
   print("\nEstimating overall fall-off with resolution of data"+
-    " and correction including errors", file = out)
+    " and correction including uncertainties", file = out)
 
   overall_si.cc_list.set_selected(overall_si.cc_list<1.e-4,1.e-4)
   overall_si.rms_fo_list.set_selected(overall_si.rms_fo_list <= 1.e-10, 1.e-10)
@@ -1422,9 +1418,9 @@ def get_starting_sd_info(aniso_info = None):
       ss_in_bin.append(aniso_info.ss_values_by_dv[k][i])
     sd_value = ss_in_bin.sample_standard_deviation()
     # Try to catch cases where the values are stopped by bounds
-    if ss_in_bin.min_max_mean() >= 0.9* aniso_info.maximum_ratio:
+    if ss_in_bin.min_max_mean().mean >= 0.9* aniso_info.maximum_ratio:
       sd_value = aniso_info.maximum_ratio
-    elif ss_in_bin.min_max_mean() <= 1.1/aniso_info.maximum_ratio:
+    elif ss_in_bin.min_max_mean().mean <= 1.1/aniso_info.maximum_ratio:
       sd_value = 1
     sd_ss.append(sd_value)
   ss_sd_values = flex.double()
@@ -2061,7 +2057,26 @@ def remove_values_if_necessary(f_values,max_ratio=100, min_ratio=0.01):
   return new_values
 
 def smooth_values(cc_values, max_relative_rms=10, n_smooth = None,
-    skip_first_frac = 0.1): # normally do not smooth the very first ones
+    skip_first_frac = 0.1,
+    overall_values = None,
+    smooth = True,
+    max_ratio = 2.,
+    min_ratio = 0.,
+      ): # normally do not smooth the very first ones
+  '''  If overall_values are supplied, make sure all values are within
+      min_ratio to max_ratio of those values'''
+
+
+  if overall_values and (max_ratio is not None or min_ratio is not None):
+    new_cc_values = flex.double()
+    for cc,cc_overall in zip(cc_values,overall_values):
+      new_cc_values.append(max(
+        min_ratio*cc_overall, min(max_ratio*cc_overall, cc)))
+    cc_values = new_cc_values
+
+  if not smooth:
+    return cc_values
+
   skip_first = max (1, int(0.5+skip_first_frac*cc_values.size()))
 
   if n_smooth:
@@ -2726,6 +2741,7 @@ class analyze_aniso_object:
 
     self.b_cart=None
     self.b_cart_aniso_removed=None
+    self.b_iso=None
 
   def set_up_aniso_correction(self,f_array=None,b_iso=None,d_min=None,
      b_cart_to_remove = None, invert = False):
@@ -2737,6 +2753,7 @@ class analyze_aniso_object:
     if b_cart_to_remove and b_iso:
       self.b_cart=b_cart_to_remove
       self.b_cart_aniso_removed = [ -b_iso, -b_iso, -b_iso, 0, 0, 0] # change
+      self.b_iso=b_iso
     else:
       from cctbx.maptbx.segment_and_split_map import get_b_iso
       b_mean,aniso_scale_and_b=get_b_iso(f_array,d_min=d_min,

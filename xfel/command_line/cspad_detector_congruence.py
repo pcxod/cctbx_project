@@ -168,7 +168,7 @@ def detector_plot_dict(params, detector, data, title, units_str, show=True, reve
   @param units_str string with a formatting statment for units on each panel
   """
   # initialize the color map
-  values = flex.double(data.values())
+  values = flex.double(list(data.values()))
   norm = Normalize(vmin=flex.min(values), vmax=flex.max(values))
   if reverse_colormap:
     cmap = plt.cm.get_cmap(params.colormap + "_r")
@@ -230,12 +230,12 @@ class Script(object):
 
   def __init__(self):
     ''' Set the expected options. '''
-    from dials.util.options import OptionParser
+    from dials.util.options import ArgumentParser
     import libtbx.load_env
 
     # Create the option parser
     usage = "usage: %s experiment1.expt experiment2.expt reflections1.refl reflections2.refl" % libtbx.env.dispatcher_name
-    self.parser = OptionParser(
+    self.parser = ArgumentParser(
       usage=usage,
       sort_options=True,
       phil=phil_scope,

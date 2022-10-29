@@ -64,22 +64,33 @@ def update(grm,
       ],
     ['Zn2+ tetrahedral coordination',
      metal_coordination_library.get_metal_coordination_proxies,
-     metal_coordination_library.get_proxies,
+     metal_coordination_library.get_proxies_zn,
+      ],
+    ['Mg2+ Nucleotide coordination',
+     metal_coordination_library.get_metal_coordination_proxies,
+     metal_coordination_library.get_proxies_mg_nuc,
       ],
     ]
   outl = ''
   outl_debug = ''
+
+  sites_c = pdb_hierarchy.atoms().extract_xyz()
+  nb_proxies = grm.pair_proxies(
+        sites_cart=sites_c).nonbonded_proxies
+  sorted_nb_pr_result = nb_proxies.get_sorted(
+      by_value="delta",
+      sites_cart=sites_c)
+
   for label, get_coordination, get_all_proxies in hooks:
     rc = get_coordination(
       pdb_hierarchy=pdb_hierarchy,
-      nonbonded_proxies=grm.pair_proxies(
-        sites_cart=pdb_hierarchy.atoms().extract_xyz()).nonbonded_proxies,
+      nonbonded_proxies=nb_proxies,
+      sorted_nb_proxies_res=sorted_nb_pr_result,
       verbose=verbose,
     )
     bproxies, aproxies = get_all_proxies(rc)
     if bproxies is None: continue
     if len(bproxies):
-      outl += '    %s\n' % label
       outl += '    %s\n' % label
       atoms = pdb_hierarchy.atoms()
       sf4_coordination = {}
@@ -93,7 +104,7 @@ def update(grm,
       for sf4, aas in sorted(sf4_coordination.items()):
         outl += '%spdb="%s"\n' % (' '*6, sf4)
         outl_debug += '%spdb="%s"\n' % (' '*6, sf4)
-        for aa in sorted(aas):
+        for aa in aas:
           outl += '%s%s - %s\n' % (' '*8, _atom_id(aa[0]), _atom_id(aa[1]))
           outl_debug += '%s%s - %s\n' % (' '*8,
                                          _atom_id(aa[0], True),

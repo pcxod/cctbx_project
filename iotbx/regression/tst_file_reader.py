@@ -221,8 +221,8 @@ def exercise_phil():
   phil_data = """\
 refinement {
   input {
-    include scope mmtbx.utils.neutron_data_str
-    include scope mmtbx.utils.xray_data_str
+    include scope iotbx.extract_xtal_data.neutron_data_str
+    include scope iotbx.extract_xtal_data.xray_data_str
   }
   refine {
     strategy = *individual_adp *individual_sites *tls occupancies group_adp
@@ -269,6 +269,32 @@ def exercise_pickle():
   exception = pkl.file_object
   assert (exception.errno == 2001)
   os.remove("tmp1.pkl")
+
+def exercise_sequence2():
+  answer = """>BtSA
+MDTVFVHQTQIPILIERQDNVLFYFRLDAKESRMMDEIVLDFGKSVNLSDVQAVKLYYGGTEALQDKGKKRFAPVDYISS
+HRPGNTLAAIPSYSIKCAEALQPSAKVVLKSHYKLFPGINFFWISLQMKPETSLFTKISSELQSVKIDGKEAICEERSPK
+DIIHRMAVGVRHAGDDGSASFRIPGLVTSNKGTLLGVYDVRYNSSVDLQEYVDVGLSRSTDGGKTWEKMRLPLSFGEYDG
+LPAAQNGVGDPSILVDTQTNTIWVVAAWTHGMGNQRAWWSSHPGMDLYQTAQLVMAKSTDDGKTWSKPINITEQVKDPSW
+YFLLQGPGRGITMSDGTLVFPTQFIDSTRVPNAGIMYSKDRGKTWKMHNMARTNTTEAQVVETEPGVLMLNMRDNRGGSR
+AVAITKDLGKTWTEHPSSRKALQEPVCMASLIHVEAEDNVLDKDILLFSNPNTTRGRNHITIKASLDDGLTWLPEHQLML
+DEGEGWGYSCLTMIDRETIGILYESSAAHMTFQAVKLKDLIRGNSSSVDKLAAALEHHHHHH"""
+  txt="""
+%s
+>>>
+"""%answer
+  file_name = "tst_file_reader_exercise_sequence2"
+  with open(file_name,"w") as fo:
+    fo.write(txt)
+  seq_file = file_reader.any_file(
+    file_name,
+    force_type = "seq",
+    raise_sorry_if_errors=True)
+  sequence = seq_file.file_object
+  assert len(sequence) == 1
+  s1 = "".join([s.strip() for s in str(sequence[0])])
+  s2 = "".join([s.strip() for s in answer])
+  assert s1 == s2
 
 def exercise_sequence():
   seqs = ["AAKDVKFGVNVLADAV",
@@ -488,6 +514,7 @@ def exercise_groups():
   ])
 
 def exercise():
+  exercise_sequence2()
   exercise_mmcif()
   exercise_groups()
   exercise_misc()

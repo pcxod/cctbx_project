@@ -37,6 +37,11 @@ phil_str = """
     .type = bool
     .help = If True, write a list of cells such that gnuplot can read them. Start gnuplot then use \
             splot "uccloud.dat".
+  output.image_file = None
+    .type = str
+  scale = *linear log
+    .type = choice
+    .help = Z-axis scale for 2d histograms
 """
 phil_scope = parse(phil_str)
 
@@ -45,7 +50,7 @@ class Script(object):
 
   def __init__(self):
     '''Initialise the script.'''
-    from dials.util.options import OptionParser
+    from dials.util.options import ArgumentParser
     import libtbx.load_env
 
     # The script usage
@@ -55,7 +60,7 @@ class Script(object):
     self.reference_detector = None
 
     # Create the parser
-    self.parser = OptionParser(
+    self.parser = ArgumentParser(
       usage=usage,
       phil=phil_scope,
       read_experiments=True,
@@ -83,7 +88,7 @@ class Script(object):
     experiments_list = [e.data for e in params.input.experiments]
     if params.extract_tags:
       import os
-      experiments_tags = [os.path.basename(f.filename).split("_combined_experiments")[0] for f in params.input.experiments]
+      experiments_tags = [os.path.splitext(os.path.basename(f.filename))[0] for f in params.input.experiments]
       info_list = []
       for experiments in experiments_list:
         infos = []
@@ -112,13 +117,16 @@ class Script(object):
       gnuplot.close()
 
     import xfel.ui.components.xfel_gui_plotter as pltr
-    plotter = pltr.PopUpCharts()
+    interactive = params.output.image_file is None
+    plotter = pltr.PopUpCharts(interactive=interactive)
     plotter.plot_uc_histogram(
       info_list=info_list,
       legend_list=experiments_tags,
       iqr_ratio = params.iqr_ratio,
       ranges = params.ranges,
-      title = params.title)
+      title = params.title,
+      image_fname = params.output.image_file,
+      hist_scale = params.scale)
     plotter.plt.show()
 
 if __name__ == '__main__':

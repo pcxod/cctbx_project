@@ -310,8 +310,7 @@ def occupancy_selections(
     common_residue_name_class_only = None,
     always_group_adjacent          = False,
     ignore_hydrogens               = False)
-  exchangable_hd_pairs = mmtbx.utils.combine_hd_exchangable(hierarchy =
-    model.get_hierarchy())
+  exchangable_hd_pairs = model.get_hierarchy().exchangeable_hd_selections()
   if(len(exchangable_hd_pairs)==0 and result is not None):
     occupancy_regroupping(
       pdb_hierarchy = model.get_hierarchy(),
@@ -561,7 +560,7 @@ def assemble_constraint_groups_3d(
   !!                                                                        !!
   !! Grouping of occupancy constraints in 3D is experimental and not fully  !!
   !! tested.  Use at your own risk!  For bug reports, etc. contact us by    !!
-  !! email at bugs@phenix-online.org.                                       !!
+  !! email at help@phenix-online.org.                                       !!
   !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 """, file=log)
   occupancies = pdb_atoms.extract_occ()

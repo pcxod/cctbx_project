@@ -5,7 +5,7 @@ from cctbx.maptbx import box
 from cctbx.maptbx.mask import create_mask_around_edges, \
       create_mask_around_atoms, create_mask_around_density
 import cctbx
-import inspect
+from libtbx.introspection import getfullargspec
 
 def get_method_text(key, base_method_name):
   if key == 'init':
@@ -52,7 +52,7 @@ def all_expected_in_found(found = None, expected = None):
 
 def check_args(text, method,expected_args,group_text,
        allow_extra_in_found=None):
-    found_args = inspect.getargspec(method).args
+    found_args = getfullargspec(method).args
     expected_args.sort()
     found_args.sort()
     print ("\n%s :\nExpected :%s \nFound   : %s" %(
@@ -89,17 +89,24 @@ def test_01():
 
   # Args that should be in common for all calls to specific methods
   method_args_dict = {
-    'with_bounds': ['lower_bounds', 'upper_bounds','model_can_be_outside_bounds'],
-    'around_model':[ 'box_cushion','model_can_be_outside_bounds','stay_inside_current_map'],
+    'with_bounds': ['lower_bounds', 'upper_bounds',
+    'model_can_be_outside_bounds',
+    'stay_inside_current_map', 'use_cubic_boxing'],
+    'around_model':[ 'box_cushion','model_can_be_outside_bounds',
+      'stay_inside_current_map', 'use_cubic_boxing',
+      'require_match_unit_cell_crystal_symmetry'],
     'around_density':[ 'box_cushion','threshold', 'get_half_height_width',
+       'stay_inside_current_map', 'use_cubic_boxing',
        'model_can_be_outside_bounds'],
-    'around_mask':[ 'box_cushion','model_can_be_outside_bounds'],
-    'around_unique':['box_cushion', 'target_ncs_au_model', 'regions_to_keep',
+    'around_mask':[ 'box_cushion','model_can_be_outside_bounds',
+      'stay_inside_current_map', 'use_cubic_boxing'],
+    'around_unique':['box_cushion', 'target_ncs_au_model',
+        'stay_inside_current_map', 'use_cubic_boxing',
+        'use_symmetry_in_extract_unique', 'regions_to_keep',
+    'residues_per_region','keep_this_region_only',
         'solvent_content', 'resolution', 'sequence', 'molecular_mass',
          'symmetry', 'chain_type', 'keep_low_density', 'soft_mask',
          'mask_expand_ratio'],
-
-
    }
 
   # Args that should appear in map_manager and map_model_manager calls for
@@ -181,14 +188,14 @@ def test_02():
 
   init_arg_dict = {
      'around_atoms':['self', 'mask_atoms_atom_radius', 'model',
-          'xray_structure', 'map_manager','n_real', 'wrapping'],
+          'invert_mask','xray_structure', 'map_manager','n_real', 'wrapping'],
      'around_edges':['self', 'boundary_radius', 'map_manager'],
      'around_density':['self', 'map_manager','resolution','molecular_mass',
         'sequence','solvent_content'],
   }
   method_arg_dict = {
      'around_atoms':['self', 'soft_mask_radius', 'mask_atoms_atom_radius',
-          'soft_mask', 'mask_id', 'model'],
+          'invert_mask','soft_mask', 'mask_id', 'model'],
      'around_edges':['self', 'boundary_radius', 'mask_id',],
      'around_density':['self', 'resolution', 'solvent_content', 'soft_mask',
            'soft_mask_radius', 'mask_id','map_id'],

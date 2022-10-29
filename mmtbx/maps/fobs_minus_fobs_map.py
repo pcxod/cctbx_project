@@ -22,6 +22,7 @@ import os
 import sys
 import mmtbx.model
 from six.moves import zip
+from iotbx import extract_xtal_data
 
 fo_minus_fo_master_params_str = """\
 f_obs_1_file_name = None
@@ -417,23 +418,21 @@ high_res=2.0 sigma_cutoff=2 scattering_table=neutron"""
         err              = null_out())
       # XXX UGLY !!!
       try:
-        parameters = utils.data_and_flags_master_params().extract()
+        parameters = extract_xtal_data.data_and_flags_master_params().extract()
         if(params.f_obs_1_label is not None):
           parameters.labels = [params.f_obs_1_label]
-        determine_data_and_flags_result = utils.determine_data_and_flags(
-          reflection_file_server  = reflection_file_server,
-          keep_going              = True,
-          parameters              = parameters,
-          log                     = null_out())
+        determine_data_and_flags_result = extract_xtal_data.run(
+          reflection_file_server = reflection_file_server,
+          keep_going             = True,
+          parameters             = parameters)
       except: # intentional
-        parameters = utils.data_and_flags_master_params().extract()
+        parameters = extract_xtal_data.data_and_flags_master_params().extract()
         if(params.f_obs_2_label is not None):
           parameters.labels = [params.f_obs_2_label]
-        determine_data_and_flags_result = utils.determine_data_and_flags(
-          reflection_file_server  = reflection_file_server,
-          keep_going              = True,
-          parameters              = parameters,
-          log                     = null_out())
+        determine_data_and_flags_result = extract_xtal_data.run(
+          reflection_file_server = reflection_file_server,
+          keep_going             = True,
+          parameters             = parameters)
       f_obss.append(determine_data_and_flags_result.f_obs)
   else:
     if([params.f_obs_1_file_name,params.f_obs_2_file_name].count(None)==2):
@@ -447,14 +446,13 @@ high_res=2.0 sigma_cutoff=2 scattering_table=neutron"""
         force_symmetry   = True,
         reflection_files = [reflection_file],
         err              = null_out())
-      parameters = utils.data_and_flags_master_params().extract()
+      parameters = extract_xtal_data.data_and_flags_master_params().extract()
       if(label is not None):
         parameters.labels = [label]
-      determine_data_and_flags_result = utils.determine_data_and_flags(
-          reflection_file_server  = reflection_file_server,
-          parameters              = parameters,
-          keep_going              = True,
-          log                     = null_out())
+      determine_data_and_flags_result = extract_xtal_data.run(
+          reflection_file_server = reflection_file_server,
+          parameters             = parameters,
+          keep_going             = True)
       f_obss.append(determine_data_and_flags_result.f_obs)
   if(len(f_obss)!=2):
     raise Sorry(" ".join(errors))

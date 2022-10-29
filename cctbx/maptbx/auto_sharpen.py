@@ -203,8 +203,8 @@ master_phil = iotbx.phil.parse("""
 
      b_sharpen = None
        .type = float
-       .short_caption = Sharpening
-       .help = Sharpen with this b-value. Contrast with b_iso that yield a \
+       .short_caption = B-sharpen to apply
+       .help = Sharpen with this b-value. Contrast with b_iso that yields a \
            targeted value of b_iso
 
      b_blur_hires = 200
@@ -405,7 +405,7 @@ master_phil = iotbx.phil.parse("""
 
      remove_aniso = True
        .type = bool
-       .short_caption = Remove aniso
+       .short_caption = Remove anisotropy
        .help = You can remove anisotropy (overall and locally) during sharpening
 
      max_box_fraction = 0.5
@@ -754,6 +754,12 @@ def set_sharpen_params(params,out=sys.stdout):
          " b_iso are used", file=out)
      params.map_modification.iterate=False
 
+  if 'half_map_sharpening' in params.map_modification.auto_sharpen_methods and \
+   ((not params.input_files.half_map_file) or
+   (not len(params.input_files.half_map_file))==2):
+    print("Skipping half-map sharpening as there are no half-maps supplied...",
+      file = out)
+    params.map_modification.auto_sharpen_methods.remove('half_map_sharpening')
 
   return params
 
@@ -946,6 +952,7 @@ def get_map_and_model(params=None,
 
 def run(args=None,params=None,
     map_data=None,crystal_symmetry=None,
+    wrapping = None,
     write_output_files=True,
     pdb_inp=None,
     ncs_obj=None,
@@ -991,6 +998,7 @@ def run(args=None,params=None,
         nproc=params.control.nproc,
         queue_run_command=params.control.queue_run_command,
         map=map_data,
+        wrapping=wrapping,
         half_map_data_list=half_map_data_list,
         solvent_content=params.crystal_info.solvent_content,
         molecular_mass=params.crystal_info.molecular_mass,

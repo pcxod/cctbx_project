@@ -263,6 +263,13 @@ class initialize(initialize_base):
         query = "ALTER TABLE `%s_rungroup` ADD COLUMN spectrum_eV_offset DOUBLE NULL"%self.params.experiment_tag
         cursor.execute(query)
 
+      # Maintain backwards compatibility with SQL tables v5.3: 07/23/21
+      if 'extra_format_str' not in column_names:
+        print("Upgrading to version 5.3 of mysql database schema")
+        query = "ALTER TABLE `%s_rungroup` ADD COLUMN extra_format_str TEXT NULL"%self.params.experiment_tag
+        cursor.execute(query)
+        query = "ALTER TABLE `%s_job` MODIFY COLUMN submission_id TEXT NULL"%self.params.experiment_tag
+        cursor.execute(query)
     return tables_ok
 
   def set_up_columns_dict(self, app):
@@ -274,18 +281,37 @@ class initialize(initialize_base):
       columns_dict[table_name] = [c[0] for c in cursor.fetchall() if c[0] != 'id']
     return columns_dict
 
+class dummy_cursor(object):
+  def __init__(self, sql_cursor):
+    self.rowcount = sql_cursor.rowcount
+    self.lastrowid = sql_cursor.lastrowid
+    self.prefetched = sql_cursor.fetchall()
+  def fetchall(self):
+    return self.prefetched
+
 class db_application(object):
-  def __init__(self, params, cache_connection = False):
+  def __init__(self, params, cache_connection = True, mode = 'execute'):
     self.params = params
     self.dbobj = None
     self.cache_connection = cache_connection
+    self.query_count = 0
+    self.mode = mode
+    self.last_query = None
 
-  def execute_query(self, query, commit = False):
+  def __setattr__(self, prop, val):
+    if prop == "mode":
+      assert val in ['execute', 'cache_commits']
+    return super(db_application, self).__setattr__(prop, val)
+
+  def execute_query(self, query, commit=True):
     from MySQLdb import OperationalError
 
+    if self.mode == 'cache_commits' and commit:
+      self.last_query = query
+      return
+
     if self.params.db.verbose:
-      from time import time
-      st = time()
+      st = time.time()
       self.query_count += 1
 
     retry_count = 0
@@ -293,22 +319,32 @@ class db_application(object):
     sleep_time = 0.1
     while retry_count < retry_max:
       try:
-        if self.dbobj is None or (not commit and not self.cache_connection):
-          self.dbobj = dbobj = get_db_connection(self.params)
+
+        # Get the (maybe cached) connection
+        # We enable autocommit on the connection by default, to avoid stale
+        # reads arising from unclosed transactions. See:
+        # https://stackoverflow.com/questions/1617637/pythons-mysqldb-not-getting-updated-row
+        if not commit: # connection caching is not attempted if commit=False
+          dbobj = get_db_connection(self.params, autocommit=False)
+        elif self.dbobj is None:
+          dbobj = get_db_connection(self.params, autocommit=True)
+          if self.cache_connection:
+            self.dbobj = dbobj
         else:
           dbobj = self.dbobj
-        cursor = dbobj.cursor()
-        cursor.execute(query)
-        if commit:
-          dbobj.commit()
+
+        sql_cursor = dbobj.cursor()
+        sql_cursor.execute(query)
+        cursor = dummy_cursor(sql_cursor)
+        sql_cursor.close()
 
         if self.params.db.verbose:
-          et = time() - st
+          et = time.time() - st
           if et > 1:
             print('Query % 6d SQLTime Taken = % 10.6f seconds' % (self.query_count, et), query[:min(len(query),145)])
         return cursor
       except OperationalError as e:
-        if "Can't connect to MySQL server" not in str(e):
+        if "Can't connect to MySQL server" not in str(e) and "Lost connection to MySQL server" not in str(e):
           print(query)
           raise e
         retry_count += 1
@@ -324,22 +360,21 @@ class db_application(object):
     raise Sorry("Couldn't execute MYSQL query. Too many reconnects. Query: %s"%query)
 
 class xfel_db_application(db_application):
-  def __init__(self, params, drop_tables = False, verify_tables = False, cache_connection = False):
-    super(xfel_db_application, self).__init__(params, cache_connection)
-    self.query_count = 0
+  def __init__(self, params, drop_tables = False, verify_tables = False, **kwargs):
+    super(xfel_db_application, self).__init__(params, **kwargs)
     dbobj = get_db_connection(params)
-    self.init_tables = initialize(params, dbobj) # only place where a connection is held
+    init_tables = initialize(params, dbobj)
 
     if drop_tables:
-      self.drop_tables()
+      init_tables.drop_tables()
 
-    if verify_tables and not self.verify_tables():
-      self.create_tables()
+    if verify_tables and not init_tables.verify_tables():
+      init_tables.create_tables()
       print('Creating experiment tables...')
-      if not self.verify_tables():
+      if not init_tables.verify_tables():
         raise Sorry("Couldn't create experiment tables")
 
-    self.columns_dict = self.init_tables.set_up_columns_dict(self)
+    self.columns_dict = init_tables.set_up_columns_dict(self)
 
   def list_lcls_runs(self):
     if self.params.facility.lcls.web.location is None or len(self.params.facility.lcls.web.location) == 0:
@@ -363,16 +398,25 @@ class xfel_db_application(db_application):
         print("Web service query to list runs failed")
         return []
 
-      return [{'run':str(int(r['run_num']))} for r in sorted(j['value'], key=lambda x:x['run_num']) if r['all_present']]
+      present_runs = []
+      for r in sorted(j['value'], key=lambda x:x['run_num']):
+        if r['all_present']:
+          is_good = True
+        else:
+          if not self.params.facility.lcls.web.enforce80:
+            for item_idx, item in enumerate(r['files']):
+              if '-s80-' in item['path']:
+                item['is_present'] = True
+          if not self.params.facility.lcls.web.enforce81:
+            for item_idx, item in enumerate(r['files']):
+              if '-s81-' in item['path']:
+                item['is_present'] = True
+          is_good = all([f['is_present'] for f in r['files']])
+        if is_good:
+          present_runs.append({'run':str(int(r['run_num']))})
 
-  def verify_tables(self):
-    return self.init_tables.verify_tables()
+      return present_runs
 
-  def create_tables(self):
-    return self.init_tables.create_tables()
-
-  def drop_tables(self):
-    return self.init_tables.drop_tables()
 
   def create_trial(self, d_min = 1.5, n_bins = 10, **kwargs):
     # d_min and n_bins only used if isoforms are in this trial
@@ -585,6 +629,9 @@ class xfel_db_application(db_application):
         else:
           sub_ds[n][1][c] = value # this column came from a sub table
 
+      if 'task' in sub_ds:
+        d['task_type'] = sub_ds['task'][1]['type']
+
       # pop the id column as it is passed as name_id to the db_proxy class (ie Job(job_id = 2))
       _id = d.pop("id")
       d["%s_id"%name] = _id
@@ -682,6 +729,31 @@ class xfel_db_application(db_application):
 
   def get_all_runs(self):
     return self.get_all_x(Run, "run")
+
+  def get_rungroup_runs_by_tags(self, rungroup, tags, mode):
+    tag = self.params.experiment_tag
+    tagids = [t.id for t in tags]
+    if mode == "union":
+      # Union is done by using a series of OR statements testing the tag ids
+      return self.get_all_x(Run, 'run', where = """
+        JOIN `%s_rungroup_run` rg_r ON rg_r.run_id = run.id
+        JOIN `%s_rungroup` rg ON rg.id = rg_r.rungroup_id
+        JOIN `%s_run_tag` rt ON rt.run_id = run.id
+        JOIN `%s_tag` tag ON tag.id = rt.tag_id
+        WHERE rg.id = %d AND (%s)
+         """%(tag, tag, tag, tag, rungroup.id, " OR ".join(["tag.id = %d"%i for i in tagids])))
+    elif mode == "intersection":
+      # Intersection is done using a series of INNER JOINS, one full set for each tag
+      return self.get_all_x(Run, 'run', where = """
+        %s
+        WHERE %s
+        """%("".join(["""
+                      INNER JOIN `%s_rungroup_run` rg_r%d ON rg_r%d.run_id = run.id
+                      INNER JOIN `%s_rungroup` rg%d ON rg%d.id = rg_r%d.rungroup_id
+                      INNER JOIN `%s_run_tag` rt%d ON rt%d.run_id = run.id
+                      INNER JOIN `%s_tag` tag%d ON tag%d.id = rt%d.tag_id AND tag%d.id = %d"""%(
+                      tag, i, i, tag, i, i, i, tag, i, i, tag, i, i, i, i, tid) for i, tid in enumerate(tagids)]),
+        " AND ".join(["rg%d.id = %d"%(i, rungroup.id) for i in range(len(tagids))])))
 
   def create_rungroup(self, **kwargs):
     return Rungroup(self, **kwargs)
@@ -832,6 +904,9 @@ class xfel_db_application(db_application):
   def get_dataset(self, dataset_version_id):
     return Dataset(self, dataset_version_id)
 
+  def get_dataset_version(self, dataset_version_id):
+    return DatasetVersion(self, dataset_version_id)
+
   def get_dataset_versions(self, dataset_id, latest = False):
     tag = self.params.experiment_tag
     if latest:
@@ -848,6 +923,17 @@ class xfel_db_application(db_application):
     else:
       where = "WHERE dataset_version.dataset_id = %d"%dataset_id
     return self.get_all_x_with_subitems(DatasetVersion, "dataset_version", where = where, sub_items=[(Dataset, "dataset", True)])
+
+  def get_job_dataset_version(self, job_id):
+    tag = self.params.experiment_tag
+    query = """SELECT dvj.dataset_version_id FROM `%s_dataset_version_job` dvj
+               WHERE dvj.job_id = %d""" % (tag, job_id)
+    cursor = self.execute_query(query)
+    dataset_version_ids = [i[0] for i in cursor.fetchall()]
+    if not dataset_version_ids:
+      return None
+    assert len(dataset_version_ids) == 1
+    return self.get_dataset_version(dataset_version_ids[0])
 
   def get_dataset_version_jobs(self, dataset_version_id):
     tag = self.params.experiment_tag

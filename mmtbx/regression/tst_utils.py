@@ -225,8 +225,7 @@ END"""
   if (verbose):
     log = sys.stdout
   model = mmtbx.model.manager(
-      model_input = iotbx.pdb.input(lines=pdb_in.splitlines(), source_info=None),
-      process_input = True)
+      model_input = iotbx.pdb.input(lines=pdb_in.splitlines(), source_info=None))
   processed_pdb_files_srv = utils.process_pdb_file_srv(log=log)
   processed_pdb_file, pdb_inp = processed_pdb_files_srv.process_pdb_files(
     raw_records=pdb_in.splitlines())
@@ -271,7 +270,8 @@ END
   assert approx_equal(f.f_000, 0.25*125*0.687355324074+6, 1.e-3)
 
 def exercise_detect_link_problems():
-  open("tmp_mmtbx_utils_asn_nag.pdb", "w").write("""\
+  with open("tmp_mmtbx_utils_asn_nag.pdb", "w") as f:
+    f.write("""\
 CRYST1  124.702  124.702   71.573  90.00  90.00  90.00 P 4 21 2
 ATOM   3196  N   ASN A 284      36.622 -19.654  35.782  1.00 19.63           N
 ATOM   3197  CA  ASN A 284      36.491 -18.279  35.327  1.00 19.79           C
@@ -379,8 +379,8 @@ TER
 END
 """
   pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_str)
-  model = mmtbx.model.manager(model_input = pdb_inp, process_input=True,
-    build_grm=True, log=null_out())
+  model = mmtbx.model.manager(model_input = pdb_inp, log=null_out())
+  model.process(make_restraints=True)
   residue = model.get_hierarchy().only_residue()
   r = mmtbx.utils.rotatable_bonds.axes_and_atoms_aa_specific(
       residue = residue, mon_lib_srv = model.get_mon_lib_srv(), log=null_out())

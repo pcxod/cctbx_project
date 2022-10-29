@@ -678,11 +678,11 @@ def get_results_from_validate_H(neutron_distances, pdb_str):
 
   pdb_inp = iotbx.pdb.input(lines=pdb_str.split("\n"), source_info=None)
   model = mmtbx.model.manager(
-      model_input = pdb_inp,
-      build_grm   = True,
-      stop_for_unknowns = False,
-      pdb_interpretation_params = pi_params,
-      log = null_out())
+    model_input = pdb_inp,
+    stop_for_unknowns = False,
+    log = null_out())
+  model.process(pdb_interpretation_params=pi_params,
+    make_restraints=True)
 
   c = validate_H(model = model,
                  use_neutron_distances = neutron_distances)
@@ -910,7 +910,7 @@ def exercise4():
   for item, answer in zip(missing, missing_answer):
     assert (item[0].strip() == answer[0].strip())
     assert (item[2] is not None) # make sure xyz exist
-    for atom, aatom in zip(item[1], answer[1]):
+    for atom, aatom in zip(sorted(item[1]), sorted(answer[1])):
       assert (atom.strip() == aatom.strip())
 
   test_output(results)
@@ -931,7 +931,7 @@ def exercise5():
   for item, answer in zip(missing, missing_answer):
     assert (item[0].strip() == answer[0].strip())
     assert (item[2] is not None) # make sure xyz exist
-    for atom, aatom in zip(item[1], answer[1]):
+    for atom, aatom in zip(sorted(item[1]), sorted(answer[1])):
       assert (atom.strip() == aatom.strip())
 
   test_output(results)
@@ -951,11 +951,14 @@ def exercise6():
     pdb_str = pdb_str6)
   missing = results.missing_HD_atoms
 
-  missing_answer = [('pdbres="TYR A 139 "', ['HE1', 'H', 'HD2', 'HB3'])]
+  #missing_answer = [('pdbres="TYR A 139 "', ['HE1', 'H', 'HD2', 'HB3'])]
+  # XXX HB3 was never compared because missing only had 3 items. Removed it
+  #  for compatibility with python 3.8
+  missing_answer = [('pdbres="TYR A 139 "', ['HE1', 'H', 'HD2'])]
   for item, answer in zip(missing, missing_answer):
     assert (item[0].strip() == answer[0].strip())
     assert (item[2] is not None) # make sure xyz exist
-    for atom, aatom in zip(item[1], answer[1]):
+    for atom, aatom in zip(sorted(item[1]), sorted(answer[1])):
       assert (atom.strip() == aatom.strip())
       assert (atom.strip() != 'CG')
 
@@ -977,14 +980,15 @@ def exercise7():
   outliers_bonds = results.outliers_bonds
 
   outliers_bond_answer = [
-    [' A 139 ATYR  HH ', 0.769, 0.98 ],
-    [' A 139 ATYR  HB3', 0.930, 1.09 ],
+    [' A 139 ATYR  HD2', 1.209, 1.08 ],
     [' A 139 ATYR  HB2', 0.936, 1.09 ],
-    [' A 139 ATYR  HD2', 1.209, 1.08 ] ]
+    [' A 139 ATYR  HB3', 0.930, 1.09 ],
+    [' A 139 ATYR  HH ', 0.769, 0.98 ]
+     ]
 
   for item, answer in zip(outliers_bonds, outliers_bond_answer):
-    print(item)
-    print(answer)
+    #print(item)
+    #print(answer)
     assert (item[0].strip() == answer[0].strip()) # pdb_str
     assert (item[5] is not None)                  # make sure xyz exist
     assert approx_equal(item[2],answer[1], 1.e-2) # bond length model
@@ -1007,10 +1011,11 @@ def exercise8():
   outliers_bonds = results.outliers_bonds
 
   outliers_bond_answer = [
-    [' A 139  TYR  DE2', 0.876, 1.08],
-    [' A 139  TYR  DB3', 1.264, 1.09],
+    [' A 139  TYR  DB2', 1.002, 1.09],
     [' A 139  TYR  DD1', 1.236, 1.08],
-    [' A 139  TYR  DB2', 1.002, 1.09] ]
+    [' A 139  TYR  DB3', 1.264, 1.09],
+    [' A 139  TYR  DE2', 0.876, 1.08]
+     ]
 
   for item, answer in zip(outliers_bonds, outliers_bond_answer):
     assert (item[0].strip() == answer[0].strip()) # pdb_str
@@ -1035,10 +1040,11 @@ def exercise9():
   outliers_bonds = results.outliers_bonds
 
   outliers_bond_answer = [
-    [' A 139 ATYR  HB2',  0.893, 1.09],
-    [' A 139 BTYR  DD1',  1.243, 1.08],
+    [' A 139 ATYR  HE2',  0.986, 1.08],
     [' A 139 BTYR  DH ',  1.123, 0.98],
-    [' A 139 ATYR  HE2',  0.986, 1.08] ]
+    [' A 139 BTYR  DD1',  1.243, 1.08],
+    [' A 139 ATYR  HB2',  0.893, 1.09],
+     ]
 
   for item, answer in zip(outliers_bonds, outliers_bond_answer):
     assert (item[0].strip() == answer[0].strip()) # pdb_str
@@ -1061,8 +1067,9 @@ def exercise10():
   outliers_angles = results.outliers_angles
 
   outliers_angles_answer = [
-    [' A 139 ATYR  HA ',  123.01, 110.0, (10.583, 7.992, 7.177)],
-    [' A 139 BTYR  DA ',  121.11, 109.0, (10.557, 8.334, 6.899)]  ]
+    [' A 139 BTYR  DA ',  121.11, 109.0, (10.557, 8.334, 6.899)],
+    [' A 139 ATYR  HA ',  123.01, 110.0, (10.583, 7.992, 7.177)]
+      ]
 
   for item, answer in zip(outliers_angles, outliers_angles_answer):
     assert (item[0].strip() == answer[0].strip()) # pdb_str
@@ -1119,14 +1126,9 @@ def exercise_hd_state():
   This is not a result but used internally to decide if H/D site analysis is
   necessary or not
   '''
-  pdb_interpretation_phil = iotbx.phil.parse(
-    input_string = grand_master_phil_str, process_includes = True)
-
   pdb_inp = iotbx.pdb.input(lines=pdb_str4.split("\n"), source_info=None)
   model = mmtbx.model.manager(
       model_input = pdb_inp,
-#      build_grm   = True, # to speed up test
-      pdb_interpretation_params = pdb_interpretation_phil.extract(),
       log = null_out())
   c = validate_H(model = model,
                  use_neutron_distances = True)
@@ -1134,18 +1136,14 @@ def exercise_hd_state():
 
   pdb_inp = iotbx.pdb.input(lines=pdb_str5.split("\n"), source_info=None)
   model = mmtbx.model.manager(
-      model_input = pdb_inp,
-#      build_grm   = True, # to speed up test
-      pdb_interpretation_params = pdb_interpretation_phil.extract())
+      model_input = pdb_inp)
   c = validate_H(model = model,
                  use_neutron_distances = True)
   assert (c.get_hd_state() == 'all_d')
 
   pdb_inp = iotbx.pdb.input(lines=pdb_str3.split("\n"), source_info=None)
   model = mmtbx.model.manager(
-      model_input = pdb_inp,
-#      build_grm   = True, # to speed up test
-      pdb_interpretation_params = pdb_interpretation_phil.extract())
+      model_input = pdb_inp)
   c = validate_H(model = model,
                  use_neutron_distances = True)
   assert (c.get_hd_state() == 'h_and_d')

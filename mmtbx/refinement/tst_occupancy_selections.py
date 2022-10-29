@@ -39,24 +39,24 @@ def get_model(file_name, log):
           input_string=pdb_interpretation.grand_master_phil_str, process_includes=True).extract()
   pdb_interpretation_params.pdb_interpretation.sort_atoms=False
   pdb_inp = iotbx.pdb.input(file_name=file_name)
-  return mmtbx.model.manager(
+  model = mmtbx.model.manager(
       model_input = pdb_inp,
-      process_input = True,
-      pdb_interpretation_params=pdb_interpretation_params,
       stop_for_unknowns = False,
       log=log)
+  model.process(pdb_interpretation_params=pdb_interpretation_params)
+  return model
 
 def get_model_str(strings, log):
   pdb_interpretation_params = iotbx.phil.parse(
           input_string=pdb_interpretation.grand_master_phil_str, process_includes=True).extract()
   pdb_interpretation_params.pdb_interpretation.sort_atoms=False
   pdb_inp = iotbx.pdb.input(lines=strings, source_info=None)
-  return mmtbx.model.manager(
+  model = mmtbx.model.manager(
       model_input = pdb_inp,
-      process_input = True,
-      pdb_interpretation_params=pdb_interpretation_params,
       stop_for_unknowns = False,
       log=log)
+  model.process(pdb_interpretation_params=pdb_interpretation_params)
+  return model
 
 def exercise_00(verbose):
   pdb_file = libtbx.env.find_in_repositories(
@@ -158,7 +158,7 @@ def exercise_02(verbose):
   else: log = StringIO()
   model = get_model(pdb_file, log)
   #
-  base = [ [[0,1,2,3,4,5,6,7,8,9,10,11,12], [14,15,16,17,18,19,20,21,22,23,24,25,26]], [[13],[27]] ]
+  base = [ [[0,1,2,3,4,5,6,7,8,9,10,11,12,13], [14,15,16,17,18,19,20,21,22,23,24,25,26,27]] ]
   res = occupancy_selections(
     model = model,
     as_flex_arrays    = False)
@@ -1211,7 +1211,8 @@ HETATM   89  O   HOH A  14      -1.500   0.682  10.967  1.00 43.49           O
 TER
 """
   pdb_in = "%s_in.pdb" % prefix
-  open(pdb_in, "w").write(pdb_raw)
+  with open(pdb_in, "w") as f:
+    f.write(pdb_raw)
   if (create_mtz):
     args = [
       pdb_in,
@@ -1231,8 +1232,8 @@ TER
     atom.b = 5
     if (atom.occ < 1.0):
       atom.occ = 0.5
-  open("%s_start.pdb" % prefix, "w").write(
-    hierarchy.as_pdb_string(crystal_symmetry=xrs))
+  with open("%s_start.pdb" % prefix, "w") as f:
+    f.write(hierarchy.as_pdb_string(crystal_symmetry=xrs))
 
 def exercise_regroup_3d(verbose):
   if (verbose): log = sys.stdout

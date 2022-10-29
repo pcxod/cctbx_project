@@ -1,7 +1,23 @@
 from __future__ import absolute_import, division, print_function
 # LIBTBX_SET_DISPATCHER_NAME cctbx.xfel.merge
+
+import os, sys
+
+# vvv Temporary fix for https://github.com/dials/dials/issues/1998
+# Remove this when https://github.com/pydata/numexpr/pull/400 and
+# https://github.com/dials/dials/pull/2000 have been merged and released
+if os.environ.get("CCTBX_NO_UUID", None) is not None:
+  def mp_system(): return sys.platform.capitalize()
+  def mp_machine(): return 'x86_64'
+  import platform
+  platform.system = mp_system
+  platform.machine = mp_machine
+# ^^^
+
 from xfel.merging.application.mpi_helper import mpi_helper
 from xfel.merging.application.mpi_logger import mpi_logger
+
+# Note, when modifying this list, be sure to modify the README in xfel/merging
 
 default_steps = [
   'input',
@@ -9,7 +25,6 @@ default_steps = [
   'model_scaling', # build full Miller list, model intensities, and resolution binner - for scaling and post-refinement
   'modify', # apply polarization correction, etc.
   'filter', # reject whole experiments or individual reflections
-  'errors_premerge', # correct errors using a per-experiment algorithm, e.g. ha14
   'scale',
   'postrefine',
   'statistics_unitcell', # if required, save the average unit cell to the phil parameters
@@ -46,9 +61,9 @@ class Script(object):
       self.parser = None
 
       '''Initialize the script.'''
-      from dials.util.options import OptionParser
+      from dials.util.options import ArgumentParser
       # Create the parser
-      self.parser = OptionParser(
+      self.parser = ArgumentParser(
         usage=self.usage,
         phil=phil_scope,
         epilog=help_message)
@@ -63,6 +78,13 @@ class Script(object):
 
       # prepare for transmitting input parameters to all ranks
       transmitted = dict(params = params, options = options)
+
+      # make the output folders
+      try:
+        os.mkdir(params.output.output_dir)
+      except FileExistsError:
+        pass
+
     else:
       transmitted = None
 
@@ -81,7 +103,6 @@ class Script(object):
     self.mpi_logger.log_step_time("BROADCAST_INPUT_PARAMS", True)
 
   def run(self):
-
     import datetime
     time_now = datetime.datetime.now()
 
@@ -95,14 +116,21 @@ class Script(object):
     self.parse_input()
     self.mpi_logger.log_step_time("PARSE_INPUT_PARAMS", True)
 
+    if self.params.mp.debug.cProfile:
+      import cProfile
+      pr = cProfile.Profile()
+      pr.enable()
+
     # Create the workers using the factories
     self.mpi_logger.log_step_time("CREATE_WORKERS")
     from xfel.merging import application
-    import importlib
+    import importlib, copy
+
+    self._resolve_persistent_columns()
 
     workers = []
-    steps = self.params.dispatch.step_list if self.params.dispatch.step_list else default_steps
-    for step in steps:
+    self.params.dispatch.step_list = self.params.dispatch.step_list or default_steps
+    for step in self.params.dispatch.step_list:
       step_factory_name = step
       step_additional_info = []
 
@@ -112,7 +140,24 @@ class Script(object):
         step_factory_name = step_info[0]
         step_additional_info = step_info[1:]
 
-      factory = importlib.import_module('xfel.merging.application.' + step_factory_name + '.factory')
+      try:
+        factory = importlib.import_module('xfel.merging.application.' + step_factory_name + '.factory')
+      except ModuleNotFoundError:
+        custom_worker_path = os.environ.get('XFEL_CUSTOM_WORKER_PATH')
+        if custom_worker_path is None: raise
+        # remember the system path so the custom worker can temporarily modify it
+        sys_path = copy.deepcopy(sys.path)
+        pathstr = os.path.join(
+            custom_worker_path, step_factory_name, 'factory.py'
+        )
+
+        modulename = 'xfel.merging.application.' + step_factory_name + '.factory'
+        spec = importlib.util.spec_from_file_location(modulename, pathstr)
+        factory = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(factory)
+        # reset the path
+        sys.path = sys_path
+
       workers.extend(factory.factory.from_parameters(self.params, step_additional_info, mpi_helper=self.mpi_helper, mpi_logger=self.mpi_logger))
 
     # Perform phil validation up front
@@ -145,7 +190,6 @@ class Script(object):
         self.mpi_logger.log("Ending step with %d experiments"%len(experiments))
 
     if self.params.output.save_experiments_and_reflections:
-      import os
       if len(reflections) and 'id' not in reflections:
         from dials.array_family import flex
         id_ = flex.int(len(reflections), -1)
@@ -172,6 +216,20 @@ class Script(object):
         experiments.as_file(os.path.join(self.params.output.output_dir, "%s%s.expt"%(self.params.output.prefix, filename_suffix)))
 
     self.mpi_logger.log_step_time("TOTAL", True)
+
+    if self.params.mp.debug.cProfile:
+      pr.disable()
+      pr.dump_stats(os.path.join(self.params.output.output_dir, "cpu_%s_%d.prof"%(self.params.output.prefix, self.mpi_helper.rank)))
+
+  def _resolve_persistent_columns(self):
+    if self.params.output.expanded_bookkeeping:
+      if self.params.input.persistent_refl_cols is None:
+        self.params.input.persistent_refl_cols = []
+      keysCreatedByMerge = ["input_refl_index", "orig_exp_id", "file_list_mapping", "is_odd_experiment"]
+      for key in keysCreatedByMerge:
+        if key not in self.params.input.persistent_refl_cols:
+          self.params.input.persistent_refl_cols.append(key)
+
 
 if __name__ == '__main__':
   script = Script()

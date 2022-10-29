@@ -10,6 +10,7 @@ import iotbx.phil
 import sys,os
 from operator import itemgetter
 from libtbx.utils import Sorry,null_out
+from libtbx import group_args
 from scitbx.array_family import flex
 from copy import deepcopy
 from six.moves import zip
@@ -121,14 +122,14 @@ master_phil = iotbx.phil.parse("""
                 define full target length (as opposed to all unique \
                 chains in target).
 
-    minimum_percent_match_to_select = None
+    minimum_percent_match_to_select = 1
       .type = float
       .help = You can specify minimum_percent_match_to_select and \
               maximum_percent_match_to_select and match_pdb_file \
               in which case all segments in the query model that have \
               a percentage match (within max_dist of atom in target) \
               in this range will be written out to match_pdb_file.
-    maximum_percent_match_to_select = None
+    maximum_percent_match_to_select = 100
       .type = float
       .help = You can specify minimum_percent_match_to_select and \
               maximum_percent_match_to_select and match_pdb_file \
@@ -151,6 +152,11 @@ master_phil = iotbx.phil.parse("""
       .help = Use residue groups in sequence alignment
       .short_caption = Score by residue groups
       .expert_level = 3
+
+    only_keep_best_chain = False
+      .type = bool
+      .help = Use keep the best-matching chain in match_pdb
+      .short_caption = Best chain only in match_pdb
 
   }
   control {
@@ -190,8 +196,16 @@ class rmsd_values:
     self.used_target=None
     self.used_query=None
     self.n_fragments_list=[]
+    self.incorrect_connections = None
+    self.input_fragments = None
     self.file_info=""
     self.params=params
+
+  def add_incorrect_connections(self,incorrect_connections):
+    self.incorrect_connections = incorrect_connections
+
+  def add_input_fragments(self,input_fragments):
+    self.input_fragments = input_fragments
 
   def add_match_percent(self,id=None,match_percent=None):
     ipoint=self.id_list.index(id)
@@ -238,7 +252,7 @@ class rmsd_values:
     target_length=self.get_target_length(id=id)
     rmsd,n=self.get_values(id=id)
     if target_length is not None and n is not None:
-      value=100.*n/max(1.,target_length)
+      value=100.*n/max(1.,target_length if target_length is not None else 0)
       # ZZZ may need to scale by self.used_target/self.total_target
       return value
 
@@ -336,7 +350,6 @@ def get_best_match(xyz1,xyz2,crystal_symmetry=None,
       distance_per_site=distance_per_site)
   else: # do it without symmetry
     (distance,i,j)=xyz1.min_distance_between_any_pair_with_id(xyz2)
-    from libtbx import group_args
     info=group_args(i=i,j=j,distance=distance)
 
   if used_j_list and info.j in used_j_list: # used an atom twice
@@ -421,12 +434,6 @@ def convert_to_reduced_set(sequence,params=None):
       text+=residue_dict.get(x,'V')
     return text
 
-
-def apply_atom_selection(atom_selection,hierarchy=None):
-  asc=hierarchy.atom_selection_cache()
-  sel = asc.selection(string = atom_selection)
-  return hierarchy.deep_copy().select(sel)  # deep copy is required
-  #return hierarchy.select(sel)
 
 def extract_representative_chains_from_hierarchy(ph,
     min_similarity=0.90,
@@ -521,7 +528,8 @@ def seq_it_is_similar_to(seq=None,unique_sequences=None,min_similarity=1.0,
   for s in unique_sequences:
     sim=sequence_similarity().run(seq,s,use_fasta=True,verbose=False)
     if not allow_extensions and len(seq)!=len(s):
-      fract_same=min(len(seq),len(s))/max(len(seq),len(s))
+      fract_same=min(len(seq),len(s))/max(len(seq) if seq is not None else 1,
+        len(s) if s is not None else 1)
       sim=sim*fract_same
     if sim >= min_similarity:
       return s # return the one it is similar to
@@ -605,6 +613,8 @@ def get_matching_ids(unique_seq=None,sequences=None,
 def get_sorted_matching_chains(
    chains=None,
    target_centroid_list=None):
+  if not target_centroid_list:
+    return chains, len(chains)*[0]
   sort_list=[]
   for chain in chains:
     if target_centroid_list:
@@ -648,8 +658,7 @@ def extract_unique_part_of_hierarchy(ph,target_ph=None,
     keep_chain_as_unit=True,
     min_similarity=1.0,out=sys.stdout):
 
-  from mmtbx.secondary_structure.find_ss_from_ca import get_chain_ids
-  starting_chain_id_list=get_chain_ids(ph)
+  starting_chain_id_list=ph.chain_ids()
   if (not keep_chain_as_unit):
     ph=split_chains_with_unique_four_char_id(ph).hierarchy
 
@@ -704,12 +713,12 @@ def extract_unique_part_of_hierarchy(ph,target_ph=None,
   #  take those closest to the target (in that order)
 
   unique_chains=[]
-
   print("Unique set of sequences. Copies of the unique set: %s" %(
       base_copies), file=out)
   print("Copies in unique set ID  sequence", file=out)
   chains_unique=[]
-  for unique_seq in copies_in_unique.keys():
+  keys = sorted(list(copies_in_unique.keys()))
+  for unique_seq in keys:
     matching_ids,matching_chains=get_matching_ids(
       unique_seq=unique_seq,sequences=sequences,chains=chains,
       unique_sequence_dict=unique_sequence_dict)
@@ -746,16 +755,6 @@ def get_chains_with_id(chains,id=None):
       new_chains.append(chain)
   return new_chains
 
-def sort_chains_on_start(chains):
-  sort_list=[]
-  for chain in chains:
-    start=get_first_resno_of_chain(chain)
-    sort_list.append([start,chain])
-  sort_list.sort(key=itemgetter(0))
-  new_chains=[]
-  for start,chain in sort_list:
-    new_chains.append(chain)
-  return new_chains
 
 def get_first_resno_of_chain(chain):
   for rg in chain.residue_groups():
@@ -773,7 +772,7 @@ def sort_chains(chains_unique):
   new_chains=[]
   for chain_id in unique_id_list:
     chains=get_chains_with_id(chains_unique,id=chain_id)
-    chains=sort_chains_on_start(chains)
+    chains = sorted(chains, key = lambda c: get_first_resno_of_chain(c))
     new_chains+=chains
   return new_chains
 
@@ -943,8 +942,9 @@ def write_summary(params=None,file_list=None,rv_list=None,
       print("               ----ALL RESIDUES---  CLOSE RESIDUES ONLY    %", file=out)
       print("     MODEL     --CLOSE-    --FAR-- FORWARD REVERSE MIXED"+\
               " FOUND  CA                  SEQ", file=out)
-      print("               RMSD   N      N       N       N      N  "+\
-              "        SCORE  SEQ MATCH(%)  SCORE  MEAN LENGTH"+"\n", file=out)
+      print("               RMSD   N      N       N       N      N "+\
+     "        SCORE  SEQ MATCH(%)  SCORE  MEAN LENGTH  FRAGMENTS BAD CONNECTIONS"+"\n",
+        file=out)
 
   results_dict={}
   score_list=[]
@@ -952,7 +952,8 @@ def write_summary(params=None,file_list=None,rv_list=None,
     results_dict[full_f]=rv
     (rmsd,n)=rv.get_values('close')
     target_length=rv.get_target_length('close')
-    score=n/(max(1,target_length)*max(0.1,rmsd))
+    score=n/(max(1,target_length if target_length is not None else 0)*max(0.1,rmsd
+       if rmsd is not None else 0))
     score_list.append([score,full_f])
   score_list.sort(key=itemgetter(0))
   score_list.reverse()
@@ -970,11 +971,13 @@ def write_summary(params=None,file_list=None,rv_list=None,
     unaligned_rmsd,unaligned_n=rv.get_values('unaligned')
     match_percent=rv.get_match_percent('close')
     fragments=rv.get_n_fragments('forward')+rv.get_n_fragments('reverse')
-    mean_length=close_n/max(1,fragments)
+    incorrect_connections = rv.incorrect_connections
+    input_fragments = rv.input_fragments
+    mean_length=close_n/max(1,fragments if fragments is not None else 0)
     if full_rows:
-      print("%14s %4.2f %4d   %4d   %4d    %4d    %4d  %5.1f %6.2f   %5.1f      %6.2f  %5.1f" %(file_name,close_rmsd,close_n,far_away_n,forward_n,
+      print("%14s %4.2f %4d   %4d   %4d    %4d    %4d  %5.1f %6.2f   %5.1f      %6.2f  %5.1f %10s %15s" %(file_name,close_rmsd,close_n,far_away_n,forward_n,
          reverse_n,unaligned_n,percent_close,score,match_percent,seq_score,
-         mean_length), file=out)
+         mean_length, input_fragments, incorrect_connections), file=out)
     else:
       print("ID: %14s \nClose rmsd: %4.2f A  (N=%4d)  (Far N=%4d) \n" %(
             file_name,close_rmsd,close_n,far_away_n)+\
@@ -986,7 +989,10 @@ def write_summary(params=None,file_list=None,rv_list=None,
          "Percent matching sequence: %.1f \n" %(
              match_percent)+\
          "Sequence score:  %.2f  Mean match length: %.1f" %(
-               seq_score, mean_length), file=out)
+               seq_score, mean_length) +\
+         "Fragments: %s  Incorrect connections:  %s" %(
+           input_fragments, incorrect_connections),
+           file=out)
 
 def get_target_length(target_chain_ids=None,hierarchy=None,
      target_length_from_matching_chains=None):
@@ -1060,7 +1066,8 @@ def select_segments_that_match(params=None,
     far_away_rmsd,far_away_n=rv.get_values('far_away')
     if close_n+far_away_n<1: continue # wrong chain type or other failure
 
-    percent_matched=100.*close_n/max(1,close_n+far_away_n)
+    percent_matched=100.*close_n/max(1,close_n+far_away_n if
+        close_n is not None and far_away_n is not None else 0)
     if percent_matched < params.comparison.minimum_percent_match_to_select:
       continue
     if percent_matched > params.comparison.maximum_percent_match_to_select:
@@ -1069,9 +1076,25 @@ def select_segments_that_match(params=None,
     write_summary(params=params,file_list=file_list,rv_list=rv_list,
       write_header=write_header,out=out)
     write_header=False
-    models_to_keep.append(cm)
+    models_to_keep.append(group_args(
+      group_args_type = 'model to keep',
+      model = cm,
+      percent_matched = percent_matched,
+      close_n = close_n))
 
-  new_model=merge_hierarchies_from_models(models=models_to_keep,resid_offset=5)
+  if not models_to_keep:
+    print("No matching chains...", file = out)
+    return None
+
+  if params.comparison.only_keep_best_chain:
+    print("Keeping only best chain", file = out)
+    models_to_keep = sorted(models_to_keep, key = lambda m: m.close_n,
+      reverse=True)
+    models_to_keep = models_to_keep[:1]
+  model_list = []
+  for ga in models_to_keep:
+    model_list.append(ga.model)
+  new_model=merge_hierarchies_from_models(models=model_list,resid_offset=5)
   ff=open(params.output_files.match_pdb_file,'w')
   print(new_model.hierarchy.as_pdb_string(), file=ff)
   ff.close()
@@ -1119,6 +1142,69 @@ def get_fragment_count(forward_match_list):
       n+=1
     i_last=i
   return n
+
+
+def get_working_fragment():
+  return group_args(
+    group_args_type = 'working fragment',
+    start_i = None,
+    start_j = None,
+    end_i = None,
+    end_j = None,
+    forward = None,
+    )
+
+def get_incorrect_connections(close_match_list):
+  fragments = []
+  wf = get_working_fragment()
+  fragments.append(wf)
+  for i,j in close_match_list:
+    if wf.start_j is None:
+      wf.start_i = i
+      wf.start_j = j
+      wf.end_i = i
+      wf.end_j = j
+    elif wf.forward in [True, None] and wf.end_j + 1 == j: # forward
+      wf.end_i = i
+      wf.end_j = j
+      wf.forward = True
+    elif wf.forward in [False, None] and wf.end_j - 1 == j: # reverse
+      wf.end_i = i
+      wf.end_j = j
+      wf.forward = False
+    else: # new one
+      wf = get_working_fragment()
+      fragments.append(wf)
+      wf.start_i = i
+      wf.start_j = j
+      wf.end_i = i
+      wf.end_j = j
+  # Remove all fragments of length 1
+  new_fragments = []
+  for wf in fragments:
+    if wf.forward is not None:
+      new_fragments.append(wf)
+  fragments = new_fragments
+  # Incorrect connections are:
+  #    True->False or False-> True
+  #    True->True and end_j does not increase
+  #    False->False and end_j does not decrease
+  incorrect_connections = 0
+  for wf,wf1 in zip(fragments[:-1],fragments[1:]):
+    ok = True
+    if wf.forward != wf1.forward:
+      ok = False
+    if wf.forward and wf1.end_j <= wf.end_j:
+      ok = False
+    if (not wf.forward) and wf1.end_j > wf.end_j:
+      ok = False
+    if not ok:
+      incorrect_connections += 1
+  return incorrect_connections
+
+def get_input_fragments(chain_xyz_cart, distance_per_site = 3.8):
+  gaps = ( (chain_xyz_cart[:-1] - chain_xyz_cart[1:]).norms() > 2 * distance_per_site).count(True)
+  return gaps + 1
 
 def run(args=None,
    ncs_obj=None,
@@ -1223,8 +1309,8 @@ def run(args=None,
       crystal_symmetry=target_pdb_inp.crystal_symmetry_from_cryst1()
     target_hierarchy=target_pdb_inp.construct_hierarchy()
     # remove hetero atoms as they are not relevant
-    chain_hierarchy=apply_atom_selection('not hetero',chain_hierarchy)
-    target_hierarchy=apply_atom_selection('not hetero',target_hierarchy)
+    chain_hierarchy=chain_hierarchy.apply_atom_selection('not hetero')
+    target_hierarchy=target_hierarchy.apply_atom_selection('not hetero')
 
   # get the CA residues
   if chain_type in ["RNA","DNA"]:
@@ -1232,8 +1318,8 @@ def run(args=None,
   else:
     atom_selection="name ca and (not element Ca)"
 
-  chain_hierarchy=apply_atom_selection(atom_selection,chain_hierarchy)
-  target_hierarchy=apply_atom_selection(atom_selection,target_hierarchy)
+  chain_hierarchy=chain_hierarchy.apply_atom_selection(atom_selection)
+  target_hierarchy=target_hierarchy.apply_atom_selection(atom_selection)
 
   # remove alt conformations if necessary
   if params.comparison.remove_alt_conf:
@@ -1352,12 +1438,12 @@ def run(args=None,
   chain_xyz_cart=chain_ca.atoms().extract_xyz()
   target_xyz_cart=target_ca.atoms().extract_xyz()
 
-  if target_xyz_cart.size()<1:
-    print("No suitable atoms in target")
-    return rmsd_values()
-  if chain_xyz_cart.size()<1:
-    print("No suitable atoms in query")
-    return rmsd_values()
+  if target_xyz_cart.size()<1 or chain_xyz_cart.size()<1:
+    print("No suitable atoms in target", file = out)
+    value = rmsd_values()
+    value.n_forward = 0
+    value.n_reverse= 0
+    return value
 
   # for each xyz in chain, figure out closest atom in target and dist
   best_i=None
@@ -1365,6 +1451,7 @@ def run(args=None,
   best_pair=None
   pair_list=[]
   from scitbx.array_family import flex
+  input_fragments = get_input_fragments(chain_xyz_cart, distance_per_site = distance_per_site)
   chain_xyz_fract=crystal_symmetry.unit_cell().fractionalize(chain_xyz_cart)
   target_xyz_fract=crystal_symmetry.unit_cell().fractionalize(target_xyz_cart)
   far_away_match_list=[]
@@ -1463,6 +1550,8 @@ def run(args=None,
       last_i=i
       last_j=j
 
+  incorrect_connections = get_incorrect_connections(close_match_list)
+
   if n_forward==n_reverse==0:
     direction='none'
   elif n_forward>= n_reverse:
@@ -1474,6 +1563,9 @@ def run(args=None,
      direction,n_forward,n_reverse,chain_xyz_fract.size()), file=out)
 
   rv=rmsd_values(params=params)
+  rv.add_incorrect_connections(incorrect_connections)
+  rv.add_input_fragments(input_fragments)
+
 
   id='forward'
   if forward_match_rmsd_list.size():
@@ -1513,79 +1605,79 @@ def run(args=None,
   n=len(far_away_match_list)
   rv.add_rmsd(id=id,rmsd=rmsd,n=n)
 
-  if not quiet:
+  if verbose and not quiet:
+    print("Total CA: %d  Too far to match: %d " %(
+      chain_xyz_fract.size(),len(far_away_match_list)), file=out)
+
+  rmsd,n=rv.get_values(id='forward')
+  if n and not quiet:
+    print("\nResidues matching in forward direction:   %4d  RMSD: %6.2f" %(
+       n,rmsd), file=out)
     if verbose:
-      print("Total CA: %d  Too far to match: %d " %(
-        chain_xyz_fract.size(),len(far_away_match_list)), file=out)
+      for i,j in forward_match_list:
+        print("ID:%d:%d  RESIDUES:  \n%s\n%s" %( i,j, chain_ca_lines[i],
+         target_xyz_lines[j]), file=out)
 
-    rmsd,n=rv.get_values(id='forward')
-    if n:
-      print("\nResidues matching in forward direction:   %4d  RMSD: %6.2f" %(
-         n,rmsd), file=out)
-      if verbose:
-        for i,j in forward_match_list:
-          print("ID:%d:%d  RESIDUES:  \n%s\n%s" %( i,j, chain_ca_lines[i],
-           target_xyz_lines[j]), file=out)
+  rmsd,n=rv.get_values(id='reverse')
+  if n and not quiet:
+    print("Residues matching in reverse direction:   %4d  RMSD: %6.2f" %(
+       n,rmsd), file=out)
+    if verbose:
+      for i,j in reverse_match_list:
+        print("ID:%d:%d  RESIDUES:  \n%s\n%s" %(
+         i,j, chain_ca_lines[i],
+         target_xyz_lines[j]), file=out)
 
-    rmsd,n=rv.get_values(id='reverse')
-    if n:
-      print("Residues matching in reverse direction:   %4d  RMSD: %6.2f" %(
-         n,rmsd), file=out)
-      if verbose:
-        for i,j in reverse_match_list:
-          print("ID:%d:%d  RESIDUES:  \n%s\n%s" %(
-           i,j, chain_ca_lines[i],
-           target_xyz_lines[j]), file=out)
+  rmsd,n=rv.get_values(id='unaligned')
+  if n and not quiet:
+    print("Residues near but not matching one-to-one:%4d  RMSD: %6.2f" %(
+       n,rmsd), file=out)
+    if verbose:
+      for i,j in unaligned_match_list:
+        print("ID:%d:%d  RESIDUES:  \n%s\n%s" %(i,j, chain_ca_lines[i],
+          target_xyz_lines[j]), file=out)
 
-    rmsd,n=rv.get_values(id='unaligned')
-    if n:
-      print("Residues near but not matching one-to-one:%4d  RMSD: %6.2f" %(
-         n,rmsd), file=out)
-      if verbose:
-        for i,j in unaligned_match_list:
-          print("ID:%d:%d  RESIDUES:  \n%s\n%s" %(i,j, chain_ca_lines[i],
-            target_xyz_lines[j]), file=out)
+  rmsd,n=rv.get_values(id='close')
+  if n:
+    lines_chain_ca=[]
+    lines_target_xyz=[]
+    for i,j in close_match_list:
+      lines_chain_ca.append(chain_ca_lines[i])
+      lines_target_xyz.append(target_xyz_lines[j])
+    seq_chain_ca=get_seq_from_lines(lines_chain_ca)
+    seq_target_xyz=get_seq_from_lines(lines_target_xyz)
+    target_chain_ids=get_chains_from_lines(lines_target_xyz)
+    target_length=get_target_length(target_chain_ids=target_chain_ids,
+      hierarchy=target_ca,
+      target_length_from_matching_chains=target_length_from_matching_chains)
+    rv.add_target_length(id='close',target_length=target_length)
 
-    rmsd,n=rv.get_values(id='close')
-    if n:
-      lines_chain_ca=[]
-      lines_target_xyz=[]
-      for i,j in close_match_list:
-        lines_chain_ca.append(chain_ca_lines[i])
-        lines_target_xyz.append(target_xyz_lines[j])
-      seq_chain_ca=get_seq_from_lines(lines_chain_ca)
-      seq_target_xyz=get_seq_from_lines(lines_target_xyz)
-      target_chain_ids=get_chains_from_lines(lines_target_xyz)
-      target_length=get_target_length(target_chain_ids=target_chain_ids,
-        hierarchy=target_ca,
-        target_length_from_matching_chains=target_length_from_matching_chains)
-      rv.add_target_length(id='close',target_length=target_length)
+    if verbose and not quiet:
+       print("SEQ1:",seq_chain_ca,len(lines_chain_ca))
+       print("SEQ2:",seq_target_xyz,len(lines_target_xyz))
 
-      if verbose:
-         print("SEQ1:",seq_chain_ca,len(lines_chain_ca))
-         print("SEQ2:",seq_target_xyz,len(lines_target_xyz))
+    match_n,match_percent=get_match_percent(seq_chain_ca,seq_target_xyz,
+      params=params)
+    rv.add_match_percent(id='close',match_percent=match_percent)
 
-      match_n,match_percent=get_match_percent(seq_chain_ca,seq_target_xyz,
-        params=params)
-      rv.add_match_percent(id='close',match_percent=match_percent)
+    percent_close=rv.get_close_to_target_percent('close')
 
-      percent_close=rv.get_close_to_target_percent('close')
-
+    if not quiet:
       print("\nAll residues near target: "+\
-         "%4d  RMSD: %6.2f Seq match (%%):%5.1f  %% Found: %5.1f" %(
-         n,rmsd,match_percent,percent_close), file=out)
+       "%4d  RMSD: %6.2f Seq match (%%):%5.1f  %% Found: %5.1f" %(
+       n,rmsd,match_percent,percent_close), file=out)
       if verbose:
         for i,j in close_match_list:
           print("ID:%d:%d  RESIDUES:  \n%s\n%s" %(i,j, chain_ca_lines[i],
             target_xyz_lines[j]), file=out)
 
-    rmsd,n=rv.get_values(id='far_away')
-    if n:
-      print("Residues far from target: %4d " %(
-         n), file=out)
-      if verbose:
-        for i in far_away_match_list:
-          print("ID:%d  RESIDUES:  \n%s" %(i,chain_ca_lines[i]), file=out)
+  rmsd,n=rv.get_values(id='far_away')
+  if n and not quiet:
+    print("Residues far from target: %4d " %(
+       n), file=out)
+    if verbose:
+      for i in far_away_match_list:
+        print("ID:%d  RESIDUES:  \n%s" %(i,chain_ca_lines[i]), file=out)
 
   rv.n_forward=n_forward
   rv.n_reverse=n_reverse

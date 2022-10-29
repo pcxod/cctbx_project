@@ -59,7 +59,7 @@ class manager(object):
     if params.den.optimize:
       grid = den_manager.get_optimization_grid()
       print("Running DEN torsion optimization on %d processors..." % \
-        params.main.nproc, file=log)
+        self.nproc, file=log)
     else:
       grid = [(params.den.gamma, params.den.weight)]
     grid_results = []
@@ -78,7 +78,7 @@ class manager(object):
           if (r is None):
             raise RuntimeError(("DEN weight optimization failed:"+
               "\n%s\nThis is a "+
-              "serious error; please contact bugs@phenix-online.org.") % so)
+              "serious error; please contact help@phenix-online.org.") % so)
           grid_so.append(so)
           grid_results.append(r)
       else:
@@ -100,7 +100,7 @@ class manager(object):
           if (r is None):
             raise RuntimeError(("DEN weight optimization failed:"+
               "\n%s\nThis is a "+
-              "serious error; please contact bugs@phenix-online.org.") % so)
+              "serious error; please contact help@phenix-online.org.") % so)
           grid_so.append(so)
           grid_results.append(r)
       else:

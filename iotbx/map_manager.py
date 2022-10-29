@@ -268,6 +268,9 @@ class map_manager(map_reader, write_ccp4_map):
     # Initialize that this is not a mask
     self._is_mask = False
 
+    # Initialize that this is not a dummy map_manager
+    self._is_dummy_map_manager = False
+
     # Initialize program_name, limitations, labels
     self.file_name = file_name # input file (source of this manager)
     self.program_name = None  # Name of program using this manager
@@ -367,6 +370,8 @@ class map_manager(map_reader, write_ccp4_map):
       self.log = sys.stdout
 
   def __repr__(self):
+    if self.is_dummy_map_manager():
+      return "Dummy map_manager"
     text = "Map manager (from %s)" %(self.file_name)+\
         "\n%s, \nUnit-cell grid: %s, (present: %s), origin shift %s " %(
       str(self.unit_cell_crystal_symmetry()).replace("\n"," "),
@@ -515,6 +520,10 @@ class map_manager(map_reader, write_ccp4_map):
        if not self.is_full_size():
          self.set_wrapping(False)
 
+  def is_dummy_map_manager(self):
+    ''' Is this a dummy map manager'''
+    return self._is_dummy_map_manager
+
   def is_mask(self):
     ''' Is this a mask '''
     return self._is_mask
@@ -585,7 +594,8 @@ class map_manager(map_reader, write_ccp4_map):
 
     # If there is an associated ncs_object, shift it too
     if self._ncs_object:
-      self._ncs_object=self._ncs_object.coordinate_offset(shift_info.shift_to_apply_cart)
+      self._ncs_object=self._ncs_object.coordinate_offset(
+        shift_info.shift_to_apply_cart)
 
   def _get_shift_info(self, desired_origin = None):
     '''
@@ -647,9 +657,11 @@ class map_manager(map_reader, write_ccp4_map):
   def set_ncs_object(self, ncs_object):
     '''
       set the ncs object for this map_manager.  Incoming ncs_object must
-     be compatible (shift_cart values must match).  Incoming ncs_object is
-     deep_copied.
+     be compatible (shift_cart values must match or be defined).
+      Incoming ncs_object is deep_copied.
     '''
+    if not ncs_object:
+      return # Nothing to do
     assert isinstance(ncs_object, mmtbx.ncs.ncs.ncs)
     if (not self.is_compatible_ncs_object(ncs_object)):
       self.shift_ncs_object_to_match_map(ncs_object)
@@ -840,7 +852,8 @@ class map_manager(map_reader, write_ccp4_map):
     self._created_mask = cm(map_manager = self,
       boundary_radius = boundary_radius)
 
-  def create_mask_around_atoms(self, model, mask_atoms_atom_radius = None):
+  def create_mask_around_atoms(self, model, mask_atoms_atom_radius = None,
+      invert_mask = None):
     '''
       Use cctbx.maptbx.mask.create_mask_around_atoms to create a mask around
       atoms in model
@@ -848,6 +861,8 @@ class map_manager(map_reader, write_ccp4_map):
       Does not apply the mask (use apply_mask_to_map etc for that)
 
       mask_atoms_atom_radius default is max(3, resolution)
+
+      invert_mask makes outside 1 and inside 0
     '''
 
     assert model is not None
@@ -857,7 +872,8 @@ class map_manager(map_reader, write_ccp4_map):
     from cctbx.maptbx.mask import create_mask_around_atoms as cm
     self._created_mask = cm(map_manager = self,
       model = model,
-      mask_atoms_atom_radius = mask_atoms_atom_radius)
+      mask_atoms_atom_radius = mask_atoms_atom_radius,
+      invert_mask = invert_mask)
 
   def soft_mask(self, soft_mask_radius = None):
     '''
@@ -916,7 +932,7 @@ class map_manager(map_reader, write_ccp4_map):
 
   def as_full_size_map(self):
     '''
-      Create a full-size map that with the current map inside it, padded by zero
+      Create a full-size map with the current map inside it, padded by zero
 
       A little tricky because the starting map is going to have its origin at
       (0, 0, 0) but the map we are creating will have that point at
@@ -935,13 +951,13 @@ class map_manager(map_reader, write_ccp4_map):
     full_size_minus_working=subtract_tuples_int(self.unit_cell_grid,
       self.map_data().all())
 
-    # Must not be bigger than full size already
-    assert flex.double(full_size_minus_working).min_max_mean().min >= 0
 
-    if full_size_minus_working == (0, 0, 0): # Exactly full size already. Done
+    if full_size_minus_working in [(-1,-1,-1),(0, 0, 0)]: # Exactly full size already. Done
       assert self.origin_shift_grid_units == (0, 0, 0)
       assert self.map_data().origin() == (0, 0, 0)
       return self
+    # Must not be bigger than full size already
+    assert flex.double(full_size_minus_working).min_max_mean().min >= -1
     working_lower_bounds = self.origin_shift_grid_units
     working_upper_bounds = tuple([i+j-1 for i, j in zip(working_lower_bounds,
       self.map_data().all())])
@@ -998,10 +1014,27 @@ class map_manager(map_reader, write_ccp4_map):
     assert isinstance(sites_cart, flex.vec3_double)
 
     from cctbx.maptbx import real_space_target_simple_per_site
-    return real_space_target_simple_per_site(
+    density_values = real_space_target_simple_per_site(
       unit_cell = self.crystal_symmetry().unit_cell(),
       density_map = self.map_data(),
       sites_cart = sites_cart)
+
+    # Cross off anything outside the box if wrapping is false
+    if not self.wrapping():
+      sites_frac = self.crystal_symmetry().unit_cell().fractionalize(sites_cart)
+      x,y,z = sites_frac.parts()
+      s = (
+         (x < 0) |
+         (y < 0) |
+         (z < 0) |
+         (x > 1) |
+         (y > 1) |
+         (z > 1)
+         )
+      density_values.set_selected(s,0)
+    return density_values
+
+
 
   def get_density_along_line(self,
       start_site = None,
@@ -1342,12 +1375,14 @@ class map_manager(map_reader, write_ccp4_map):
     if self._resolution is not None and (not force):
       return self._resolution
 
+
     assert method in ['d99','d9','d999','d_min']
 
 
     working_resolution = -1 # now get it
 
-    if method in ['d99','d9','d999']:
+    if method in ['d99','d9','d999'] and \
+        self.map_data().count(0) != self.map_data().size():
       from cctbx.maptbx import d99
       if self.origin_is_zero():
         map_data = self.map_data()
@@ -1540,6 +1575,12 @@ class map_manager(map_reader, write_ccp4_map):
 
     return True
 
+  def cart_to_grid_units(self, xyz):
+
+    return tuple([int(0.5 + x * n) for x,n in
+       zip(self.crystal_symmetry().unit_cell().fractionalize(xyz),
+        self.map_data().all())])
+
   def grid_units_to_cart(self, grid_units):
     ''' Convert grid units to cartesian coordinates '''
     x = grid_units[0]/self.unit_cell_grid[0]
@@ -1567,9 +1608,10 @@ class map_manager(map_reader, write_ccp4_map):
     if ncs_object.shift_cart():
       offset = tuple(
         [s - n for s, n in zip(self.shift_cart(), ncs_object.shift_cart())])
-      ncs_object.coordinate_shift(offset)
+      ncs_object = ncs_object.coordinate_offset(offset)
+
     else:
-      ncs_object.coordinate_shift(self.shift_cart())
+      ncs_object = ncs_object.coordinate_offset(self.shift_cart())
 
   def shift_model_to_match_map(self, model):
     '''
@@ -1592,7 +1634,7 @@ class map_manager(map_reader, write_ccp4_map):
       Modifies ncs_object in place
 
       Do not use this to try to shift the ncs object. That is done in
-      the ncs object itself with ncs_object.coordinate_shift(shift_cart)
+      the ncs object itself with ncs_object.coordinate_offset(shift_cart)
     '''
 
     # Set shift_cart (shift since readin) to match shift_cart for
@@ -1628,8 +1670,16 @@ class map_manager(map_reader, write_ccp4_map):
          model.shift_model_and_set_crystal_symmetry(shift_cart=shift_cart)
     '''
     # Check if we really need to do anything
-    if self.is_compatible_model(model):
+    if not model:
+      return # nothing to do
+
+    if self.is_compatible_model(model,
+       require_match_unit_cell_crystal_symmetry = True):
       return # already fine
+
+    if model.shift_cart() is not None and tuple(model.shift_cart()) != (0,0,0):
+      # remove shift_cart
+      model.set_shift_cart((0,0,0))
 
     # Set crystal_symmetry to match map. This changes the xray_structure.
     model.set_crystal_symmetry(self.crystal_symmetry())
@@ -1683,7 +1733,8 @@ class map_manager(map_reader, write_ccp4_map):
       model crystal_symmetry to match the map ones.
 
       If require_match_unit_cell_crystal_symmetry is True, then they are
-      different if anything is different
+      different if anything is different. If it is False, allow original
+       symmetries do not have to match
     '''
 
     ok=None
@@ -1697,18 +1748,31 @@ class map_manager(map_reader, write_ccp4_map):
     map_uc=self.unit_cell_crystal_symmetry()
     map_sym=self.crystal_symmetry()
 
-    if not require_match_unit_cell_crystal_symmetry and \
-        model_uc and model_sym and model_uc.is_similar_symmetry(model_sym):
+    model_uc = model_uc if model_uc and model_uc.unit_cell() is not None else None
+    model_sym = model_sym if model_sym and model_sym.unit_cell() is not None else None
+    map_uc = map_uc if map_uc and map_uc.unit_cell() is not None else None
+    map_sym = map_sym if map_sym and map_sym.unit_cell() is not None else None
+
+
+    if (not require_match_unit_cell_crystal_symmetry) and \
+        (model_uc and model_sym and model_uc.is_similar_symmetry(model_sym)):
       # Ignore the model_uc because it may or may not have come from
       # model_sym
       model_uc = None
+
+    if (not require_match_unit_cell_crystal_symmetry) and \
+        (map_uc and map_sym and map_uc.is_similar_symmetry(map_sym)):
+      # Ignore the map_uc because it may or may not have come from
+      # map_sym
+      map_uc = None
 
     text_model_uc=str(model_uc).replace("\n"," ")
     text_model=str(model_sym).replace("\n"," ")
     text_map_uc=str(map_uc).replace("\n"," ")
     text_map=str(map_sym).replace("\n"," ")
 
-    if require_match_unit_cell_crystal_symmetry and (not model_uc) and (
+    if require_match_unit_cell_crystal_symmetry and map_uc and (
+      not model_uc) and (
        not map_sym.is_similar_symmetry(map_uc,
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,
@@ -1722,9 +1786,13 @@ class map_manager(map_reader, write_ccp4_map):
         "\n%s\n. Current map symmetry is: \n%s\n " %(
          text_map_uc,text_map)
 
-    elif  model_uc and (not map_uc.is_similar_symmetry(map_sym,
+    elif  model_uc and map_uc and (
+        (not map_uc.is_similar_symmetry(map_sym,
         absolute_angle_tolerance = absolute_angle_tolerance,
-        absolute_length_tolerance = absolute_length_tolerance,
+        absolute_length_tolerance = absolute_length_tolerance,))
+         or (not model_uc.is_similar_symmetry(model_sym,
+        absolute_angle_tolerance = absolute_angle_tolerance,
+        absolute_length_tolerance = absolute_length_tolerance,))
          ) and (
          (not model_uc.is_similar_symmetry(map_uc,
         absolute_angle_tolerance = absolute_angle_tolerance,
@@ -1733,14 +1801,14 @@ class map_manager(map_reader, write_ccp4_map):
          (not model_sym.is_similar_symmetry(map_sym,
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,
-         ) ) )):
+         ) ) ):
        ok=False# model and map_manager symmetries present and do not match
        text="Model original symmetry: \n%s\n and current symmetry :\n%s\n" %(
           text_model_uc,text_model)+\
           "do not match map unit_cell symmetry:"+\
          " \n%s\n and map current symmetry: \n%s\n symmetry" %(
            text_map_uc,text_map)
-    elif model_sym and (not model_sym.is_similar_symmetry(map_uc,
+    elif model_sym and map_uc and (not model_sym.is_similar_symmetry(map_uc,
         absolute_angle_tolerance = absolute_angle_tolerance,
         absolute_length_tolerance = absolute_length_tolerance,
         )) and (not
@@ -1798,13 +1866,16 @@ class map_manager(map_reader, write_ccp4_map):
        return self._warning_message
 
   def set_mean_zero_sd_one(self):
-    ''' Function to normalize the map '''
+    '''
+     Function to normalize the map
+     If the map has a constant value, do nothing
+    '''
     map_data = self.map_data()
     map_data = map_data - flex.mean(map_data)
     sd = map_data.sample_standard_deviation()
-    assert sd != 0
-    map_data = map_data/sd
-    self.set_map_data(map_data)
+    if sd is not None and sd != 0:
+      map_data = map_data/sd
+      self.set_map_data(map_data)
 
   def ncs_cc(self):
     if hasattr(self,'_ncs_cc'):
@@ -1972,10 +2043,91 @@ class map_manager(map_reader, write_ccp4_map):
       self._warning_message = "No map symmetry found; ncs_cc cutoff of %s" %(
         min_ncs_cc)
 
-  def resample_on_different_grid(self, n_real):
+  def _resample_on_different_grid_and_rebox(self, n_real = None,
+       target_grid_spacing = None):
+    '''
+      Resample the boxed map on a grid of n_real and return new map_manager
+      If an ncs_object is present, set its shift_cart too
+
+      Returns new boxed map of similar size
+      and location
+    '''
+
+    # Get starting lower and upper bounds (current map)
+    lower_bounds_cart = self.grid_units_to_cart(self.origin_shift_grid_units)
+    upper_bounds_cart = self.grid_units_to_cart(
+     [o + a for o,a in zip(self.origin_shift_grid_units,
+       self.map_data().all())]
+     )
+
+    # Determine if box is cubic
+    box_dims = self.map_data().all()
+    is_cubic_box = (box_dims[0] == box_dims[1]) and (box_dims[0] == box_dims[2])
+
+    # Save NCS object if any and current shift_cart
+    if self.ncs_object():
+      working_ncs_object = self.ncs_object().deep_copy()
+    else:
+      working_ncs_object = None
+    working_shift_cart = self.shift_cart()
+
+    # Create full size map so that we can work easily
+    mm_boxed_fs = self.as_full_size_map()
+    mm_boxed_fs.set_ncs_object(working_ncs_object)
+
+    assert tuple(mm_boxed_fs.origin_shift_grid_units) == (0,0,0)
+
+    # Resample the full size map on new grid
+    mm_boxed_fs_resample = mm_boxed_fs.resample_on_different_grid(
+       n_real = n_real,
+       target_grid_spacing = target_grid_spacing)
+
+    # Now rebox the newly-gridded map
+
+    # New bounds
+    lower_bounds = mm_boxed_fs_resample.cart_to_grid_units(lower_bounds_cart)
+    upper_bounds = mm_boxed_fs_resample.cart_to_grid_units(upper_bounds_cart)
+    if is_cubic_box:
+      box_dims = [1 + a - b for a,b in zip (upper_bounds,lower_bounds)]
+      min_dim = min(box_dims)
+      max_dim = max(box_dims)
+      if min_dim != max_dim: # make them the same
+       new_upper_bounds = []
+       for lb, ub in zip(lower_bounds, upper_bounds):
+         new_upper_bounds.append(lb + min_dim - 1)
+       upper_bounds = new_upper_bounds
+      box_dims = [1 + a - b for a,b in zip (upper_bounds,lower_bounds)]
+      assert min(box_dims) == max(box_dims)
+    mmm_boxed_fs_resample = mm_boxed_fs_resample.as_map_model_manager()
+
+    mmm_boxed_fs_resample_boxed = \
+      mmm_boxed_fs_resample.extract_all_maps_with_bounds(
+        lower_bounds=lower_bounds, upper_bounds=upper_bounds)
+    return mmm_boxed_fs_resample_boxed.map_manager()
+
+  def resample_on_different_grid(self, n_real = None,
+       target_grid_spacing = None):
     '''
       Resample the map on a grid of n_real and return new map_manager
+      If an ncs_object is present, set its shift_cart too
+
+      Allows map to be boxed; if so returns new boxed map of similar size
+      and location.  If boxed map has cubic gridding, keep that after
+      resampling.
     '''
+
+    assert n_real or target_grid_spacing
+
+    if self.origin_shift_grid_units != (0,0,0):
+      return self._resample_on_different_grid_and_rebox(n_real = n_real,
+       target_grid_spacing = target_grid_spacing)
+
+    if n_real is None:
+      n_real = []
+      for a, nn in zip(self.crystal_symmetry().unit_cell().parameters()[:3],
+         self.map_data().all()):
+        new_n = int (0.5+ a/target_grid_spacing)
+        n_real.append( new_n)
 
     original_n_real = self.map_data().all()
     original_shift_cart = self.shift_cart()
@@ -1988,42 +2140,25 @@ class map_manager(map_reader, write_ccp4_map):
         n_real           = n_real)
 
 
-    # Can have an origin shift if grid units are a multiple of original
+    new_origin_shift_grid_units = (0,0,0)
 
-    if original_origin_shift_grid_units != (0,0,0):
-      new_origin_shift_grid_units = []
-      for i in range(3):
-
-        if n_real[i]  > original_n_real[i]:
-          if original_n_real[i] * (n_real[i]//original_n_real[i]) != n_real[i]:
-            raise Sorry(
-             "Cannot resample with origin shift unless new gridding is" +
-             " a multiple of original")
-        elif n_real[i] == original_n_real[i]:
-          pass
-        else:
-          if n_real[i] * (original_n_real[i]//n_real[i]) != original_n_real[i]:
-            raise Sorry(
-             "Cannot resample with origin shift unless new gridding is" +
-             " a multiple of original")
-
-        new_origin_shift_grid_units.append(original_origin_shift_grid_units[i]
-           * (n_real[i]//original_n_real[i]))
-
+    if self.ncs_object():
+      new_ncs_object = self.ncs_object().deep_copy()
+      new_ncs_object.set_shift_cart(self.shift_cart())
     else:
-      new_origin_shift_grid_units = (0,0,0)
-
-    return map_manager(
+      new_ncs_object = None
+    mm = map_manager(
       map_data = map_data,
       unit_cell_grid = n_real,
       unit_cell_crystal_symmetry = map_coeffs.crystal_symmetry(),
       origin_shift_grid_units = new_origin_shift_grid_units,
-      ncs_object = self.ncs_object(),
+      ncs_object = new_ncs_object,
       wrapping = self.wrapping(),
       experiment_type = self.experiment_type(),
       scattering_table = self.scattering_table(),
       resolution = self.resolution(),
      )
+    return mm
 
   def get_boxes_to_tile_map(self,
      target_for_boxes = 24,
@@ -2082,7 +2217,7 @@ class map_manager(map_reader, write_ccp4_map):
       n_real.append(int(target_n + 0.999))
     return n_real
 
-  def find_n_highest_grid_points_as_sites_cart(self, n = None,
+  def find_n_highest_grid_points_as_sites_cart(self, n = 0,
     n_tolerance = 0, max_tries = 100):
     '''
       Return the n highest grid points in the map as sites_cart
@@ -2091,12 +2226,13 @@ class map_manager(map_reader, write_ccp4_map):
     # Find threshold to get exactly n points
     low_bounds = 0.
     high_bounds = 20
-    self.set_mean_zero_sd_one()
+    mm = self.deep_copy()
+    mm.set_mean_zero_sd_one() # avoid altering the working map
     tries = 0
 
     # Check ends
-    count_high = (self.map_data() >= high_bounds).count(True)
-    count_low = (self.map_data() >=  low_bounds).count(True)
+    count_high = (mm.map_data() >= high_bounds).count(True)
+    count_low = (mm.map_data() >=  low_bounds).count(True)
     if count_low < n or count_high > n:
       return flex.vec3_double()
 
@@ -2104,7 +2240,7 @@ class map_manager(map_reader, write_ccp4_map):
     while tries < max_tries:
       tries += 1
       threshold = 0.5 * (low_bounds + high_bounds)
-      count = (self.map_data() >= threshold ).count(True)
+      count = (mm.map_data() >= threshold ).count(True)
       if count == n or low_bounds == high_bounds or threshold == last_threshold:
         break
       elif count > n:
@@ -2115,10 +2251,10 @@ class map_manager(map_reader, write_ccp4_map):
     if abs (count - n ) > n_tolerance:
       return flex.vec3_double()
     # Now convert to xyz and we are done
-    sel = (self.map_data() >= threshold )
+    sel = (mm.map_data() >= threshold )
     from scitbx.array_family.flex import grid
-    g = grid(self.map_data().all())
-    mask_data = flex.int(self.map_data().size(),0)
+    g = grid(mm.map_data().all())
+    mask_data = flex.int(mm.map_data().size(),0)
     mask_data.reshape(g)
     mask_data.set_selected(sel,1)
     mask_data.set_selected(~sel,0)
@@ -2130,10 +2266,9 @@ class map_manager(map_reader, write_ccp4_map):
       mask = mask_data,
       volumes = volume_list,
       sampling_rates = sampling_rates,
-      unit_cell = self.crystal_symmetry().unit_cell())
+      unit_cell = mm.crystal_symmetry().unit_cell())
 
     return sample_regs_obj.get_array(1)
-
 
   def trace_atoms_in_map(self,
        dist_min,
@@ -2148,14 +2283,20 @@ class map_manager(map_reader, write_ccp4_map):
      n_real = self.get_n_real_for_grid_spacing(grid_spacing = dist_min)
      # temporarily remove origin shift information so we can resample
      origin_shift_grid_units_sav = tuple(self.origin_shift_grid_units)
+     if self.ncs_object():
+       assert tuple(self.ncs_object().shift_cart()) == tuple(
+         self.shift_cart())
+       self.ncs_object().set_shift_cart((0,0,0))
      self.origin_shift_grid_units = (0,0,0)
      working_map_manager = self.resample_on_different_grid(n_real = n_real)
      self.origin_shift_grid_units = origin_shift_grid_units_sav
+     if self.ncs_object():
+       self.ncs_object().set_shift_cart(self.shift_cart())
      return working_map_manager.find_n_highest_grid_points_as_sites_cart(
           n = n_atoms)
 
-  def map_as_fourier_coefficients(self, d_min = None,
-     d_max = None):
+  def map_as_fourier_coefficients(self, d_min = None, d_max = None, box=True,
+     resolution_factor=1./3):
     '''
        Convert a map to Fourier coefficients to a resolution of d_min,
        if d_min is provided, otherwise box full of map coefficients
@@ -2171,18 +2312,39 @@ class map_manager(map_reader, write_ccp4_map):
        map_data and
        map_coefficients without changing origin.  Both are intended for use
        with map_data that has an origin at (0, 0, 0).
+
+       The map coefficients are always in space group P1.
     '''
     assert self.map_data()
     assert self.map_data().origin() == (0, 0, 0)
+    # Choose d_min and make sure it is bigger than smallest allowed
+    if(d_min is None and not box):
+      d_min = maptbx.d_min_from_map(
+        map_data  = self.map_data(),
+        unit_cell = self.crystal_symmetry().unit_cell(),
+        resolution_factor = resolution_factor)
+      print("\nResolution of map coefficients using "+\
+        "resolution_factor of %.2f: %.1f A\n" %(resolution_factor, d_min),
+        file=self.log)
+    elif (not box):  # make sure d_min is big enough
+      d_min_allowed = maptbx.d_min_from_map(
+        map_data  = self.map_data(),
+        unit_cell = self.crystal_symmetry().unit_cell(),
+        resolution_factor = 0.5)
+      if d_min < d_min_allowed:
+        print("\nResolution of map coefficients allowed by gridding is %.3f " %(
+          d_min_allowed),file=self.log)
+        d_min=d_min_allowed
+    from cctbx import crystal
+    crystal_symmetry = crystal.symmetry(
+      self.crystal_symmetry().unit_cell().parameters(), 1)
     ma = miller.structure_factor_box_from_map(
-      crystal_symmetry = self.crystal_symmetry(),
+      crystal_symmetry = crystal_symmetry,
       include_000      = True,
       map              = self.map_data(),
-      d_min            = d_min )
-    if d_max is not None:
-      ma=ma.resolution_filter(d_min = d_min, d_max = d_max)
-      # NOTE: miller array resolution_filter produces a new array.
-      # Methods in map_manager that are _filter() change the existing array.
+      d_min            = d_min)
+    if(d_max is not None):
+      ma = ma.resolution_filter(d_max = d_max)
     return ma
 
   def fourier_coefficients_as_map_manager(self, map_coeffs):
@@ -2205,7 +2367,7 @@ class map_manager(map_reader, write_ccp4_map):
     return self.customized_copy(
       map_data=maptbx.map_coefficients_to_map(
         map_coeffs       = map_coeffs,
-        crystal_symmetry = self.crystal_symmetry(),
+        crystal_symmetry = map_coeffs.crystal_symmetry(),
         n_real           = self.map_data().all())
       )
 
@@ -2444,6 +2606,23 @@ class shift_aware_rt:
 
     return shift_aware_rt(absolute_rt_info = inverse_absolute_rt_info)
 
+
+def dummy_map_manager(crystal_symmetry, n_grid = 12):
+  '''
+   Make a map manager with crystal symmetry and unit sized map
+  '''
+
+  map_data = flex.double(n_grid*n_grid*n_grid,1)
+  acc = flex.grid((n_grid, n_grid, n_grid))
+  map_data.reshape(acc)
+  mm = map_manager(
+    map_data = map_data,
+    unit_cell_grid = (n_grid, n_grid, n_grid),
+    unit_cell_crystal_symmetry = crystal_symmetry,
+    wrapping = False)
+  mm.set_resolution(min(crystal_symmetry.unit_cell().parameters()[:3])/n_grid)
+  mm._is_dummy_map_manager = True
+  return mm
 
 
 def get_indices_from_index(index = None, all = None):

@@ -22,11 +22,8 @@ class xray_structure_plus(object):
   def __init__(self, file_name):
     log = StringIO()
     pdb_inp = iotbx.pdb.input(file_name=file_name)
-    self.model = mmtbx.model.manager(
-        model_input = pdb_inp,
-        pdb_interpretation_params = full_params,
-        process_input = True,
-        log = log)
+    self.model = mmtbx.model.manager(model_input = pdb_inp, log = log)
+    self.model.process(pdb_interpretation_params = full_params)
     self.xray_structure = self.model.get_xray_structure()
     uc = self.model.get_xray_structure().unit_cell()
     self.occ           = self.xray_structure.scatterers().extract_occupancies()
@@ -473,7 +470,8 @@ occupancies
 }
 }
 """
-  open("params", "w").write(params)
+  with open("params", "w") as f:
+    f.write(params)
   cmd = 'phenix.pdbtools exercise_multiple.pdb params'
   print(cmd)
   result = run_command(command=cmd, verbose=False)
@@ -517,13 +515,17 @@ END
   print(cmd)
   run_command(command=cmd, verbose=False)
   lines1 = []
-  for line in open("exercise_no_cryst1.pdb","r").readlines():
+  with open("exercise_no_cryst1.pdb","r") as f:
+    lines = f.readlines()
+  for line in lines:
     line = line.strip()
     assert line.count("CRYST1") == 0
     if(line.startswith("ATOM") or line.startswith("HETATM")):
       lines1.append(line)
   lines2 = []
-  for line in open("exercise_no_cryst1_modified.pdb","r").readlines():
+  with open("exercise_no_cryst1_modified.pdb","r") as f:
+    lines = f.readlines()
+  for line in lines:
     line = line.strip()
     assert line.count("CRYST1") == 0
     if(line.startswith("ATOM") or line.startswith("HETATM")):
@@ -571,7 +573,8 @@ def exercise_set_charge():
 ATOM      1  CL  CL  X   1       0.000   0.000   0.000  1.00 20.00          CL
 END
 """
-  open("tmp_cl.pdb", "w").write(input_pdb)
+  with open("tmp_cl.pdb", "w") as f:
+    f.write(input_pdb)
   cmd='phenix.pdbtools tmp_cl.pdb charge_selection="element Cl" charge=-1'
   print(cmd)
   run_command(command=cmd, verbose=False)
@@ -617,11 +620,14 @@ ATOM     12  O   LEU C   1       5.613  12.448   6.864  1.00  7.32           O
 TER
 """
   ifn = "exercise_renumber_residues.pdb"
-  open(ifn,"w").write(input_pdb)
+  with open(ifn,"w") as f:
+    f.write(input_pdb)
   cmd = 'phenix.pdbtools "%s" renumber_residues=true'%ifn
   print(cmd)
   run_command(command=cmd, verbose=False)
-  for line1, line2 in zip(open("exercise_renumber_residues_modified.pdb").readlines(), expected_output_pdb.splitlines()):
+  with open("exercise_renumber_residues_modified.pdb") as f:
+    lines = f.readlines()
+  for line1, line2 in zip(lines, expected_output_pdb.splitlines()):
     line1 = line1.strip()
     line2 = line2.strip()
     assert line1 == line2,[line1, line2]
@@ -646,13 +652,14 @@ TER
   cmd = "phenix.pdbtools \"%s\" renumber_residues=true modify.selection=\"chain B\"" % ifn
   print(cmd)
   run_command(command=cmd, verbose=False)
-  new_lines = open("exercise_renumber_residues_modified.pdb").readlines()
-  for line1, line2 in zip(new_lines, expected_output_pdb_2.splitlines()):
-    assert (line1.strip() == line2.strip())
+  with open("exercise_renumber_residues_modified.pdb") as f:
+    for line1, line2 in zip(f.readlines(), expected_output_pdb_2.splitlines()):
+      assert (line1.strip() == line2.strip())
   cmd="phenix.pdbtools \"%s\" increment_resseq=10 modify.selection=\"chain B\"" % ifn
   print(cmd)
   run_command(command=cmd, verbose=False)
-  pdb_new = open("exercise_renumber_residues_modified.pdb").read()
+  with open("exercise_renumber_residues_modified.pdb") as f:
+    pdb_new = f.read()
   expected_output_pdb_3 = """\
 ATOM      1  O   GLY A   3       1.434   1.460   2.496  1.00  6.04           O
 ATOM      2  O   CYS A   7       2.196   4.467   3.911  1.00  4.51           O
@@ -701,11 +708,14 @@ ATOM     11  CZ  TYR    22      -0.846   1.912  -1.877  1.00 10.00           C
 ATOM     12  OH  TYR    22      -1.452   2.696  -2.817  1.00 10.00           O
 """
   ifn = "exercise_neutralize_scatterers.pdb"
-  open(ifn,"w").write(input_pdb)
+  with open(ifn,"w") as f:
+    f.write(input_pdb)
   cmd = 'phenix.pdbtools "%s" neutralize_scatterers=true adp.set_b_iso=10'%ifn
   print(cmd)
   run_command(command=cmd, verbose=False)
-  for line1, line2 in zip(open(ifn.replace(".pdb","_modified.pdb")).readlines(), expected_output_pdb.splitlines()):
+  with open(ifn.replace(".pdb","_modified.pdb")) as f:
+    lines = f.readlines()
+  for line1, line2 in zip(lines, expected_output_pdb.splitlines()):
     line1 = line1.strip()
     line2 = line2.strip()
     assert line1 == line2
@@ -786,7 +796,8 @@ END
   assert f>77 and f<100, f # was getting 79.16 on anaconda t96
 
 def exercise_change_of_basis():
-  open("tmp_pdbtools_cb_op.pdb", "w").write("""\
+  with open("tmp_pdbtools_cb_op.pdb", "w") as f:
+    f.write("""\
 CRYST1   21.937    4.866   23.477  90.00 107.08  90.00 P 1 21 1      2
 ATOM      1  N   GLY A   1      -9.009   4.612   6.102  1.00 16.77           N
 ATOM      2  CA  GLY A   1      -9.052   4.207   4.651  1.00 16.57           C
@@ -794,8 +805,9 @@ ATOM      3  C   GLY A   1      -8.015   3.140   4.419  1.00 16.16           C
 ATOM      4  O   GLY A   1      -7.523   2.521   5.381  1.00 16.78           O  """)
   cmd = "phenix.pdbtools tmp_pdbtools_cb_op.pdb change_of_basis='a,c,b'"
   run_command(command=cmd, verbose=False)
-  lines = open("tmp_pdbtools_cb_op_modified.pdb").readlines()
-  for line in lines :
+  with open("tmp_pdbtools_cb_op_modified.pdb") as f:
+    lines = f.readlines()
+  for line in lines:
     if line.startswith("CRYST1"):
       assert (line.strip() ==
         """CRYST1   21.937   23.477    4.866  90.00  90.00 107.08 P 1 1 21""")
@@ -859,10 +871,10 @@ loop_
 def exercise_mmcif_support_2(prefix="tst_pdbtools_mmcif2"):
   f = open("%s.pdb" % prefix, 'w')
   f.write("""\
-HELIX    1   1 TRP A   10  VAL A   14  5                                   5
+HELIX    1   1 GLN A   10  GLN A   14  5                                   5
 HELIX    2   2 ARG A   17  ASN A   29  1                                  13
-SHEET    1   A 2 ARG A  33  PRO A  38  0
-SHEET    2   A 2 ARG A  51  VAL A  56  1  O  VAL A  54   N  ILE A  35
+SHEET    1   A 2 GLN A  33  GLN A  38  0
+SHEET    2   A 2 GLN A  51  GLN A  56  1  O  VAL A  54   N  ILE A  35
 SSBOND   1 CYS A    4    CYS A   49
 CRYST1   62.654   62.654   45.906  90.00  90.00  90.00 P 43 21 2
 SCALE1      0.015961  0.000000  0.000000        0.00000
@@ -975,11 +987,13 @@ HETATM   19  O  BHOH B   5      43.786  12.615 147.734  0.50 28.43       B   O
 HETATM   20  O   HOH B   6      35.068  19.167 155.349  1.00 15.97       B   O
 END
 """
-  open("tst_pdbtools_move_waters.pdb", "w").write(pdb_in)
+  with open("tst_pdbtools_move_waters.pdb", "w") as f:
+    f.write(pdb_in)
   cmd = "phenix.pdbtools tst_pdbtools_move_waters.pdb move_waters_last=True"
   print(cmd)
   run_command(command=cmd, verbose=False)
-  pdb_new = open("tst_pdbtools_move_waters_modified.pdb").read()
+  with open("tst_pdbtools_move_waters_modified.pdb") as f:
+    pdb_new = f.read()
   assert pdb_new == pdb_out, pdb_new
 
 def exercise_stop_for_unknowns():
@@ -990,7 +1004,8 @@ HETATM   18  O   UNK B   4      29.343  12.806 185.898  1.00 35.57       B   O
 HETATM   19  O   UNK B   5      43.786  12.615 147.734  0.50 28.43       B   O
 HETATM   20  O   UNK B   6      35.068  19.167 155.349  1.00 15.97       B   O
 """
-  open("tst_pdbtools_unknown.pdb", "w").write(pdb_in)
+  with open("tst_pdbtools_unknown.pdb", "w") as f:
+    f.write(pdb_in)
   cmd = "phenix.pdbtools tst_pdbtools_unknown.pdb set_b_iso=20"
   print(cmd)
   run_command(command=cmd, sorry_expected=True)
@@ -1009,11 +1024,13 @@ ATOM     77  CB  VAL A  33      11.101   4.227  14.591  1.00 11.47           C
 ATOM     18  O   HOH A   3       1.132   5.963   7.065  1.00 15.00           O
 ATOM     19  O  BHOH A   4       4.132   9.963   7.800  0.50 15.00           O
 """
-  open("tst_pdbtools_alt_confs.pdb", "w").write(pdb_in)
+  with open("tst_pdbtools_alt_confs.pdb", "w") as f:
+    f.write(pdb_in)
   cmd = "phenix.pdbtools tst_pdbtools_alt_confs.pdb remove_alt_confs=True"
   print(cmd)
   run_command(command=cmd, verbose=False)
-  pdb_new = open("tst_pdbtools_alt_confs_modified.pdb").read()
+  with open("tst_pdbtools_alt_confs_modified.pdb") as f:
+    pdb_new = f.read()
   assert (pdb_new == """\
 ATOM      1  O   HOH A   2       5.131   5.251   5.823  1.00 10.00           O
 ATOM      2  CA  LYS A  32      10.574   8.177  11.768  1.00 11.49           C
@@ -1027,7 +1044,8 @@ END
   cmd = "phenix.pdbtools tst_pdbtools_alt_confs.pdb remove_alt_confs=True " +\
     "always_keep_one_conformer=True"
   run_command(command=cmd, verbose=False)
-  pdb_new = open("tst_pdbtools_alt_confs_modified.pdb").read()
+  with open("tst_pdbtools_alt_confs_modified.pdb") as f:
+    pdb_new = f.read()
   assert (pdb_new == """\
 ATOM      1  O   HOH A   2       5.131   5.251   5.823  1.00 10.00           O
 ATOM      2  CA  LYS A  32      10.574   8.177  11.768  1.00 11.49           C
@@ -1131,7 +1149,8 @@ END
         "output.prefix=%s_%s"%(o,prefix)])
     print(cmd)
     run_command(command=cmd, verbose=False)
-    pdb_new = open("%s_%s.pdb"%(o,prefix)).read()
+    with open("%s_%s.pdb"%(o,prefix)) as f:
+      pdb_new = f.read()
     if o == "clear_seg_id":
       assert (pdb_new == """\
 ATOM      1  N   MET B  37       7.525   5.296   6.399  1.00 10.00           N
@@ -1208,6 +1227,76 @@ END
   ph_in.flip_symmetric_amino_acids()
   assert h1.is_similar_hierarchy(ph_in)
 
+def exercise_result_is_empty(prefix='exercise_result_is_empty'):
+  pdb_str = """
+HELIX    1   1 GLN A   10  GLN A   14  5                                   5
+HELIX    2   2 ARG A   17  ASN A   29  1                                  13
+SHEET    1   A 2 GLN A  33  GLN A  38  0
+SHEET    2   A 2 GLN A  51  GLN A  56  1  O  VAL A  54   N  ILE A  35
+SSBOND   1 CYS A    4    CYS A   49
+CRYST1   62.654   62.654   45.906  90.00  90.00  90.00 P 43 21 2
+SCALE1      0.015961  0.000000  0.000000        0.00000
+SCALE2      0.000000  0.015961  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.021784        0.00000
+ATOM      1  N   GLN A   3      23.762  12.429   1.265  1.00 45.30           N
+ATOM      2  CA  GLN A   3      22.670  12.004   2.148  1.00 39.46           C
+ATOM      3  C   GLN A   3      21.818  10.942   1.458  1.00 42.86           C
+ATOM      4  O   GLN A   3      21.337  11.133   0.339  1.00 44.81           O
+ATOM      5  CB  GLN A   3      21.794  13.195   2.571  1.00 42.53           C
+ATOM      6  N   CYS A   4      21.620   9.817   2.129  1.00 36.33           N
+ATOM      7  CA  CYS A   4      20.902   8.709   1.518  1.00 31.46           C
+ATOM      8  C   CYS A   4      19.419   8.891   1.670  1.00 34.16           C
+ATOM      9  O   CYS A   4      18.979   9.537   2.607  1.00 38.12           O
+ATOM     10  CB  CYS A   4      21.307   7.409   2.205  1.00 31.53           C
+ATOM     11  SG  CYS A   4      23.070   7.194   2.148  1.00 29.88           S
+ATOM     12  N   SER A   5      18.657   8.290   0.760  1.00 33.83           N
+ATOM     13  CA  SER A   5      17.211   8.293   0.854  1.00 38.94           C
+ATOM     14  C   SER A   5      16.676   6.917   1.254  1.00 32.88           C
+ATOM     15  O   SER A   5      17.295   5.879   0.981  1.00 32.57           O
+ATOM     16  CB  SER A   5      16.603   8.683  -0.488  1.00 39.48           C
+ATOM     17  OG  SER A   5      16.893   7.668  -1.432  1.00 47.16           O
+ATOM     18  N   GLY A   6      15.520   6.924   1.901  1.00 31.69           N
+ATOM     19  CA  GLY A   6      14.811   5.694   2.191  1.00 32.41           C
+ATOM     20  C   GLY A   6      15.257   5.112   3.511  1.00 29.00           C
+ATOM      2  CA  GLN A  10      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  11      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  12      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  13      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  14      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  33      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  34      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  35      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  36      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  37      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  38      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  51      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  52      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  53      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  54      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  55      22.670  12.004   2.148  1.00 39.46           C
+ATOM      2  CA  GLN A  56      22.670  12.004   2.148  1.00 39.46           C
+"""
+
+  with open("%s.pdb"%prefix, 'w') as f:
+    f.write(pdb_str)
+  cmd = " ".join([
+      "phenix.pdbtools",
+      "%s.pdb"%prefix,
+      "keep='resname ALA'",
+      "output.prefix=out_%s"%(prefix)])
+  print(cmd)
+  run_command(command=cmd, verbose=False)
+  # assert os.path.isfile("out_%s_modified.pdb"%(prefix))
+  with open("out_%s_modified.pdb"%(prefix), 'r') as f:
+    pdb_new = f.read()
+    assert pdb_new == """\
+CRYST1   62.654   62.654   45.906  90.00  90.00  90.00 P 43 21 2
+SCALE1      0.015961  0.000000  0.000000        0.00000
+SCALE2      0.000000  0.015961  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.021784        0.00000
+END
+"""
+
 def exercise(args):
   exercise_flip_symmetric_amino_acids()
   exercise_switch_rotamers()
@@ -1226,6 +1315,7 @@ def exercise(args):
   exercise_remove_atoms()
   exercise_mmcif_support()
   exercise_segid_manipulations()
+  exercise_result_is_empty()
 
 if (__name__ == "__main__"):
   exercise(sys.argv[1:])

@@ -2701,9 +2701,12 @@ def get_f_phases_from_model(f_array = None, pdb_inp = None, overall_b = None,
 
   return model_f_array
 
-def get_f_phases_from_map(map_data = None, crystal_symmetry = None, d_min = None,
+def get_f_phases_from_map(
+      map_data = None, crystal_symmetry = None, d_min = None,
       d_max = 100000.,
-      d_min_ratio = None, return_as_map_coeffs = False, remove_aniso = None,
+      d_min_ratio = None,
+      return_as_map_coeffs = False,
+      remove_aniso = None,
       get_remove_aniso_object = True,
       scale_max = None,
       origin_frac = None,
@@ -2715,19 +2718,15 @@ def get_f_phases_from_map(map_data = None, crystal_symmetry = None, d_min = None
         d_min_use = d_min*d_min_ratio
     else:
       d_min_use = None
-    from mmtbx.command_line.map_to_structure_factors import run as map_to_sf
-    if crystal_symmetry.space_group().type().number() in [0, 1]:
-      args = ['d_min = None', 'box = True', 'keep_origin = False',
-         'scale_max = %s' %scale_max]
-    else: # cannot use box for other space groups
-      args = ['d_min = %s'%(d_min_use), 'box = False', 'keep_origin = False',
-         'scale_max = %s' %scale_max]
-    map_coeffs = map_to_sf(args = args,
-         space_group_number = crystal_symmetry.space_group().type().number(),
-         ccp4_map = make_ccp4_map(map_data, crystal_symmetry.unit_cell()),
-         return_as_miller_arrays = True, nohl = True, out = null_out())
-    if d_min_use:
-      map_coeffs = map_coeffs.resolution_filter(d_min = d_min_use, d_max = d_max)
+    if map_data.origin() != (0,0,0):
+      map_data = map_data.shift_origin()
+    from iotbx.map_manager import map_manager
+    mm = map_manager(map_data = map_data,
+       unit_cell_grid = map_data.all(),
+       unit_cell_crystal_symmetry = crystal_symmetry,
+       wrapping = False)
+    map_coeffs = mm.map_as_fourier_coefficients(d_min = d_min_use,
+       d_max = d_max if d_min_use is not None else None)
 
     if origin_frac and tuple(origin_frac) !=  (0., 0., 0.):  # shift origin
       map_coeffs = map_coeffs.translational_shift(origin_frac, deg = False)
@@ -2748,7 +2747,6 @@ def get_f_phases_from_map(map_data = None, crystal_symmetry = None, d_min = None
       return map_coeffs, map_coeffs_ra
     else:
       return map_coeffs_as_fp_phi(map_coeffs)
-
 
 def apply_sharpening(map_coeffs = None,
     sharpening_info_obj = None,
@@ -2995,9 +2993,11 @@ def run_get_ncs_from_map(params = None,
   else:
     return None, None, None # did not even try
   # check separately for helical symmetry
-  if params.reconstruction_symmetry.symmetry.lower() == 'helical':
+  if params.reconstruction_symmetry.symmetry and \
+       params.reconstruction_symmetry.symmetry.lower() == 'helical':
     helical_list = [True]
-  elif params.reconstruction_symmetry.symmetry.lower() in ['all', 'any'] and\
+  elif params.reconstruction_symmetry.symmetry and \
+       params.reconstruction_symmetry.symmetry.lower() in ['all', 'any'] and\
       params.reconstruction_symmetry.include_helical_symmetry:
     helical_list = [False, True]
   else:
@@ -4775,8 +4775,8 @@ def get_params(args, map_data = None, crystal_symmetry = None,
   # Set params specifically if coming in from call
   if sequence is not None:
     params.crystal_info.sequence = sequence
-  if wrapping is not None:
-    params.crystal_info.use_sg_symmetry =  (not wrapping)
+  if (wrapping is not None) and (params.crystal_info.use_sg_symmetry is None):
+    params.crystal_info.use_sg_symmetry =  wrapping
   if target_ncs_au_file is not None:
     params.input_files.target_ncs_au_file = target_ncs_au_file
   if regions_to_keep is not None:
@@ -5020,6 +5020,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
       map_data, new_map_coeffs, new_crystal_symmetry, new_si = auto_sharpen(
          args = [], params = local_params,
         map_data = map_data,
+        wrapping = wrapping,
         crystal_symmetry = crystal_symmetry,
         write_output_files = False,
         pdb_inp = sharpening_target_pdb_inp,
@@ -5179,7 +5180,7 @@ def get_params(args, map_data = None, crystal_symmetry = None,
     args.append("keep_input_unit_cell_and_grid = False") # for new defaults
 
     assert params.crystal_info.use_sg_symmetry is not None
-    wrapping = (not params.crystal_info.use_sg_symmetry)
+    wrapping = params.crystal_info.use_sg_symmetry
     if params.segmentation.lower_bounds and params.segmentation.upper_bounds:
       bounds_supplied = True
       print("\nRunning map_box with supplied bounds", file = out)
@@ -7363,8 +7364,18 @@ def select_regions_in_au(params,
 
   selected_regions = best_selected_regions
   selected_regions.sort()
-  if params.map_modification.regions_to_keep:
-    selected_regions = selected_regions[:params.map_modification.regions_to_keep]
+  available_selected_regions = len(selected_regions)
+  print("\nAvailable selected regions: %s ..." %(available_selected_regions), file = out)
+  if tracking_data:
+    tracking_data.available_selected_regions = available_selected_regions
+
+  if params.map_modification.regions_to_keep is not None:
+    if params.map_modification.regions_to_keep <= 0:
+       # keep just region abs(regions_to_keep)
+       ii = min(len(selected_regions)-1, abs(params.map_modification.regions_to_keep))
+       selected_regions = selected_regions[ii:ii+1]
+    else: # usual
+      selected_regions = selected_regions[:params.map_modification.regions_to_keep]
 
   rms = get_closest_neighbor_rms(ncs_group_obj = ncs_group_obj,
     selected_regions = selected_regions, verbose = False, out = out)
@@ -7933,17 +7944,15 @@ def write_output_files(params,
        box_map_ncs_au_half_map_data_list = half_map_data_list_au_box,
        )
 
-  write_ccp4_map(tracking_data.crystal_symmetry, 'map_data_ncs_au.ccp4', map_data_ncs_au)
-  write_ccp4_map(box_crystal_symmetry, 'box_map_ncs_au.ccp4', box_map_ncs_au)
-
   if params.output_files.box_map_file:
     # write out NCS map as box_map (cut out region of map enclosed in box_mask)
     if params.output_files.write_output_maps:
       write_ccp4_map(box_crystal_symmetry,
-        os.path.join(tracking_data.params.output_files.output_directory, params.output_files.box_map_file),
-        box_map_ncs_au)
+        os.path.join(tracking_data.params.output_files.output_directory,
+          params.output_files.box_map_file), box_map_ncs_au)
       print("Output NCS au as box (cut out) map:  %s " %(
-      os.path.join(tracking_data.params.output_files.output_directory, params.output_files.box_map_file)), file = out)
+      os.path.join(tracking_data.params.output_files.output_directory,
+          params.output_files.box_map_file)), file = out)
       tracking_data.set_output_box_map_info(
         file_name = os.path.join(tracking_data.params.output_files.output_directory, params.output_files.box_map_file),
         crystal_symmetry = box_crystal_symmetry,
@@ -8537,7 +8546,7 @@ def renormalize_map_data(
   map_data = None, solvent_fraction = None):
   sd = max(0.0001, map_data.sample_standard_deviation())
   if solvent_fraction >=  10.: solvent_fraction = solvent_fraction/100.
-  assert solvent_fraction > 0 and solvent_fraction < 1
+  solvent_fraction = min(0.999, max(0.001, solvent_fraction))
   scaled_sd = sd/(1-solvent_fraction)**0.5
   map_data = (map_data-map_data.as_1d().min_max_mean().mean)/scaled_sd
   return map_data
@@ -8655,17 +8664,17 @@ def get_overall_mask(
   else:
     smoothing_radius = 2.*resolution
 
-  from mmtbx.command_line.map_to_structure_factors import run as map_to_sf
-  args = ['d_min = None', 'box = True']
-  from libtbx.utils import null_out
-  map_coeffs = map_to_sf(args = args,
-         space_group_number = 1, # always p1 cell for this
-         ccp4_map = make_ccp4_map(map_data, crystal_symmetry.unit_cell()),
-         return_as_miller_arrays = True, nohl = True, out = null_out())
+  from iotbx.map_manager import map_manager
+  mm = map_manager(map_data = map_data,
+       unit_cell_grid = map_data.all(),
+       unit_cell_crystal_symmetry = crystal_symmetry,
+       wrapping = False)
+  map_coeffs = mm.map_as_fourier_coefficients(
+       d_min = resolution, d_max = d_max)
+
   if not map_coeffs:
     raise Sorry("No map coeffs obtained")
 
-  map_coeffs = map_coeffs.resolution_filter(d_min = resolution, d_max = d_max)
   complete_set = map_coeffs.complete_set()
   stol = flex.sqrt(complete_set.sin_theta_over_lambda_sq().data())
   import math
@@ -10188,6 +10197,7 @@ def auto_sharpen_map_or_map_coeffs(
         resolution = None,        # resolution is required
         crystal_symmetry = None,  # supply crystal_symmetry and map or
         map = None,               #  map and n_real
+        wrapping = None,
         half_map_data_list = None,     #  two half-maps matching map
         is_crystal = None,
         map_coeffs = None,
@@ -10338,6 +10348,8 @@ def auto_sharpen_map_or_map_coeffs(
         pdb_inp = pdb_inp,
         ncs_copies = ncs_copies,
         n_residues = n_residues, out = out)
+    if wrapping is not None:
+      si.wrapping = wrapping
     # Figure out solvent fraction
     if si.solvent_fraction is None:
       si.solvent_fraction = get_iterated_solvent_fraction(
@@ -11426,7 +11438,10 @@ def effective_b_iso(map_data = None, tracking_data = None,
        out = out)
 
     f_array, phases = map_coeffs_as_fp_phi(map_coeffs)
-    b_iso = map_coeffs_ra.b_iso
+    if map_coeffs_ra:
+      b_iso = map_coeffs_ra.b_iso
+    else:
+      b_iso = None
     if b_iso is not None:
       print("Effective B-iso = %7.2f\n" %(b_iso), file = out)
     else:

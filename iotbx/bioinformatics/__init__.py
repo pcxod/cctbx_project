@@ -118,8 +118,30 @@ class sequence(object):
 
     return self.format( 70 )
 
+  def __hash__(self):
+    '''
+    Return a UID (hash) for the instanciated object. This method is required
+    to be implemented if __eq__ is implemented and if the object is immutable.
+    Immutable objects can be then used as keys for dictionaries.
+    '''
+
+    #NOTE: To my knowledge objects of this class are used as keyword in a dictionary only
+    #by Sculptor.
+
+    #NOTE: id(self) is already unique but hash(id(self)) distributes better the hashed values
+    #this means that two consecutive id will have very different hash(id(self)) making
+    #hashtable searches more robust when using them as keys of dictionaries. Difference in
+    #performance are irrelevant.
+
+    return hash(id(self))
 
   def __eq__(self, other):
+    '''
+    This method is used any time the equality among two instances of this class must be tested.
+    Two sequences are equal if their sequence attribute is equal. Although self and other are
+    two different objects. In particular two sequences might have a different name but they are equal
+    if they have the same sequence.
+    '''
 
     return isinstance( other, sequence ) and self.sequence == other.sequence
 
@@ -1814,22 +1836,106 @@ def composition_from_sequence(sequence):
     n_residues += len(seq)
   return n_residues, n_bases
 
-def clear_empty_lines(text):
+def duplicate_multiple_chains(text):
+  # make chains that are marked with >7WZE_1|Chains A, B[Auth X]| or similar
+  #  N times that many chains
+  new_groups = []
+  next_lines = []
+  unused_lines = []
+  previous_line = None
+  for line in text.splitlines():
+    line = line.strip()
+    if line.startswith(">"):
+      next_lines = [line]
+      new_groups.append(next_lines)
+    elif not line.strip():
+      next_lines = [">"]
+      new_groups.append(next_lines)
+    elif next_lines:
+      next_lines.append(line)
+    else:
+      unused_lines.append(line)
+    previous_line = line
+  if unused_lines and new_groups:
+    return text # could not do anything with this
+
+  elif unused_lines:
+    return text # nothing to do
+
+  else: # usual
+    new_lines = []
+    for new_group in new_groups:
+      if not new_group or not new_group[0]:
+        continue
+      first_line = new_group[0]
+      n = get_number_of_dups(first_line)
+      lines_in_group= new_group[1:]
+      for i in range(n):
+        new_lines.append(first_line)
+        new_lines.append("".join(lines_in_group))
+    text = "\n".join(new_lines)
+    text = text.replace(">\n\n>",">")
+    text = text.replace(">\n\n>",">")
+    return text
+
+def remove_inside_brackets(text):
+  # remove everything enclosed in []
+  if not text.find("[")>-1:
+    return text
+  new_text = ""
+  found_lb = False
+  for c in text:
+    if c=="[":
+      found_lb = True
+    elif c == "]":
+      found_lb = False
+    elif found_lb:
+      pass # skip it
+    else:
+      new_text += c
+  return new_text
+
+def get_number_of_dups(line):
+  # looks like >7WZE_1|Chains A, B[Auth X]| or similar
+  if not line.startswith(">"):
+    return 1
+  spl = line.split("|")
+  if len(spl) < 2:
+    return 1
+  text = spl[1].strip()
+  text = remove_inside_brackets(text)
+  if not text.startswith("Chain"):
+    return 1
+  text = text.replace("Chains","").replace("Chain","").replace("=",""
+       ).replace(",","")
+  values = text.split()
+  return max(1, len(values))
+
+def clear_empty_lines(text, apply_duplicate_multiple_chains = False):
+  # First duplicate any multiple chains, then clear empty lines.
+  if apply_duplicate_multiple_chains:
+    text = duplicate_multiple_chains(text)
   # make empty lines just a blank line.  Includes >>> etc.
   new_lines=[]
+  prev_line = ""
   for line in text.splitlines():
     if not line.replace(">","").replace(" ",""):
        line=""
     elif line.startswith(">"):
        line=""
     line=line.replace("?","")
+    if (not line) and (not prev_line):
+      continue # skip blanks if dup or at beginning
     new_lines.append(line)
+    prev_line = line
   return "\n".join(new_lines)+"\n"
 
-
-def get_sequences(file_name=None,text=None,remove_duplicates=None):
+def get_sequences(file_name=None,text=None,remove_duplicates=None,
+     apply_duplicate_multiple_chains = False,
+     remove_unknowns = False):
   # return simple list of sequences in this file. duplicates included
   #  unless remove_duplicates=True
+  #  remove unknowns (X) if requested
   if not text:
     if not file_name:
       raise Sorry("Missing file for get_sequences: %s" %(
@@ -1837,122 +1943,22 @@ def get_sequences(file_name=None,text=None,remove_duplicates=None):
     with open(file_name) as f:
       text = f.read()
   # clear any lines that have only > and nothing else
-  text=clear_empty_lines(text)
-
+  text=clear_empty_lines(text, apply_duplicate_multiple_chains)
   chain_types=[]
   ( sequences, unknowns ) = parse_sequence( text )
   simple_sequence_list=[]
   for sequence in sequences:
     if remove_duplicates and sequence.sequence in simple_sequence_list:
       continue # it is a duplicate
+    elif remove_unknowns: # remove any X and take it
+      simple_sequence_list.append(sequence.sequence.replace("X",""))
     else: # take it
       simple_sequence_list.append(sequence.sequence)
   return simple_sequence_list
 
-def get_chain_type(model=None, hierarchy=None):
-  '''
-   Identify chain type in a hierarchy or model and require only one chain type
-  '''
-
-  if not hierarchy:
-    hierarchy = model.get_hierarchy()
-
-  asc1 = hierarchy.atom_selection_cache()
-  sel1 = asc1.selection(string = 'protein')
-
-  count_protein = hierarchy.select(sel1).atoms().extract_xyz().size()
-
-  asc1 = hierarchy.atom_selection_cache()
-  sel1 = asc1.selection(string = '(not protein) and (not water) and (not hetero)')
-  hierarchy_rna_dna= hierarchy.select(sel1)
-  count_rna_dna= hierarchy_rna_dna.atoms().extract_xyz().size()
-
-  if count_protein and count_rna_dna:
-    raise Sorry(
-        "Model contains both protein "+
-       "(%s atoms) and rna/dna (%s atoms)...only one chain type allowed" %(
-       count_protein,count_rna_dna))
-  elif count_protein:
-    return "PROTEIN"
-  else:
-
-    # Determine if hierarchy contains O2' or U residue
-    sequence_as_rna = get_sequence_from_hierarchy(
-       hierarchy=hierarchy,chain_type="RNA")
-    if sequence_as_rna.upper().count("U") > 0:
-      return 'RNA'  # for sure RNA
-    # Otherwise, look for O2'
-
-    asc1 = hierarchy_rna_dna.atom_selection_cache()
-    sel1 = asc1.selection(string = "name O2* or name O2'")
-    hierarchy_rna_dna_o_two = hierarchy_rna_dna.select(sel1)
-    count_rna = hierarchy_rna_dna_o_two.atoms().extract_xyz().size()
-
-    asc1 = hierarchy_rna_dna.atom_selection_cache()
-    sel1 = asc1.selection(string = "name p")
-    hierarchy_rna_dna_p = hierarchy_rna_dna.select(sel1)
-    count_rna_dna_p  = hierarchy_rna_dna_p.atoms().extract_xyz().size()
-    if count_rna_dna_p and not count_rna:
-      return "DNA"
-    elif count_rna_dna_p and count_rna:
-      return "RNA"
-    else:
-      raise Sorry("Model does not appear to contain protein or RNA or DNA")
-
-def get_sequence_from_hierarchy(hierarchy, chain_type=None,
-     remove_white_space=False):
-  return get_sequence_from_pdb(hierarchy=hierarchy,chain_type=chain_type,
-     remove_white_space=remove_white_space)
-
-def get_sequence_from_pdb(file_name=None,text=None,hierarchy=None,
-    chain_type=None, remove_white_space=False):
-
-  if not hierarchy:
-    # read from PDB
-    if not text:
-      if not file_name:
-        from libtbx.utils import Sorry
-        raise Sorry("Missing file for get_sequence_from_pdb: %s" %(
-          file_name))
-      with open(file_name) as f:
-        text = f.read()
-    import iotbx.pdb
-    pdb_inp = iotbx.pdb.input(lines=text.splitlines(),source_info="None")
-    import mmtbx.model
-    mm = mmtbx.model.manager(
-          model_input = pdb_inp,
-          stop_for_unknowns = False)
-    hierarchy=mm.get_hierarchy()
-
-  if hierarchy.overall_counts().n_residues == 0:
-    return ""  # nothing there
-
-  if not chain_type:
-    chain_type = get_chain_type(hierarchy = hierarchy)
-
-  chain_sequences=[]
-  from iotbx.pdb import amino_acid_codes as aac
-  protein_one_letter_code_dict = aac.one_letter_given_three_letter
-  from iotbx.pdb.nucleic_acid_codes import rna_one_letter_code_dict,dna_one_letter_code_dict
-  one_letter_code_dicts={'PROTEIN':protein_one_letter_code_dict,
-    'DNA':dna_one_letter_code_dict,
-    'RNA':rna_one_letter_code_dict}
-
-  for model in hierarchy.models():
-    for chain in model.chains():
-      one_letter_code = one_letter_code_dicts[chain_type]
-      chain_sequence=""
-      for rg in chain.residue_groups():
-        for atom_group in rg.atom_groups():
-          chain_sequence+=one_letter_code.get(
-             atom_group.resname.strip().upper(),"")
-          break
-      chain_sequences.append(chain_sequence)
-  sequence_as_string="\n".join(chain_sequences)
-  if remove_white_space:
-    sequence_as_string = sequence_as_string.replace("\n","").replace(" ","")
-  return sequence_as_string
-
+#####################################################################
+####   Methods to try and guess chain types from sequences ##########
+#####################################################################
 def guess_chain_types_from_sequences(file_name=None,text=None,
     return_as_dict=False,minimum_fraction=None,
     likely_chain_types=None):
@@ -1985,7 +1991,8 @@ def guess_chain_types_from_sequences(file_name=None,text=None,
       dd[chain_type].append(sequence)
       dd_n[chain_type]+=len(sequence.sequence)
       total_residues+=len(sequence.sequence)
-  if minimum_fraction and len(chain_types)>1 and total_residues>1: # remove anything < minimum_fraction
+  if minimum_fraction and len(chain_types)>1 and total_residues>1:
+    # remove anything < minimum_fraction
     new_chain_types=[]
     new_dd={}
     new_dd_n={}
@@ -2137,8 +2144,26 @@ def chain_type_and_residues(text=None,chain_type=None,likely_chain_types=None):
   else:
     return ok_list[0],residues
 
-def random_sequence(n_residues=None,residue_basket=None):
-  assert n_residues and residue_basket
+#####################################################################
+####   END OF methods to try and guess chain types from sequences ###
+#####################################################################
+
+def random_sequence(n_residues=None,residue_basket=None,
+   chain_type = 'PROTEIN'):
+  assert n_residues and (residue_basket or chain_type)
+  if not residue_basket:
+    chain_type = chain_type.upper()
+    if chain_type == "PROTEIN":
+        # Approximate eukaryotic frequencies using W as basic unit
+        residue_basket = "AAAAAACCCEEEEDDDDDGGGGGG"+\
+          "FFFIIIHHKKKKKKMLLLLLLNNNQQQPPPPSSSSSSRRRTTTTTWVVVVVYYY"
+    elif chain_type == "DNA":
+        residue_basket = "GATC"
+    elif chain_type == "RNA":
+        residue_basket = "GAUC"
+    else:
+        raise Sorry("Chain type needs to be RNA/DNA/PROTEIN")
+
   import random
   s=""
   nn=len(residue_basket)-1

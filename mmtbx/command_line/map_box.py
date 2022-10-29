@@ -72,6 +72,11 @@ master_phil = libtbx.phil.parse("""
      .help = Radius for masking around atoms
      .short_caption = Mask atoms atom radius
 
+  write_mask_file = False
+     .type = bool
+     .help = Write mask file. Requires setting mask_atoms
+     .short_caption = Write mask file
+
   set_outside_to_mean_inside = False
     .type = bool
     .help = Set value outside mask equal to mean inside
@@ -213,6 +218,11 @@ master_phil = libtbx.phil.parse("""
     .type = bool
     .help = Use Gaussian mask in mask_atoms and on outside surface of box
     .short_caption = Soft mask
+
+  invert_mask = False
+    .type = bool
+    .help = Make mask with 1 outside model (only applies to mask_around_atoms)
+    .short_caption = Invert mask to outside atoms
 
   soft_mask_radius = 3
     .type = float
@@ -1066,6 +1076,13 @@ def run(args,
   elif (params.soft_mask):  # apply soft mask to outside of box
     mam = apply_mask_around_edge_of_box(mam, params = params, log = log)
 
+  if params.write_mask_file:
+    if not hasattr(mam.map_manager(),'_created_mask') or not \
+       mam.map_manager()._created_mask:
+      raise Sorry("Cannot create mask file if no mask has been created")
+    mask_map_manager = mam.map_manager()._created_mask.map_manager().deep_copy()
+  else:
+    mask_map_manager = None
 
   # Shift origin of output file if requested
   if params.output_origin_grid_units or params.output_unit_cell_grid or\
@@ -1087,6 +1104,11 @@ def run(args,
     mam.map_manager().set_original_origin_and_gridding(
        original_origin = params.output_origin_grid_units,
        gridding = params.output_unit_cell_grid)
+    if mam.map_manager().ncs_object():
+      # mam.map_manager().ncs_object().display_all()
+      from scitbx.array_family import flex
+      mam.map_manager().ncs_object().set_shift_cart(
+        mam.map_manager().shift_cart())
 
     if mam.model():
       mam.model().shift_model_and_set_crystal_symmetry(
@@ -1185,6 +1207,7 @@ def run(args,
         filename =  "%s.ncs_spec"%params.output_file_name_prefix
       dm.write_ncs_spec_file(ncs_object, filename = filename)
       print("\nWriting symmetry to %s" %( filename), file = log)
+      # we are writing out new location
 
     # Write ccp4 map.
     if("ccp4" in params.output_format):
@@ -1196,6 +1219,15 @@ def run(args,
          map_manager, filename = filename)
       print("\nWriting map to %s" %( filename), file = log)
 
+    # Write ccp4 mask.
+    if("ccp4" in params.output_format and mask_map_manager):
+      if(params.output_file_name_prefix is None):
+        filename = "%s_mask_box.ccp4"%output_prefix
+      else:
+        filename = "%s_mask.ccp4"%params.output_file_name_prefix
+      dm.write_real_map_file(
+         mask_map_manager, filename = filename)
+      print("\nWriting mask to %s" %( filename), file = log)
 
     # Write xplor map.  Shift back if keep_origin = True
     if("xplor" in params.output_format):
@@ -1406,8 +1438,12 @@ def apply_mask_around_atoms(mam, params = None, log = None):
        mask_atoms_atom_radius), file = log)
     if params.set_outside_to_mean_inside:
       print("Value outside mask will be set to mean inside", file = log)
+    if params.invert_mask:
+      print("Mask will be inverted (zero inside region of atoms, one outside)",
+        file=log)
     mam.map_manager().create_mask_around_atoms(model = mam.model(),
-        mask_atoms_atom_radius = mask_atoms_atom_radius)
+        mask_atoms_atom_radius = mask_atoms_atom_radius,
+        invert_mask = params.invert_mask)
     if (params.soft_mask): # make it a soft mask
       mam.map_manager().soft_mask(soft_mask_radius = params.soft_mask_radius)
       print ("Mask will be soft with radius of %.1f A" %(
@@ -1436,6 +1472,8 @@ from libtbx import runtime_utils
 from wxGUI2 import utils
 
 def validate_params(params):
+  if params.write_mask_file and not params.mask_atoms:
+    raise Sorry("You need to set mask_atoms for write_mask_file")
   return True
 
 class launcher(runtime_utils.target_with_save_result):

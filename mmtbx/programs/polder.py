@@ -12,6 +12,7 @@ import mmtbx.utils
 from iotbx import mrcfile
 from libtbx import group_args
 from cctbx.array_family import flex
+from iotbx import extract_xtal_data
 
 master_phil_str = '''
 include scope libtbx.phil.interface.tracking_params
@@ -205,18 +206,16 @@ Optional output:
       crystal_symmetry = crystal_symmetry,
       logger=null_out())
 
-    parameters = mmtbx.utils.data_and_flags_master_params().extract()
+    parameters = extract_xtal_data.data_and_flags_master_params().extract()
     if (self.params.data_labels is not None):
       parameters.labels = self.params.data_labels
     if (self.params.r_free_flags_labels is not None):
       parameters.r_free_flags.label = self.params.r_free_flags_labels
-    determined_data_and_flags = mmtbx.utils.determine_data_and_flags(
+    determined_data_and_flags = extract_xtal_data.run(
       reflection_file_server = rfs,
       parameters             = parameters,
       keep_going             = True,
-      working_point_group = crystal_symmetry.space_group().build_derived_point_group(),
-      log                    = null_out(),
-      symmetry_safety_check  = True)
+      working_point_group = crystal_symmetry.space_group().build_derived_point_group())
 
     f_obs = determined_data_and_flags.f_obs
     r_free_flags = determined_data_and_flags.r_free_flags

@@ -13,7 +13,7 @@ def run(filenames,
         filename,
         no_file_access=False,
         no_file_but_save=False,
-        verbose=True,
+        verbose=False,
         ):
   outl = "  Joining"
   for f in filenames:
@@ -53,7 +53,7 @@ def run(filenames,
     print(outl)
 
   if not no_file_access or no_file_but_save:
-    f = open(filename, "wb")
+    f = open(filename, "w")
     f.write(outl)
     f.close()
   else:

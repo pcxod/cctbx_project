@@ -34,6 +34,12 @@ class with_bounds(object):
     undefined.  If a box is specified that uses points outside the defined
     region, those points are set to zero.
 
+  if use_cubic_boxing, adjust bounds to make a cubic box by making box bigger.
+      if this conflicts with stay_inside_current_map, make box smaller. Normally
+      this option should not be used with with_bounds because the bounds should
+      be directly specified.
+  Note: stay_inside_current_map applies only when using cubic boxing
+
   """
   def __init__(self,
      map_manager,
@@ -42,12 +48,16 @@ class with_bounds(object):
      model = None,
      wrapping = None,
      model_can_be_outside_bounds = False,
+     stay_inside_current_map = True,
+     use_cubic_boxing = False,
      log = sys.stdout):
     self.lower_bounds = lower_bounds
     self.upper_bounds = upper_bounds
     self._map_manager = map_manager
     self._model = model
     self.model_can_be_outside_bounds = model_can_be_outside_bounds
+    self.use_cubic_boxing = use_cubic_boxing
+    self._info = None
 
 
     # safeguards
@@ -77,6 +87,10 @@ class with_bounds(object):
     self.gridding_first = lower_bounds
     self.gridding_last  = upper_bounds
 
+    # Adjust gridding to make a cubic box if desired
+    if self.use_cubic_boxing:
+      self.set_cubic_boxing(stay_inside_current_map = stay_inside_current_map)
+
     # Ready with gridding...set up shifts and box crystal_symmetry
     self.set_shifts_and_crystal_symmetry()
 
@@ -104,11 +118,85 @@ class with_bounds(object):
   def map_manager(self):
     return self._map_manager
 
+  def info(self):
+    return self._info
+
+  def set_info(self, info):
+    ''' Holder for anything you want.
+      Usually set it to a group_args object:
+         self.set_info(group_args(group_args_type='my_group_args', value = value))
+    '''
+
+    self._info = info
+
   def ncs_object(self):
     if self.map_manager():
       return self.map_manager().ncs_object()
     else:
       return None
+
+  def set_cubic_boxing(self, stay_inside_current_map = None,
+    require_even_gridding = True,
+    log = sys.stdout):
+    ''' Adjust bounds to make a cubic box.
+      Adjust bounds to make a cubic box by making box bigger.
+      if this conflicts with stay_inside_current_map, make box smaller. Normally
+      this option should not be used with with_bounds because the bounds should
+      be directly specified.
+      Normally creates a box with an even number of grid points '''
+
+    if not self.use_cubic_boxing:
+      return  # nothing to do
+
+    print("\nSetting up cubic box", file = log)
+    map_all = self._map_manager.map_data().all()
+    lmn = [1 + b - a for a,b in zip(self.gridding_first, self.gridding_last)]
+    if lmn[0] == lmn[1] and lmn[0] == lmn[2] and (
+       is_even(lmn[0]) or (not require_even_gridding)):
+      print("Box is already cubic with dimensions ",lmn, file = log)
+      return # all set already
+    # Maximum dimension of box
+    max_dim = max(lmn)
+    if not is_even(max_dim):
+      max_dim += 1
+
+    # How many grid points to add in each direction
+    dlmn = [max_dim - a for a in lmn]
+    # How many to add before
+    dlmn1= [a//2 for a in dlmn]
+    # How many to add after
+    dlmn2 = [a - b for a,b in zip( dlmn, dlmn1)]
+    # New start, end
+    new_first = [b - a for a, b in zip(dlmn1,self.gridding_first)]
+    new_last = [b + a for a, b in zip(dlmn2,self.gridding_last)]
+    new_lmn = [1 +b - a for a,b in zip(new_first, new_last)]
+
+    print("Original map size: ",map_all, file = log)
+    print("Original box: ",lmn, "cubic:", max_dim, file = log)
+    print("Original start: ",self.gridding_first, file = log)
+    print("Original end: ",self.gridding_last, file = log)
+    print("New box: ",new_lmn, file = log)
+    print("New start: ",new_first, file = log)
+    print("New end: ",new_last, file = log)
+
+    # Now make sure we are inside map if requested
+    lowest_value,highest_value = cube_relative_to_box( # 0 or neg, 0 or pos
+      new_first, new_last, map_all,
+       require_even_gridding = require_even_gridding)
+    if stay_inside_current_map and lowest_value != 0 or highest_value != 0:
+      print("Reboxing cubic map to stay inside current map", file = log)
+      new_first = [a - lowest_value for a in new_first]
+      new_last = [a - highest_value for a in new_last]
+      lowest_value,highest_value = cube_relative_to_box(
+        new_first, new_last, map_all,
+        require_even_gridding = require_even_gridding)
+      assert [lowest_value,highest_value] == [0,0]
+    print("Final start: ",new_first, file = log)
+    print("Final end: ",new_last, file = log)
+    print("Final box: ",[1 + b - a for a,b in zip(new_first, new_last)],
+       file = log)
+    self.gridding_first = new_first
+    self.gridding_last = new_last
 
   def set_shifts_and_crystal_symmetry(self):
     '''
@@ -128,6 +216,7 @@ class with_bounds(object):
     full_cs = self._map_manager.unit_cell_crystal_symmetry()
     full_uc = full_cs.unit_cell()
     self.box_all = [j-i+1 for i, j in zip(self.gridding_first, self.gridding_last)]
+    assert min(self.box_all) >= 1 # box size must be greater than zero. Check stay_inside_current_map and bounds
     # get shift vector as result of boxing
     full_all_orig = self._map_manager.unit_cell_grid
     self.shift_frac = \
@@ -186,7 +275,6 @@ class with_bounds(object):
     bounds_info = get_bounds_of_valid_region(map_data,
       self.gridding_first,
       self.gridding_last)
-
     # Allow override of wrapping
     if isinstance(self._force_wrapping, bool):
       wrapping = self._force_wrapping
@@ -260,6 +348,8 @@ class with_bounds(object):
        this around_model object
 
        Changes the model in place
+
+       Allow relaxed check if require_match_unit_cell_crystal_symmetry=False
     '''
 
     assert isinstance(model, mmtbx.model.manager)
@@ -268,14 +358,19 @@ class with_bounds(object):
     #  model and model original_crystal_symmetry should match
     #   self.map_crystal_symmetry_at_initialization
 
-    if model.shift_cart() is None:  # model not yet initialized for shifts
-       assert self.map_manager().unit_cell_crystal_symmetry(
-          ).is_similar_symmetry( model.crystal_symmetry())
+    # Allow relaxed check if require_match_unit_cell_crystal_symmetry=False
 
-    else:  # model is initialized: should match
-      assert model.unit_cell_crystal_symmetry()
-      assert self.map_manager().unit_cell_crystal_symmetry(
-         ).is_similar_symmetry( model.unit_cell_crystal_symmetry())
+    s = getattr(self,'require_match_unit_cell_crystal_symmetry', None)
+    require_uc_crystal_symmetry = (s in (None, True))
+    if require_uc_crystal_symmetry:
+      if model.shift_cart() is None:
+        # model not yet initialized for shifts
+        assert self.map_manager().unit_cell_crystal_symmetry(
+          ).is_similar_symmetry( model.crystal_symmetry())
+      else:  # model is initialized: should match unless not requiring it
+        assert model.unit_cell_crystal_symmetry()
+        assert self.map_manager().unit_cell_crystal_symmetry(
+           ).is_similar_symmetry( model.unit_cell_crystal_symmetry())
 
     # Shift the model and add self.shift_cart on to whatever shift was there
     model.shift_model_and_set_crystal_symmetry(
@@ -330,17 +425,32 @@ class around_model(with_bounds):
   Bounds:
     if model_can_be_outside_bounds, allow model to be outside the bounds
     if stay_inside_current_map, adjust bounds to not go outside current map
+      in the case that bounds are entirely outside current map, use current map
+    Note: stay_inside_current_map applies to all boxing in this method
+      because it is a normal part of the boxing process (in other boxing it
+        only applies to cubic boxing which can cause a box to go outside the
+        current map)
+    if use_cubic_boxing, adjust bounds to make a cubic box by making box bigger.
+      if this conflicts with stay_inside_current_map, make box smaller
+  If require_match_unit_cell_crystal_symmetry:  require that unit_cell
+    crystal symmetry of map and model match
   """
   def __init__(self, map_manager, model, box_cushion,
       wrapping = None,
       model_can_be_outside_bounds = False,
-      stay_inside_current_map = None,
+      stay_inside_current_map = None, # Note that this default is different
+      use_cubic_boxing = False,
+      require_match_unit_cell_crystal_symmetry = False,
       log = sys.stdout):
 
     self._map_manager = map_manager
     self._model = model
     self.model_can_be_outside_bounds = model_can_be_outside_bounds
+    self.use_cubic_boxing = use_cubic_boxing
+    self.require_match_unit_cell_crystal_symmetry = \
+       require_match_unit_cell_crystal_symmetry
 
+    s = getattr(self,'require_match_unit_cell_crystal_symmetry', None)
     self._force_wrapping = wrapping
     if wrapping is None:
       wrapping = self.map_manager().wrapping()
@@ -352,9 +462,13 @@ class around_model(with_bounds):
     assert isinstance(model, mmtbx.model.manager)
     assert self._map_manager.map_data().accessor().origin()  ==  (0, 0, 0)
 
-    # Make sure working model and map_manager crystal_symmetry match
+    # Do not work with dummy map_manager
+    assert not map_manager.is_dummy_map_manager()
 
-    assert map_manager.is_compatible_model(model)
+    # Make sure working model and map_manager crystal_symmetry match
+    assert map_manager.is_compatible_model(model,
+      require_match_unit_cell_crystal_symmetry =
+         self.require_match_unit_cell_crystal_symmetry)
 
     assert box_cushion >=  0
 
@@ -369,9 +483,20 @@ class around_model(with_bounds):
       model = model,
       box_cushion = box_cushion,
       stay_inside_current_map = stay_inside_current_map)
-    self.gridding_first = info.lower_bounds
-    self.gridding_last = info.upper_bounds
+    from scitbx.matrix import col
+    if flex.double(col(info.upper_bounds) - col(info.lower_bounds)
+        ).min_max_mean().min < -0.5:  # nothing there
+      raise AssertionError("Sorry, model is entirely outside box,"+
+        " so boxing around model staying inside current map is not possible")
+      self.gridding_first = map_manager.data().origin()
+      self.gridding_last = map_manager.data().all()
+    else: # usual
+      self.gridding_first = info.lower_bounds
+      self.gridding_last = info.upper_bounds
 
+    # Adjust gridding to make a cubic box if desired
+    if self.use_cubic_boxing:
+      self.set_cubic_boxing(stay_inside_current_map = stay_inside_current_map)
 
     # Ready with gridding...set up shifts and box crystal_symmetry
     self.set_shifts_and_crystal_symmetry()
@@ -417,16 +542,24 @@ class around_unique(with_bounds):
     undefined.  If a box is specified that uses points outside the defined
     region, those points are set to zero.
 
+    if use_cubic_boxing, adjust bounds to make a cubic box by making box bigger.
+      if this conflicts with stay_inside_current_map, make box smaller
+    Note: stay_inside_current_map applies only when using cubic boxing
 
       Additional parameters:
          mask_expand_ratio:   allows increasing masking radius beyond default at
                               final stage of masking
-         solvent_content:  fraction of cell not occupied by macromolecule
+         solvent_content:  fraction of cell not occupied by macromolecule. May
+                           be None in which case it is estimated from the map
          sequence:        one-letter code of sequence of unique part of molecule
          chain_type:       PROTEIN or RNA or DNA. Used with sequence to estimate
                             molecular_mass
          molecular_mass:    Molecular mass (Da) of entire molecule used to
                             estimate solvent_content
+         symmetry:         Alternative way to specify symmetry (as a character
+                            string like D2, T, C3)
+         use_symmetry_in_extract_unique:   Use symmetry in identification
+                            of unique part of map
          target_ncs_au_model: model marking center of location to choose as
                               unique
          box_cushion:        buffer around unique region to be boxed
@@ -434,6 +567,9 @@ class around_unique(with_bounds):
          keep_low_density:  keep low density regions
          regions_to_keep:   Allows choosing just highest-density contiguous
                             region (regions_to_keep=1) or a few
+         keep_this_region_only: Allows choosing any specific region (first region is 0 not 1)
+         residues_per_region: Allows setting threshold to try and get about this many
+                              residues in each region. Default is 50.
 
   '''
 
@@ -441,21 +577,26 @@ class around_unique(with_bounds):
     model = None,
     target_ncs_au_model = None,
     regions_to_keep = None,
+    residues_per_region = None,
+    keep_this_region_only = None,
     solvent_content = None,
     resolution = None,
     sequence = None,
     molecular_mass = None,
     symmetry = None,
+    use_symmetry_in_extract_unique = True,
     chain_type = 'PROTEIN',
     keep_low_density = True,  # default from map_box
     box_cushion= 5,
     soft_mask = True,
     mask_expand_ratio = 1,
     wrapping = None,
+    use_cubic_boxing = False,
+    stay_inside_current_map = True,
     log = None):
 
     self.model_can_be_outside_bounds = None  # not used but required to be set
-
+    self.use_cubic_boxing = use_cubic_boxing
     self._map_manager = map_manager
     self._model = model
 
@@ -487,12 +628,29 @@ class around_unique(with_bounds):
     assert self._map_manager.map_data().origin() == (0, 0, 0)
 
     args = []
+    if residues_per_region:
+      args.append("residues_per_region=%s" %(residues_per_region))
+
+    if keep_this_region_only is not None:
+      regions_to_keep = -1 * keep_this_region_only
+
+
+    if solvent_content is None and sequence is None and molecular_mass is None:
+      from cctbx.maptbx.segment_and_split_map \
+          import get_iterated_solvent_fraction
+      solvent_content = get_iterated_solvent_fraction(
+          crystal_symmetry = crystal_symmetry,
+          mask_resolution = resolution,
+          map = self._map_manager.map_data(),
+          out = log)
+
 
     ncs_group_obj, remainder_ncs_group_obj, tracking_data  = \
       segment_and_split_map(args,
         map_data = self._map_manager.map_data(),
         crystal_symmetry = crystal_symmetry,
-        ncs_obj = self._map_manager.ncs_object(),
+        ncs_obj = self._map_manager.ncs_object() if \
+          use_symmetry_in_extract_unique else None,
         target_model = target_ncs_au_model,
         write_files = False,
         auto_sharpen = False,
@@ -504,7 +662,7 @@ class around_unique(with_bounds):
         chain_type = chain_type,
         sequence = sequence,
         molecular_mass = molecular_mass,
-        symmetry = symmetry,
+        symmetry = symmetry if use_symmetry_in_extract_unique else None,
         keep_low_density = keep_low_density,
         regions_to_keep = regions_to_keep,
         box_buffer = box_cushion,
@@ -513,6 +671,13 @@ class around_unique(with_bounds):
         out = log)
 
     from scitbx.matrix import col
+
+    # Note number of selected regions used.
+    if hasattr(tracking_data, 'available_selected_regions'):
+      self.set_info(group_args(
+        group_args_type = 'available selected regions from around_unique',
+        available_selected_regions = tracking_data.available_selected_regions,
+        ))
 
     if not hasattr(tracking_data, 'box_mask_ncs_au_map_data'):
       raise Sorry(" Extraction of unique part of map failed...")
@@ -533,6 +698,10 @@ class around_unique(with_bounds):
 
     self.gridding_first = lower_bounds
     self.gridding_last  = upper_bounds
+
+    # Adjust gridding to make a cubic box if desired
+    if self.use_cubic_boxing:
+      self.set_cubic_boxing(stay_inside_current_map = stay_inside_current_map)
 
     # Ready with gridding...set up shifts and box crystal_symmetry
     self.set_shifts_and_crystal_symmetry()
@@ -600,18 +769,25 @@ class around_mask(with_bounds):
     undefined.  If a box is specified that uses points outside the defined
     region, those points are set to zero.
 
+  Note: stay_inside_current_map applies only when using cubic boxing
+  if use_cubic_boxing, adjust bounds to make a cubic box by making box bigger.
+      if this conflicts with stay_inside_current_map, make box smaller
+
   """
   def __init__(self, map_manager,
      mask_as_map_manager,
      model = None,
      box_cushion = 3,
      wrapping = None,
+     use_cubic_boxing = False,
      model_can_be_outside_bounds = False,
+     stay_inside_current_map = True,
      log = sys.stdout):
 
     self._map_manager = map_manager
     self._model = model
     self.model_can_be_outside_bounds = model_can_be_outside_bounds
+    self.use_cubic_boxing = use_cubic_boxing
     assert map_manager.shift_cart()==mask_as_map_manager.shift_cart()
 
     # safeguards
@@ -671,6 +847,9 @@ class around_mask(with_bounds):
     self.gridding_last  = [min(n-1, iceil(gl+c*n)) for c, gl, n in zip(
        cushion, self.gridding_last, all_orig)]
 
+    # Adjust gridding to make a cubic box if desired
+    if self.use_cubic_boxing:
+      self.set_cubic_boxing(stay_inside_current_map = stay_inside_current_map)
 
     # Ready with gridding...set up shifts and box crystal_symmetry
     self.set_shifts_and_crystal_symmetry()
@@ -701,6 +880,10 @@ class around_density(with_bounds):
     undefined.  If a box is specified that uses points outside the defined
     region, those points are set to zero.
 
+   if use_cubic_boxing, adjust bounds to make a cubic box by making box bigger.
+   Note: stay_inside_current_map applies only when using cubic boxing
+   if this conflicts with stay_inside_current_map, make box smaller
+
   """
   def __init__(self, map_manager,
      threshold = 0.05,
@@ -709,11 +892,14 @@ class around_density(with_bounds):
      model = None,
      wrapping = None,
      model_can_be_outside_bounds = False,
+     use_cubic_boxing = False,
+     stay_inside_current_map = True,
      log = sys.stdout):
 
     self._map_manager = map_manager
     self._model = model
     self.model_can_be_outside_bounds = model_can_be_outside_bounds
+    self.use_cubic_boxing = use_cubic_boxing
 
     # safeguards
     assert threshold is not None
@@ -729,12 +915,28 @@ class around_density(with_bounds):
     self.basis_for_boxing_string = 'around_density, wrapping = %s' %(
       wrapping)
 
-
     # Select box where data are positive (> threshold*max)
     map_data = map_manager.map_data()
     origin = list(map_data.origin())
     assert origin == [0, 0, 0]
     all = list(map_data.all())
+
+    edge_values = flex.double()
+    ux = all[0]-1
+    uy = all[1]-1
+    uz = all[2]-1
+    for lb, ub in (
+      [(0,0,0), (0,uy,uz)],
+      [(ux,0,0), (ux,uy,uz)],
+      [(0,0,0), (ux,0,uz)],
+      [(0,uy,0), (ux,uy,uz)],
+      [(0,0,0), (ux,uy,0)],
+      [(0,0,uz), (ux,uy,uz)],
+      ):
+      new_map_data = maptbx.copy(map_data,lb,ub)
+      edge_values.append(new_map_data.as_1d().as_double().min_max_mean().max)
+    edge_value = edge_values.min_max_mean().mean
+
     # Get max value vs x, y, z
     value_list = flex.double()
     for i in range(0, all[0]):
@@ -742,7 +944,8 @@ class around_density(with_bounds):
          tuple((i, 0, 0)),
          tuple((i, all[1], all[2]))
        )
-      value_list.append(new_map_data.as_1d().as_double().min_max_mean().max)
+      value_list.append(
+        new_map_data.as_1d().as_double().min_max_mean().max - edge_value)
     ii = 0
     for z in value_list:
       ii+= 1
@@ -755,17 +958,8 @@ class around_density(with_bounds):
          tuple((0, j, 0)),
          tuple((all[0], j, all[2]))
        )
-      value_list.append(new_map_data.as_1d().as_double().min_max_mean().max)
-    y_min, y_max = get_range(value_list, threshold = threshold,
-      get_half_height_width = get_half_height_width)
-
-    value_list = flex.double()
-    for j in range(0, all[1]):
-      new_map_data = maptbx.copy(map_data,
-         tuple((0, j, 0)),
-         tuple((all[0], j, all[2]))
-       )
-      value_list.append(new_map_data.as_1d().as_double().min_max_mean().max)
+      value_list.append(
+        new_map_data.as_1d().as_double().min_max_mean().max - edge_value)
     y_min, y_max = get_range(value_list, threshold = threshold,
       get_half_height_width = get_half_height_width)
 
@@ -775,7 +969,8 @@ class around_density(with_bounds):
          tuple((0, 0, k)),
          tuple((all[0], all[1], k))
        )
-      value_list.append(new_map_data.as_1d().as_double().min_max_mean().max)
+      value_list.append(
+        new_map_data.as_1d().as_double().min_max_mean().max - edge_value)
     z_min, z_max = get_range(value_list, threshold = threshold,
       get_half_height_width = get_half_height_width)
 
@@ -789,6 +984,9 @@ class around_density(with_bounds):
        cushion, frac_min, all_orig)]
     self.gridding_last  = [ min(n-1, iceil((f+c)*n)) for c, f, n in zip(
        cushion, frac_max, all_orig)]
+    # Adjust gridding to make a cubic box if desired
+    if self.use_cubic_boxing:
+      self.set_cubic_boxing(stay_inside_current_map = stay_inside_current_map)
 
     # Ready with gridding...set up shifts and box crystal_symmetry
     self.set_shifts_and_crystal_symmetry()
@@ -796,81 +994,194 @@ class around_density(with_bounds):
     # Apply boxing to model, ncs, and map (if available)
     self.apply_to_model_ncs_and_map()
 
+def is_even(n):
+  if n < 0:
+    n = -n
+  if 2 * (n//2) == n:
+    return True
+  else:
+    return False
+
+def cube_relative_to_box(new_first, new_last, map_all,
+       require_even_gridding = None):
+    ''' returns zero or negative number for lowest_value of new_first and
+       zero or positive number for highest value of new_last - map_all
+      If require_even_gridding, make the lowest and highest even by making
+       them further from zero'''
+
+    lowest_value = min(0, min([a for a in new_first]))
+    if require_even_gridding and (not is_even(lowest_value)):
+      lowest_value -= 1
+    highest_value = max(0, max([a - b for a, b in zip(new_last,map_all)]))
+    if require_even_gridding and (not is_even(highest_value)):
+      highest_value += 1
+    print("lowest, highest out of box:",lowest_value, highest_value)
+    return lowest_value,highest_value
+
 def get_range(value_list, threshold = None, ignore_ends = True,
-     keep_near_ends_frac = 0.02, half_height_width = 2., get_half_height_width = None,
-     cutoff_ratio = 4, ratio_max = 0.5): # XXX May need to set cutoff_ratio and
-    #  ratio_max lower.
-    # ignore ends allows ignoring the first and last points which may be off
-    # if get_half_height_width, find width at half max hieght, go
-    #  half_height_width times this width out in either direction, use that as
-    #  baseline instead of full cell. Don't do it if the height at this point
-    #  is over cutoff_ratio times threshold above original baseline.
-    if get_half_height_width:
-      z_min, z_max = get_range(value_list, threshold = 0.5,
-        ignore_ends = ignore_ends, keep_near_ends_frac = keep_near_ends_frac,
-        get_half_height_width = False)
-      z_mid = 0.5*(z_min+z_max)
-      z_width = 0.5*(z_max-z_min)
-      z_low = z_mid-2*z_width
-      z_high = z_mid+2*z_width
-      if ignore_ends:
-        i_max = value_list.size()-2
-        i_min = 1
-      else:
-        i_max = value_list.size()-1
-        i_min = 0
+   keep_near_ends_frac = 0.02, half_height_width = 2.,
+   get_half_height_width = None,
+   cutoff_ratio = 4, ratio_max = 0.5,
+   smooth_list_first = True,
+   smooth_units = 20,
+   max_allowed_outside_of_box = 0.33 ): # XXX May need to set cutoff_ratio and
+  #  ratio_max lower.
+  # ignore ends allows ignoring the first and last points which may be off
+  # if get_half_height_width, find width at half max hieght, go
+  #  half_height_width times this width out in either direction, use that as
+  #  baseline instead of full cell. Don't do it if the height at this point
+  #  is over cutoff_ratio times threshold above original baseline.
+  #  If value outside range is more than max_allowed_outside_of_box of max,
+  #    make it bigger.
+  n_tot = value_list.size()
+  assert n_tot>0
+  if smooth_list_first:
+   value_list = flex.double(smooth_list(value_list,
+     smooth_range = max(1, value_list.size()//smooth_units)))
 
-      i_low =  max(i_min, min(i_max, int(0.5+z_low* value_list.size())))
-      i_high = max(i_min, min(i_max, int(0.5+z_high*value_list.size())))
-      min_value = value_list.min_max_mean().min
-      max_value = value_list.min_max_mean().max
-      ratio_low = (value_list[i_low]-min_value)/max(
-         1.e-10, (max_value-min_value))
-      ratio_high = (value_list[i_high]-min_value)/max(
-         1.e-10, (max_value-min_value))
-      if ratio_low <=  cutoff_ratio*threshold and ratio_low >0 \
-           and ratio_low<ratio_max\
-           and ratio_high <=  cutoff_ratio*threshold and ratio_high > 0 \
-           and ratio_high < ratio_max:
-        ratio = min(ratio_low, ratio_high)
-        z_min, z_max = get_range(
-          value_list, threshold = threshold+ratio,
-          ignore_ends = ignore_ends, keep_near_ends_frac = keep_near_ends_frac,
-          get_half_height_width = False)
-        return z_min, z_max
-      else:
-        z_min, z_max = get_range(value_list, threshold = threshold,
-          ignore_ends = ignore_ends, keep_near_ends_frac = keep_near_ends_frac,
-          get_half_height_width = False)
-        return z_min, z_max
+  if get_half_height_width:
+    z_min, z_max = get_range(value_list, threshold = 0.5,
+      ignore_ends = ignore_ends, keep_near_ends_frac = keep_near_ends_frac,
+      get_half_height_width = False, smooth_list_first = False)
+    z_mid = 0.5*(z_min+z_max)
+    z_width = 0.5*(z_max-z_min)
+    z_low = z_mid-2*z_width
+    z_high = z_mid+2*z_width
+    if ignore_ends:
+      i_max = value_list.size()-2
+      i_min = 1
+    else:
+      i_max = value_list.size()-1
+      i_min = 0
 
-    if threshold is None: threshold = 0
-    n_tot = value_list.size()
-    assert n_tot>0
+    i_low =  max(i_min, min(i_max, int(0.5+z_low* value_list.size())))
+    i_high = max(i_min, min(i_max, int(0.5+z_high*value_list.size())))
     min_value = value_list.min_max_mean().min
     max_value = value_list.min_max_mean().max
-    cutoff = min_value+(max_value-min_value)*threshold
-    if ignore_ends:
-      i_off = 1
+    ratio_low = (value_list[i_low]-min_value)/max(
+       1.e-10, (max_value-min_value))
+    ratio_high = (value_list[i_high]-min_value)/max(
+       1.e-10, (max_value-min_value))
+    if ratio_low <=  cutoff_ratio*threshold and ratio_low >0 \
+         and ratio_low<ratio_max\
+         and ratio_high <=  cutoff_ratio*threshold and ratio_high > 0 \
+         and ratio_high < ratio_max:
+      ratio = min(ratio_low, ratio_high)
+      z_min, z_max = get_range(
+        value_list, threshold = threshold+ratio,
+        ignore_ends = ignore_ends, keep_near_ends_frac = keep_near_ends_frac,
+        get_half_height_width = False, smooth_list_first = False)
     else:
-      i_off = 0
-    i_low = None
-    for i in range(i_off, n_tot-i_off):
-      if value_list[i]>cutoff:
-        i_low = max(i_off, i-1)
-        break
-    i_high = None
-    for i in range(i_off, n_tot-i_off):
-      ii = n_tot-1-i
-      if value_list[ii]>cutoff:
-        i_high = min(n_tot-1-i_off, ii+1)
-        break
-    if i_low is None or i_high is None:
-      raise Sorry("Cannot auto-select region...")
-    if i_low/n_tot<keep_near_ends_frac: i_low = 0
-    if (n_tot-1-i_high)/n_tot<keep_near_ends_frac: i_high = n_tot-1
+      z_min, z_max = get_range(value_list, threshold = threshold,
+        ignore_ends = ignore_ends, keep_near_ends_frac = keep_near_ends_frac,
+        get_half_height_width = False, smooth_list_first = False)
+    if not too_high_outside_range(value_list, int(0.5+ n_tot * z_min),
+         int(0.5+ n_tot *z_max),
+        max_allowed_outside_of_box): # ok
+      return z_min, z_max
+
+  if threshold is None: threshold = 0
+  min_value = value_list.min_max_mean().min
+  max_value = value_list.min_max_mean().max
+  cutoff = min_value+(max_value-min_value)*threshold
+
+  # Find lowest point to left and right of highest point
+  vl = list(value_list)
+  max_i = vl.index(max_value)
+  if max_i == 0:
+    min_i_to_left = 0
+  else: # usual
+    min_to_left = value_list[:max_i].min_max_mean().min
+    min_i_to_left = vl.index(min_to_left,0,max_i)
+  if max_i == n_tot - 1:
+    min_i_to_right = n_tot - 1
+  else: # usual
+    min_to_right = value_list[max_i:].min_max_mean().min
+    min_i_to_right = vl.index(min_to_right,min(n_tot-1,max_i+1),n_tot)
+  if ignore_ends:
+    i_off = 1
+  else:
+    i_off = 0
+  i_low = None
+  for i in range(max(min_i_to_left,i_off), min(min_i_to_right,n_tot-i_off)):
+    if value_list[i]>cutoff:
+      i_low = max(i_off, i-1)
+      break
+  i_high = None
+  for ii in range(
+       min(min_i_to_right,n_tot-i_off),
+       max(min_i_to_left,i_off),
+        -1):
+    if value_list[ii]>cutoff:
+      i_high = min(n_tot-1-i_off, ii+1)
+      break
+  if i_low is None or i_high is None:
+    raise Sorry("Cannot auto-select region...")
+  if i_low/n_tot<keep_near_ends_frac: i_low = 0
+  if (n_tot-1-i_high)/n_tot<keep_near_ends_frac: i_high = n_tot-1
+  if not too_high_outside_range(value_list, i_low, i_high,
+        max_allowed_outside_of_box): # ok
     return i_low/n_tot, i_high/n_tot
 
+  # Failed to include high density...try again not using low point
+  if threshold is None: threshold = 0
+  min_value = value_list.min_max_mean().min
+  max_value = value_list.min_max_mean().max
+  cutoff = min_value+(max_value-min_value)*threshold
+  if ignore_ends:
+    i_off = 1
+  else:
+    i_off = 0
+  i_low = None
+  for i in range(i_off, n_tot-i_off):
+    if value_list[i]>cutoff:
+      i_low = max(i_off, i-1)
+      break
+  i_high = None
+  for i in range(i_off, n_tot-i_off):
+    ii = n_tot-1-i
+    if value_list[ii]>cutoff:
+      i_high = min(n_tot-1-i_off, ii+1)
+      break
+  if i_low is None or i_high is None:
+    raise Sorry("Cannot auto-select region...")
+  if i_low/n_tot<keep_near_ends_frac: i_low = 0
+  if (n_tot-1-i_high)/n_tot<keep_near_ends_frac: i_high = n_tot-1
+  if not too_high_outside_range(value_list, i_low, i_high,
+        max_allowed_outside_of_box): # ok
+    return i_low/n_tot, i_high/n_tot
+  else:  # give up and take the whole thing
+    return i_off/n_tot, (n_tot - i_off - 1)/n_tot
+
+
+
+def too_high_outside_range(value_list, i_start, i_end,
+       max_allowed_outside_of_box):
+  inside_values = flex.double(value_list[i_start:i_end])
+  outside_values = flex.double(value_list[:i_start])
+  outside_values.extend(flex.double(value_list[i_end:]))
+  if outside_values.min_max_mean().max > \
+      max_allowed_outside_of_box * inside_values.min_max_mean().max:
+    return True
+  else:
+    return False
+
+def smooth_list(working_list,smooth_range = None): # smooth this list of numbers
+    assert smooth_range is not None
+    new_list=[]
+    delta=smooth_range//2
+    for i in range(len(working_list)):
+      sum=0.
+      sumn=0.
+      for j in range(-delta,delta+1):
+        jj=j+i
+        if jj >=0 and jj < len(working_list):
+          sum+=working_list[jj]
+          sumn+=1.
+      if sumn>0.:
+        sum=sum/sumn
+      new_list.append(sum)
+    return new_list
 
 def get_bounds_of_valid_region(map_data,
     gridding_first,
@@ -1006,6 +1317,8 @@ def shift_and_box_model(model = None,
   return model_manager(
      ph.as_pdb_input(),
      crystal_symmetry = crystal_symmetry,
+     restraint_objects = model.get_restraint_objects(),
+     monomer_parameters = model.get_monomer_parameters(),
      log = null_out())
 
 def get_boxes_to_tile_map(target_for_boxes = 24,
@@ -1207,7 +1520,7 @@ def get_bounds_around_model(
     '''
       Calculate the lower and upper bounds to box around a model
       Allow bounds to go outside the available box unless
-      stay_inside_current_map (this has to be dealt with at the boxing stage)
+        stay_inside_current_map (this has to be dealt with at the boxing stage)
     '''
 
     # get items needed to do the shift
@@ -1228,8 +1541,9 @@ def get_bounds_around_model(
 
     lower_bounds = [ifloor(f*n) for f, n in zip(frac_min, all_orig)]
     upper_bounds = [ iceil(f*n) for f, n in zip(frac_max, all_orig)]
+    n = all_orig[-1]
     if stay_inside_current_map:
-      lower_bounds = [ max (0,lb) for lb in lower_bounds]
+      lower_bounds = [ min(n-1,max (0,lb)) for lb in lower_bounds]
       upper_bounds = [ min (ub, n-1) for ub,n in zip(upper_bounds,all_orig)]
     return group_args(
       lower_bounds = lower_bounds,

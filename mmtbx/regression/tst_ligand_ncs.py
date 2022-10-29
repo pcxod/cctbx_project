@@ -8,7 +8,6 @@ from __future__ import absolute_import, division, print_function
 from iotbx import file_reader
 from libtbx import easy_run
 from libtbx.utils import null_out
-from six.moves import cStringIO as StringIO
 import os.path as op
 import os
 
@@ -155,7 +154,8 @@ HETATM  132  O   HOH B  12      -1.576   1.103  11.035  1.00 44.76           O
 END
 """
   pdb_in = prefix + "_in.pdb"
-  open(pdb_in, "w").write(pdb_raw)
+  with open(pdb_in, "w") as f:
+    f.write(pdb_raw)
   mtz_in = prefix + "_in.mtz"
   params = """
     high_resolution = 1.75
@@ -169,7 +169,8 @@ END
       file_name = %s
     }
   """ % (pdb_in, mtz_in)
-  open("%s_fmodel.eff" % prefix, "w").write(params)
+  with open("%s_fmodel.eff" % prefix, "w") as f:
+    f.write(params)
   assert (easy_run.fully_buffered(
       "phenix.fmodel %s_fmodel.eff" % prefix
     ).raise_if_errors().return_code == 0)
@@ -192,8 +193,9 @@ def exercise():
         residue_group.remove_atom_group(atom_group)
         break
   assert old_ligand is not None
-  open("tst_ligand_ncs_start.pdb", "w").write(hierarchy.as_pdb_string(
-    crystal_symmetry=pdb_file.file_object.crystal_symmetry()))
+  with open("tst_ligand_ncs_start.pdb", "w") as f:
+    f.write(hierarchy.as_pdb_string(
+      crystal_symmetry=pdb_file.file_object.crystal_symmetry()))
   args = [
     "tst_ligand_ncs_start.pdb",
     mtz_in,
@@ -221,17 +223,13 @@ def exercise():
   #
   # Unit tests
   #
-  import mmtbx.ncs.ligands
-  operators = mmtbx.ncs.ligands.find_ncs_operators(hierarchy,
-    log=null_out())
-  assert len(operators) == 1
-  group_ops = operators[0]
-  assert len(group_ops) == 2
-  assert (len(group_ops[0].selection) == 7)
-  for g_op in group_ops:
-    out = StringIO()
-    g_op.show_summary(out=out, prefix=" ")
-    assert out.getvalue().count("Rotation:") == 1
+
+  # Excessive testing of NCS search machinery although with ligands. May be removed.
+  import iotbx.ncs
+  ncs_obj = iotbx.ncs.input(hierarchy=hierarchy, log=null_out())
+  nrgl = ncs_obj.get_ncs_restraints_group_list()
+  assert len(nrgl) == 1, len(nrgl)
+  assert len(nrgl[0].master_iselection) == 59, len(nrgl[0].master_iselection)
 
 if (__name__ == "__main__"):
   exercise()

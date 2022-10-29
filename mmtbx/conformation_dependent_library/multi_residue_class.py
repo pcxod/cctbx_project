@@ -104,7 +104,7 @@ class ProteinResidues(LinkedResidues):
   def are_linked(self,
                  return_value=False,
                  use_distance_always=False,
-                 bond_cut_off=3., # Same as link_distance_cutoff of pdb_interpretation
+                 bond_cut_off=2.,
                  allow_poly_ca=False,
                  poly_ca_cut_off=4.,
                  verbose=True):
@@ -304,12 +304,29 @@ class ThreeProteinResidues(ProteinResidues):
         proxies.append(proxy)
     return proxies
 
+def id_str_for_phi_psi_2(residue, ignore_altloc=False):
+  id_str = residue.id_str().replace('pdbres=','').replace('"','')
+  if ignore_altloc:
+    return ' %s' % id_str
+  altloc=''
+  for atom in residue.atoms():
+    if atom.name not in [' N  ', ' CA ', ' C  ']: continue
+    atom_group = atom.parent()
+    if atom_group.altloc:
+      altloc = atom_group.altloc
+      break
+  return '%1s%s' % (altloc, id_str)
+
 class FourProteinResidues(ThreeProteinResidues):
   def get_ca_dihedrals(self, verbose=False):
     if verbose:
       for residue in self:
         print(residue.id_str())
     return get_ca_dihedrals(self)
+
+  def id_str_for_phi_psi_2(self, ignore_altloc=False):
+    return '%s ~> %s' % ( id_str_for_phi_psi_2(self[1], ignore_altloc),
+                          id_str_for_phi_psi_2(self[2], ignore_altloc))
 
 class FiveProteinResidues(FourProteinResidues):
   def get_cablam_info(self):

@@ -18,6 +18,10 @@ get_class = iotbx.pdb.common_residue_names_get_class
 sugar_types = ["SACCHARIDE",
                "D-SACCHARIDE",
                "L-SACCHARIDE",
+               'D-SACCHARIDE, ALPHA LINKING',
+               'D-SACCHARIDE, BETA LINKING',
+               'L-SACCHARIDE, ALPHA LINKING',
+               'L-SACCHARIDE, BETA LINKING',
                ]
 amino_types = ['"L-PEPTIDE LINKING"',
                '"D-PEPTIDE LINKING"',
@@ -57,6 +61,18 @@ class empty:
       outl += "  %s : %s\n" % (attr, getattr(self, attr))
     return outl
 
+  def __lt__(self, other):
+    if type(other)==type(''): return False
+    for attr in sorted(self.__dict__):
+      item1 = getattr(self, attr)
+      item2 = getattr(other, attr)
+      rc = item1==item2
+      if rc:
+        continue
+      else:
+        return rc
+    return rc
+
 def _write_warning_line(s):
   print(" !!! %-78s !!!" % s)
 
@@ -93,14 +109,18 @@ def is_glyco_bond(atom1, atom2, verbose=False):
     print(sugar_types)
     print(get_type(atom1.parent().resname).upper())
     print(get_type(atom2.parent().resname).upper())
+    print('-------------------------')
   if get_type(atom1.parent().resname) is None: return False
   if get_type(atom2.parent().resname) is None: return False
   if not get_type(atom1.parent().resname).upper() in sugar_types:
+    if verbose: print('False')
     return False
   if not get_type(atom2.parent().resname).upper() in sugar_types:
+    if verbose: print('False')
     return False
   #
   #if atom2.parent().resname in not_correct_sugars: return False
+  if verbose: print('True')
   return True
 
 def is_glyco_amino_bond(atom1, atom2, verbose=False):
@@ -113,7 +133,9 @@ def is_glyco_amino_bond(atom1, atom2, verbose=False):
     print(sugar_types)
     print(get_type(atom1.parent().resname).upper())
     print(get_type(atom2.parent().resname).upper())
+    print('-------------------------------')
   if get_type(atom1.parent().resname) is None:
+    if verbose: print('False')
     return False
   if get_type(atom2.parent().resname) is None: return False
   sugars = 0
@@ -128,6 +150,8 @@ def is_glyco_amino_bond(atom1, atom2, verbose=False):
     aminos+=1
   if sugars==1 and aminos==1:
     return True
+    if verbose: print('True')
+  if verbose: print('False')
   return False
 
 def is_n_glyco_bond(atom1, atom2):
@@ -188,7 +212,7 @@ def get_chiral_volume(c_atom, o_atom, angles, verbose=False):
 
 def get_hand(c_atom, o_atom, angles, verbose=False):
   v = get_chiral_volume(c_atom, o_atom, angles, verbose=verbose)
-  if v<0:
+  if v is not None and v < 0:
     return "BETA"
   else:
     return "ALPHA"
@@ -207,7 +231,7 @@ def get_classes(atom, important_only=False, verbose=False):
     return class_name
   #
   attrs = [
-    "common_saccharide", # not in get_class
+    "common_saccharide",
     "common_water",
     "common_element",
     "common_small_molecule",
@@ -217,6 +241,7 @@ def get_classes(atom, important_only=False, verbose=False):
     "other",
     "uncommon_amino_acid",
     "unknown",
+    'd_amino_acid',
     ]
   redirect = {"modified_amino_acid" : "other",
               "modified_rna_dna" : "other",
@@ -248,15 +273,23 @@ def get_classes(atom, important_only=False, verbose=False):
     if i:
       rc = gc
     else:
+      gotten_type = None
       if atom_group.resname in one_letter_given_three_letter:
         gotten_type = "L-PEPTIDE LINKING"
       elif atom_group.resname in ["HOH"]:
         gotten_type = "NON-POLYMER"
+      #
+      # special section for getting SOME of the carbohydrates using the get_class
+      # or from the Chem Components which does not work in ccctbx only install
+      #
+      elif gc=='common_saccharide':
+        rc = gc
       else:
         gotten_type = get_type(atom_group.resname)
       if gotten_type is not None:
         if gotten_type.upper() in sugar_types:
           rc = attr
+      #
     if rc==attr:
       if important_only: return _filter_for_metal(atom, rc)
       setattr(classes, attr, True)
@@ -298,6 +331,22 @@ def is_atom_metal_coordinated(lookup,
   if other.element.strip()=='C': return False
   return True
 
+def _get_cis_trans():
+  return 'TRANS'
+
+def is_atom_pair_linked_tuple(atom1,
+                              atom2):
+  class1 = get_classes(atom1, important_only=True)
+  class2 = get_classes(atom2, important_only=True)
+  if class1=='common_amino_acid' and class2==class1:
+    if atom1.name==' N  ' and atom2.name==' C  ':
+      return _get_cis_trans(), False, '?'
+    elif atom1.name==' C  ' and atom2.name==' N  ':
+      return _get_cis_trans(), True, '?'
+    else:
+      print('amino acid link not found',atom1.quote(),atom2.quote())
+  return None, None, None
+
 def is_atom_pair_linked(atom1,
                         atom2,
                         distance=None,
@@ -336,11 +385,15 @@ def is_atom_pair_linked(atom1,
   class2 = get_classes(atom2, important_only=True)
   class1 = linking_setup.adjust_class(atom1, class1)
   class2 = linking_setup.adjust_class(atom2, class2)
+  # python3
+  # assert type(class1)==type(''), 'class1 of %s not singular : %s' % (atom1.quote(), class1)
+  # assert type(class2)==type(''), 'class2 of %s not singular : %s' % (atom2.quote(), class2)
   if ( linking_setup.sulfur_class(atom1, class1)=="sulfur" and
        linking_setup.sulfur_class(atom2, class2)=="sulfur" ):
     class1 = 'sulfur'
     class2 = 'sulfur'
   lookup = [class1, class2]
+  if verbose: print('lookup', lookup, atom1.quote(), atom2.quote())
   lookup.sort()
   if verbose: print('lookup1',lookup,skip_if_both) #.get(lookup, None)
   if lookup in skip_if_both: return False
@@ -425,6 +478,17 @@ Send details to help@phenix-online.org
   if class1=="common_amino_acid" and class2=="common_amino_acid":
     if verbose:
       print("AMINO ACIDS",atom1.quote(), atom2.quote())
+  #
+  # D-peptide special case...
+  #
+  if class1=='d_amino_acid' or class2=='d_amino_acid':
+    if class1=='d_amino_acid':
+      d_amino_acid=atom1
+    elif class2=='d_amino_acid':
+      d_amino_acid=atom2
+    if d_amino_acid.name.strip() in ['O']:
+      if verbose: print('d_amino_acid do not link O')
+      return False
   #
   # other
   #
@@ -636,52 +700,18 @@ def process_atom_groups_for_linking_single_link(pdb_hierarchy,
       #raise Sorry("Check input geometry")
       return None
   else:
+    if verbose: print('bypass',long_tmp_key)
     key = long_tmp_key
 
   pdbres_pair = []
   for atom in [atom1, atom2]:
     pdbres_pair.append(atom.id_str(pdbres=True))
   if verbose:
-    print("key %s" % key)
+    print("key2 %s" % key)
     print(pdbres_pair)
     print(atom1.quote())
     print(atom2.quote())
   return [pdbres_pair], [key], [(atom1, atom2)]
-
-# def process_atom_groups_for_linking_multiple_links(pdb_hierarchy,
-#                                                    link_atoms,
-#                                                    verbose=False,
-#                                                    ):
-#   assert 0
-#   def _quote(atom):
-#     key = ""
-#     for attr in ["name", "resname", "resseq", "altloc"]:
-#       if getattr(atom, attr, None) is not None:
-#         key += "%s_" % getattr(atom, attr).strip()
-#       elif getattr(atom.parent(), attr, None) is not None:
-#         key += "%s_" % getattr(atom.parent(), attr).strip()
-#       elif getattr(atom.parent().parent(), attr, None) is not None:
-#         key += "%s_" % getattr(atom.parent().parent(), attr).strip()
-#       else:
-#         assert 0
-#     return key[:-1]
-
-#   pdbres_pairs = []
-#   keys = []
-#   atoms = []
-#   for atom1, atom2 in link_atoms:
-#     key = "%s-%s" % (_quote(atom1), _quote(atom2))
-#     pdbres_pair = []
-#     for atom in [atom1, atom2]:
-#       pdbres_pair.append(atom.id_str(pdbres=True))
-#     if verbose:
-#       print atom1.quote()
-#       print atom2.quote()
-#       print key
-#     pdbres_pairs.append(pdbres_pair)
-#     keys.append(key)
-#     atoms.append((atom1, atom2))
-#   return pdbres_pairs, keys, atoms
 
 def print_apply(apply):
   # from libtbx.introspection import show_stack

@@ -50,6 +50,24 @@ class clash(atoms):
   def __cmp__(self, other) : # sort in descending order
     return cmp(self.overlap, other.overlap)
 
+  def __eq__(self, other):
+    return self.overlap == other.overlap
+
+  def __ne__(self, other):
+    return self.overlap != other.overlap
+
+  def __lt__(self, other):
+    return self.overlap < other.overlap
+
+  def __le__(self, other):
+    return self.overlap <= other.overlap
+
+  def __gt__ (self, other):
+    return self.overlap > other.overlap
+
+  def __ge__(self, other):
+    return self.overlap >= other.overlap
+
 class clashscore(validation):
   __slots__ = validation.__slots__ + [
     "clashscore",
@@ -303,8 +321,7 @@ class probe_clashscore_manager(object):
       ogt = largest_occupancy
 
     self.probe_atom_b_factor = None
-    probe_command = os.path.join(os.environ['LIBTBX_BUILD'],
-                                 'probe', 'exe', 'probe')
+    probe_command = libtbx.env.under_build(os.path.join('probe', 'exe', 'probe'))
     if os.getenv('CCP4'):
       ccp4_probe = os.path.join(os.environ['CCP4'],'bin','probe')
       if (os.path.isfile(ccp4_probe) and not os.path.isfile(probe_command)):

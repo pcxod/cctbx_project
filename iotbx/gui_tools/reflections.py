@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import absolute_import, division, print_function
 
 import iotbx.gui_tools
@@ -6,6 +7,9 @@ from libtbx.utils import Sorry
 import os
 import six
 from six.moves import range
+from libtbx.phil import parse
+import textwrap
+
 
 def space_group_as_str(space_group):
   from cctbx import sgtbx
@@ -563,16 +567,21 @@ def get_array_description(miller_array):
     return "R-free flag"
   methods_and_meanings = [ ("is_complex_array", "Map coeffs"),
                            ("is_xray_amplitude_array", "Amplitude"),
+                           ("is_xray_reconstructed_amplitude_array", "Amplitude"),
                            ("is_xray_intensity_array", "Intensity"),
                            ("is_hendrickson_lattman_array", "HL coeffs"),
                            ("is_bool_array", "Boolean"),
                            ("is_integer_array", "Integer"),
-                           ("is_real_array", "Floating-point"), ]
+                           ("is_real_array", "Floating-point"),
+                           ("is_string_array", "String")
+                           ]
   for method, desc in methods_and_meanings :
     test = getattr(miller_array, method)
     if test():
       return desc
-  return "Unknown"
+  # resort to the name of the python data type if not matching any of the above
+  return type(miller_array.data()).__name__
+
 
 def get_mtz_label_prefix(input_file=None, file_name=None):
   if input_file is None :
@@ -740,3 +749,340 @@ def decode_resolve_map_coeffs(labels):
     elif resolve_label == "FOM" :
       fom_label = array_label
   return (f_label, phi_label, fom_label)
+
+
+
+class ArrayInfo:
+  """
+  Extract information from a list of miller_array objects and format it for printing as a table
+  To be called in a loop like:
+
+  for i,array in enumerate(arrays):
+    arrayinfo = ArrayInfo(array)
+    info_fmt, headerstr, infostr = arrayinfo.get_selected_info_columns_from_phil()
+    if i==0:
+      print(headerstr)
+    print(infostr)
+
+  """
+  def __init__(self, millarr, wrap_labels=0):
+    from crys3d.hklviewer import display2
+    from cctbx.array_family import flex
+    from scitbx import graphics_utils
+    from libtbx.math_utils import roundoff
+    import math
+    nan = float("nan")
+    self.wrap_labels = wrap_labels
+    if millarr.space_group() is None :
+      self.spginf = "?"
+    else:
+      self.spginf = millarr.space_group_info().symbol_and_number()
+    if millarr.unit_cell() is None:
+      self.ucell = (nan, nan, nan, nan, nan, nan)
+    else:
+      self.ucell = millarr.unit_cell().parameters()
+    self.ucellinf = "({:.6g}Å, {:.6g}Å, {:.6g}Å, {:.6g}°, {:.6g}°, {:.6g}°)".format(*self.ucell)
+    data = millarr.deep_copy().data()
+    self.maxdata = self.mindata = self.maxsigmas = self.minsigmas = nan
+    self.minmaxdata = (nan, nan)
+    self.minmaxsigs = (nan, nan)
+    self.data_sigdata_max = nan
+    self.data_sigdata = nan
+    self.desc = ""
+    self.arrsize = data.size()
+    if not isinstance(data, flex.std_string):
+      if isinstance(data, flex.hendrickson_lattman):
+        data = graphics_utils.NoNansHL( data )
+        # estimate minmax values of HL coefficients as a simple sum
+        if self.arrsize:
+          self.maxdata = max([e[0]+e[1]+e[2]+e[3] for e in data ])
+          self.mindata = min([e[0]+e[1]+e[2]+e[3] for e in data ])
+          self.arrsize = len([42 for e in millarr.data() if not math.isnan(e[0]+e[1]+e[2]+e[3])])
+      elif isinstance(data, flex.vec3_double) or isinstance(data, flex.vec2_double):
+        # XDS produces 2D or 3D arrays in some of its files
+        if self.arrsize:
+          self.maxdata = max([max(e) for e in data ])
+          self.mindata = min([min(e) for e in data ])
+      else:
+        # Get a list of bools with True whenever there is a nan
+        selection = ~ graphics_utils.IsNans( flex.abs( millarr.data()).as_double() )
+        # count elements that are not nan values
+        self.arrsize = millarr.data().select(selection).size()
+        if (isinstance(data, flex.int)):
+          data = flex.double([e for e in data if e!= display2.inanval])
+        if millarr.is_complex_array():
+          data = flex.abs(data)
+        i=0
+        while math.isnan(data[i]):
+          i += 1 # go on until we find a data[i] that isn't NaN
+        data = graphics_utils.NoNansArray( data, data[i] ) # assuming data[0] isn't NaN
+        self.maxdata = flex.max( data )
+        self.mindata = flex.min( data )
+      if millarr.sigmas() is not None:
+        data = millarr.sigmas().deep_copy()
+        i=0
+        while math.isnan(data[i]):
+          i += 1 # go on until we find a data[i] that isn't NaN
+        data = graphics_utils.NoNansArray( data, data[i] )
+        self.maxsigmas = flex.max( data )
+        self.minsigmas = flex.min( data )
+        # Inspired by Diederichs doi:10.1107/S0907444910014836 I/SigI_asymptotic
+        data_over_sigdata = millarr.data()/millarr.sigmas()
+        self.data_sigdata = flex.sum(data_over_sigdata)/len(data_over_sigdata)
+        self.data_sigdata_max = flex.max( data_over_sigdata)
+      self.minmaxdata = (self.mindata, self.maxdata)
+      self.minmaxsigs = (self.minsigmas, self.maxsigmas)
+    self.labels = self.desc = self.wavelength = ""
+    if millarr.info():
+      self.labels = millarr.info().labels
+      self.desc = get_array_description(millarr)
+      self.wavelength = "{:.6g}".format(millarr.info().wavelength) if millarr.info().wavelength is not None else float("nan")
+    self.span = "(?,?,?), (?,?,?)"
+    self.dmin = nan
+    self.dmax = nan
+    if millarr.unit_cell() is not None:
+      self.span = str(millarr.index_span().min()) + ", "+ str(millarr.index_span().max())
+      self.dmin = millarr.d_max_min()[1]
+      self.dmax = millarr.d_max_min()[0]
+    self.dminmax = roundoff((self.dmin,self.dmax))
+    self.issymunique = "?"
+    self.isanomalous = "?"
+    self.n_sys_abs = 0
+    self.n_bijvoet = self.n_singletons = 0
+    self.ano_mean_diff = nan
+    self.ano_completeness = nan
+    self.data_compl_infty = nan
+    self.data_completeness = nan
+    self.n_centric = nan
+    # computations below done as in cctbx.miller.set.show_comprehensive_summary()
+    if self.spginf != "?":
+      self.issymunique = millarr.is_unique_set_under_symmetry()
+      self.isanomalous = millarr.anomalous_flag()
+      sys_absent_flags = millarr.sys_absent_flags().data()
+      self.n_sys_abs = sys_absent_flags.count(True)
+      if (self.n_sys_abs != 0):
+        millarr = millarr.select(selection=~sys_absent_flags)
+      self.n_centric = millarr.centric_flags().data().count(True)
+    if not math.isnan(self.ucell[0]):
+      if (self.spginf != "?"
+          and millarr.indices().size() > 0
+          and self.issymunique):
+        millarr.setup_binner(n_bins=1)
+        completeness_d_max_d_min = millarr.completeness(use_binning=True)
+        binner = completeness_d_max_d_min.binner
+        assert binner.counts_given()[0] == 0
+        assert binner.counts_given()[2] == 0
+        n_obs = binner.counts_given()[1]
+        n_complete = binner.counts_complete()[1]
+        if (n_complete != 0 and self.dmax != self.dmin):
+            self.data_completeness = n_obs/n_complete
+        n_complete += binner.counts_complete()[0]
+        if (n_complete != 0):
+            self.data_compl_infty = n_obs/n_complete
+        if (self.isanomalous) and (millarr.is_xray_intensity_array() or
+          millarr.is_xray_amplitude_array()):
+            self.ano_completeness = millarr.anomalous_completeness()
+    if (self.spginf != "?" and self.isanomalous and self.issymunique):
+      asu, matches = millarr.match_bijvoet_mates()
+      self.n_bijvoet = matches.pairs().size()
+      self.n_singletons = matches.n_singles() - self.n_centric
+      if millarr.is_real_array():
+        self.ano_mean_diff = millarr.anomalous_signal()
+    # break long label into list of shorter strings
+    self.labelstr = ",".join(self.labels)
+    if self.wrap_labels > 0:
+      tlabels = textwrap.wrap(self.labelstr, width= self.wrap_labels)
+      nlabl = len(tlabels)
+      self.labelsformat = "{0[0]:>%d} " %(1+self.wrap_labels)
+      if len(tlabels)>1:
+        for i in range((len(tlabels)-1)):
+          self.labelsformat += "\n{0[%d]:>%d} "%(i+1, self.wrap_labels+1)
+      blanks = self.wrap_labels-5
+    else:
+      self.labelsformat = "{:>16} "
+      if len(self.labelstr)>15:
+        self.labelsformat = "{}\n                 "
+      blanks= 10
+
+    self.info_format_dict = {
+      # the keys here must be verbatim copies of names of phil attributes in arrayinfo_phil_str below
+      "labels":            (" %s" %self.caption_dict["labels"][0] + " "*blanks,   self.labelstr,         "{}",                   self.labelsformat),
+      "description":       ("       %s      "%self.caption_dict["description"][0],self.desc,             "{}",                   "{:>16} "),
+      "wavelength":        ("   %s   "%self.caption_dict["wavelength"][0],        self.wavelength,       "{}",                   "{:>8} "),
+      "n_reflections":     ("  %s  " %self.caption_dict["n_reflections"][0],      self.arrsize,          "{}",                   "{:>8} "),
+      "span":              (" "*15 + self.caption_dict["span"][0] + " "*14,       self.span,             "{}",                   "{:>32} "),
+      "minmax_data":       ("     %s       " %self.caption_dict["minmax_data"][0],self.minmaxdata,       "{0[0]:.6}, {0[1]:.6}", "{0[0]:>11.5}, {0[1]:>11.5}"),
+      "minmax_sigmas":     ("     %s     " %self.caption_dict["minmax_sigmas"][0],self.minmaxsigs,       "{0[0]:.6}, {0[1]:.6}", "{0[0]:>11.5}, {0[1]:>11.5}"),
+      "data_sigdata":      (" %s" %self.caption_dict["data_sigdata"][0],          self.data_sigdata,     "{:.4g}",               "{:>9.4g} "),
+      "data_sigdata_max":  ("%s" %self.caption_dict["data_sigdata_max"][0],       self.data_sigdata_max, "{:.4g}",               "{:>11.4g} "),
+      "d_minmax":          ("  %s   " %self.caption_dict["d_minmax"][0],          self.dminmax,          "{0[0]:.6}, {0[1]:.6}", "{0[0]:>8.5}, {0[1]:>8.5}"),
+      "unit_cell":         ("     %s      " %self.caption_dict["unit_cell"][0],   self.ucell,            "{0[0]:>7.5g},{0[1]:>7.5g},{0[2]:>7.5g},{0[3]:>7.5g},{0[4]:>7.5g},{0[5]:>7.5g}",
+                                                                                              "{0[0]:>7.5g},{0[1]:>7.5g},{0[2]:>7.5g},{0[3]:>7.5g},{0[4]:>7.5g},{0[5]:>7.5g} "),
+      "space_group":       ("   %s      " %self.caption_dict["space_group"][0],   self.spginf,           "{}",                   "{:>19} "),
+      "n_centrics":        ("%s"%self.caption_dict["n_centrics"][0],              self.n_centric,        "{}",                   "{:>8} "),
+      "n_sys_abs":         ("%s"%self.caption_dict["n_sys_abs"][0],               self.n_sys_abs,        "{}",                   "{:>9} "),
+      "data_completeness": ("%s"%self.caption_dict["data_completeness"][0],       self.data_completeness,"{:.5g}",               "{:>10.5g} "),
+      "data_compl_infty":  ("%s"%self.caption_dict["data_compl_infty"][0],        self.data_compl_infty, "{:.5g}",               "{:>9.5g} "),
+      "is_anomalous":      ("%s"%self.caption_dict["is_anomalous"][0],            str(self.isanomalous), "{}",                   "{:>8} "),
+      "is_symmetry_unique":("%s"%self.caption_dict["is_symmetry_unique"][0],      str(self.issymunique), "{}",                   "{:>8} "),
+      "ano_completeness":  ("%s"%self.caption_dict["ano_completeness"][0],        self.ano_completeness, "{:.5g}",               "{:>11.5g} "),
+      "ano_mean_diff":     ("%s"%self.caption_dict["ano_mean_diff"][0],           self.ano_mean_diff,    "{:.5g}",               "{:>8.5g} "),
+      "n_bijvoet":         ("%s"%self.caption_dict["n_bijvoet"][0],               self.n_bijvoet,        "{}",                   "{:>8} "),
+      "n_singletons":      ("%s"%self.caption_dict["n_singletons"][0],            self.n_singletons,     "{}",                   "{:>10} "),
+    }
+
+  # govern whether or not a property of the ArrayInfo should be returned by get_selected_info_columns_from_phil()
+  arrayinfo_phil_str = """
+wrap_labels = 15
+  .type = int
+  .short_caption = Wrap width for labels
+  .help = Number of letters for wrapping long miller array labels. If less than 1 no wrapping is done
+delimiter = "|"
+  .type = str
+  .short_caption = "column delimiter when printing table to standard output"
+  .help = "column delimiter"
+selected_info
+  .help = "If values are set to True then tabulate respective properties of datasets in the reflection file."
+{
+    labels = True
+      .type = bool
+      .help = "Name of data array"
+      .short_caption = "Labels"
+    description = True
+      .type = bool
+      .help = "Type of data"
+      .short_caption = "Type"
+    wavelength = True
+      .type = bool
+      .help = "Recorded wavelength/Å"
+      .short_caption = "λ/Å"
+    n_reflections = True
+      .type = bool
+      .help = "Number of reflections"
+      .short_caption = "#HKLs"
+    span = True
+      .type = bool
+      .help = "Crude range of hkl indices"
+      .short_caption = "Span"
+    minmax_data = True
+      .type = bool
+      .help = "minimum, maximum values of data"
+      .short_caption = "min,max data"
+    minmax_sigmas = True
+      .type = bool
+      .help = "minimum, maximum values of sigmas"
+      .short_caption = "min,max sigmas"
+    data_sigdata = False
+      .type = bool
+      .help = "Average value of data/sigma"
+      .short_caption = "DatSigDat"
+    data_sigdata_max = False
+      .type = bool
+      .help = "maximum value of data/sigma"
+      .short_caption = "MaxDatSigDat"
+    d_minmax = True
+      .type = bool
+      .help = "d_min,d_max/Å"
+      .short_caption = "d_min,d_max/Å"
+    unit_cell = False
+      .type = bool
+      .help = "Unit cell parameters (a/Å, b/Å, c/Å, α°, β°, γ°)"
+      .short_caption = "unit cell (a/Å, b/Å, c/Å, α°, β°, γ°)"
+    space_group = False
+      .type = bool
+      .help = "Space group"
+      .short_caption = "space group"
+    n_centrics = False
+      .type = bool
+      .help = "Number of centric reflections"
+      .short_caption = "#centrics"
+    is_anomalous = True
+      .type = bool
+      .help = "Is data anomalous"
+      .short_caption = "Anomalous"
+    is_symmetry_unique = True
+      .type = bool
+      .help = "Is data symmetry unique"
+      .short_caption = "Sym.uniq."
+    n_sys_abs = False
+      .type = bool
+      .help = "Systematic absences"
+      .short_caption = "#Syst.abs."
+    data_completeness = True
+      .type = bool
+      .help = "Completeness in resolution range"
+      .short_caption = "Data compl."
+    data_compl_infty = False
+      .type = bool
+      .help = "Completeness with d_max=infinity"
+      .short_caption = "Compl.inf."
+    ano_completeness = False
+      .type = bool
+      .help = "Anomalous completeness in resolution range"
+      .short_caption = "Ano.complete"
+    ano_mean_diff = False
+      .type = bool
+      .help = "Mean anomalous difference."
+      .short_caption = "Ano.dif. "
+    n_bijvoet = False
+      .type = bool
+      .help = "Number of Bijvoet pairs"
+      .short_caption = "#Bijvoets"
+    n_singletons = False
+      .type = bool
+      .help = "Number of lone anomalous reflections"
+      .short_caption = "#Singletons"
+  }
+
+  """
+
+  philobj = parse(arrayinfo_phil_str)
+  # make a dictionary of user friendly captions for HKLviewer GUI displaying list of table headers
+  caption_dict = {}
+  for objs in philobj.objects:
+    if objs.name == "selected_info":
+      for obj in objs.objects:
+        caption_dict[obj.name] = (obj.short_caption, obj.help)
+
+
+  def get_selected_info_columns_from_phil(self,philxtr=None):
+    """
+    Returns
+    info_fmt: A list of selected property values from the miller_array object, together with their
+      respective format strings for presenting in a users table such as in HKLviewer.
+    headerstr: A formatted string of column names for printing a table to stdout.
+    infostr: A formatted string of selected property values from the miller_array object for printing
+      a table to stdout.
+
+    If printing a table to stdout this can be done like:
+
+    for i,array in enumerate(arrays):
+      arrayinfo = ArrayInfo(array)
+      info_fmt, headerstr, infostr = arrayinfo.get_selected_info_columns_from_phil()
+      if i==0:
+        print(headerstr)
+      print(infostr)
+
+    """
+    info_format_tpl = []
+    if not philxtr: # then use the default values in the arrayinfo_phil_str
+      philxtr = parse(self.arrayinfo_phil_str).extract()
+    delim = philxtr.delimiter
+    for colname,selected in list(philxtr.selected_info.__dict__.items()):
+      if not colname.startswith("__"):
+        if selected:
+          info_format_tpl.append( self.info_format_dict[colname] )
+    # transpose info_format_tpl to return a list of headers, a list of values, and two lists of format strings
+    info_fmt = list(zip(*info_format_tpl))
+    # make a line of array info formatted for a table as well as a table header
+    headerlst, infolst, dummy, fmtlst = info_fmt
+    headerstr = ""
+    for h in headerlst:
+      headerstr += h + delim
+    infostr = ""
+    for i,info in enumerate(infolst):
+      inf = info
+      if i==0 and self.wrap_labels>0:
+        inf = textwrap.wrap(info, width=self.wrap_labels)
+      infostr += fmtlst[i].format(inf)  + delim
+    return info_fmt, headerstr, infostr

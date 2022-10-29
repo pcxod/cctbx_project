@@ -31,40 +31,74 @@ class SubprocessEvent(wx.PyEvent):
   event_id = None
 
   def __init__(self, data, **kwds):
+    super(SubprocessEvent, self).__init__()
     self.data = data
-    self.__dict__.update(kwds)
-    wx.PyEvent.__init__(self)
+    if hasattr(self, '_getAttrDict'):
+      self._getAttrDict().update(kwds)
+    else:
+      self.__dict__.update(kwds)
     self.SetEventType(self.event_id)
 
 class JobStartEvent(SubprocessEvent):
   event_id = JOB_START_ID
 
+  def __init__(self, data, **kwds):
+    super(JobStartEvent, self).__init__(data, **kwds)
+
 class LogEvent(SubprocessEvent):
   event_id = LOG_UPDATE_ID
+
+  def __init__(self, data, **kwds):
+    super(LogEvent, self).__init__(data, **kwds)
+
 
 class JobExceptionEvent(SubprocessEvent):
   event_id = JOB_EXCEPTION_ID
 
+  def __init__(self, data, **kwds):
+    super(JobExceptionEvent, self).__init__(data, **kwds)
+
 class JobKilledEvent(SubprocessEvent):
   event_id = JOB_KILLED_ID
+
+  def __init__(self, data, **kwds):
+    super(JobKilledEvent, self).__init__(data, **kwds)
 
 class JobCompleteEvent(SubprocessEvent):
   event_id = JOB_COMPLETE_ID
 
+  def __init__(self, data, **kwds):
+    super(JobCompleteEvent, self).__init__(data, **kwds)
+
 class CallbackEvent(SubprocessEvent):
   event_id = CALLBACK_ID
+
+  def __init__(self, data, **kwds):
+    super(CallbackEvent, self).__init__(data, **kwds)
 
 class JobPauseEvent(SubprocessEvent):
   event_id = JOB_PAUSE_ID
 
+  def __init__(self, data, **kwds):
+    super(JobPauseEvent, self).__init__(data, **kwds)
+
 class JobResumeEvent(SubprocessEvent):
   event_id = JOB_RESUME_ID
+
+  def __init__(self, data, **kwds):
+    super(JobResumeEvent, self).__init__(data, **kwds)
 
 class DownloadCompleteEvent(SubprocessEvent):
   event_id = DOWNLOAD_COMPLETE_ID
 
+  def __init__(self, data, **kwds):
+    super(DownloadCompleteEvent, self).__init__(data, **kwds)
+
 class DownloadIncrementEvent(SubprocessEvent):
   event_id = DOWNLOAD_INCREMENT_ID
+
+  def __init__(self, data, **kwds):
+    super(DownloadIncrementEvent, self).__init__(data, **kwds)
 
 def setup_stdout_logging_event(window, OnPrint):
   window.Connect(-1, -1, LOG_UPDATE_ID, OnPrint)
@@ -378,11 +412,16 @@ class ProcessDialog(wx.Dialog):
     szr2.Add(msg_txt, 0, wx.ALIGN_CENTER_HORIZONTAL|wx.ALL, 5)
     self.gauge = wx.Gauge(parent=self, size=(300,-1))
     self.gauge.SetRange(100)
-    szr2.Add(self.gauge, 1, wx.ALL|wx.EXPAND|wx.ALIGN_CENTER_HORIZONTAL, 5)
+
+    # XXX  TEMPORARY PYTHON 3 FIX TT
+    #szr2.Add(self.gauge, 1, wx.ALL|wx.EXPAND|wx.ALIGN_CENTER_HORIZONTAL, 5)
+    szr2.Add(self.gauge, 1, wx.ALL, 5)
     abort_btn = wx.Button(parent=self,
       label="Abort")
     self.Bind(wx.EVT_BUTTON, self.OnAbort, abort_btn)
-    szr2.Add(abort_btn, 0, wx.ALL|wx.ALIGN_CENTER_HORIZONTAL, 5)
+    # XXX  TEMPORARY PYTHON 3 FIX TT
+    #szr2.Add(abort_btn, 0, wx.ALL|wx.ALIGN_CENTER_HORIZONTAL, 5)
+    szr2.Add(abort_btn, 0, wx.ALL, 5)
     self.SetMinSize((300,100))
     szr.Fit(self)
     self.Centre(wx.BOTH)

@@ -9,6 +9,7 @@ from iotbx.file_reader import any_file
 from iotbx.data_manager import DataManagerBase
 from libtbx import Auto
 from libtbx.utils import Sorry
+import os
 
 # =============================================================================
 class ModelDataManager(DataManagerBase):
@@ -20,13 +21,14 @@ class ModelDataManager(DataManagerBase):
   def add_model_phil_str(self):
     '''
     Add custom PHIL and storage for type
+    The type is a choice(multi=True) PHIL parameter, so it is always a list
     '''
 
     # set up storage
-    # self._model_types = dict()  # [filename] = type
+    # self._model_types = dict()  # [filename] = [type]
     self._model_types = dict()
-    self._default_model_type = 'x_ray'
-    self._possible_model_types = ['x_ray', 'neutron', 'electron']
+    self._default_model_type = ['x_ray']
+    self._possible_model_types = ['x_ray', 'neutron', 'electron', 'reference']
 
     # custom PHIL section
     custom_phil_str = '''
@@ -38,7 +40,8 @@ model
     .short_caption = Model file
     .style = file_type:pdb input_file
   type = *%s
-    .type = choice(multi=False)
+    .type = choice(multi=True)
+    .short_caption = Model type(s)
 }
 ''' % ' '.join(self._possible_model_types)
 
@@ -78,8 +81,32 @@ model
   def add_model(self, filename, data):
     return self._add(ModelDataManager.datatype, filename, data)
 
+  def _is_valid_model_type(self, model_type):
+    """
+    Convenience function for checking if the model type is valid
+    This will also check that model_type is a list to conform with the
+    PHIL parameter
+
+    Parameters
+    ----------
+    model_type: list
+      The model_type(s) to check.
+
+    Returns
+    -------
+    bool:
+    """
+    if not isinstance(model_type, list):
+      raise Sorry('The model_type argument must be a list.')
+    if len(model_type) == 0:
+      return False
+    valid = True
+    for mt in model_type:
+      valid = valid and (mt in self._possible_model_types)
+    return valid
+
   def set_default_model_type(self, model_type):
-    if (model_type not in self._possible_model_types):
+    if not self._is_valid_model_type(model_type):
       raise Sorry('Unrecognized model type, "%s," possible choices are %s.' %
                   (model_type, ', '.join(self._possible_model_types)))
     self._default_model_type = model_type
@@ -90,13 +117,72 @@ model
   def set_default_model(self, filename):
     return self._set_default(ModelDataManager.datatype, filename)
 
-  def get_model(self, filename=None):
+  def get_model(self, filename=None, model_type=None):
+    """
+    Retrieve a stored mmtbx.model.manager object
+
+    If model_type is None and there is only one model type, then the
+    model is returned. If there is more than one model type, then a
+    Sorry is raised.
+
+    If a model_type is specified when a model has more than one type, a
+    copy of the model is returned if model_type is not the default type.
+
+    Parameters
+    ----------
+    filename : str
+        Optionally specify which model using its filepath
+    model_type: str
+        Optionally specify the type of the model
+        The options are the same as for the scattering dictionary
+        ["n_gaussian", "wk1995", "it1992", "electron", "neutron"] and
+        "x_ray" which will default to "n_gaussian".
+
+    Returns
+    -------
+    model
+        The mmtbx.model.manager object
+
+    """
     model = self._get(ModelDataManager.datatype, filename)
-    if (self.supports('restraint')):
+    if self.supports('restraint'):
       restraint_objects = list()
       for filename in self.get_restraint_names():
         restraint_objects.append((filename, self.get_restraint(filename)))
       model.set_restraint_objects(restraint_objects)
+    if hasattr(model,'info'):  # save filename if possible
+      if filename is None:
+        filename = self.get_default_model_name()
+      if filename:
+        model.info().full_file_name = os.path.abspath(filename)
+        model.info().file_name = os.path.split(filename)[-1]
+    if model_type is None:
+      if len(self.get_model_type(filename=filename)) > 1:
+        raise Sorry('''
+There is more than one model type, {}. You must specify one.
+'''.format(self.get_model_type(filename=filename)))
+    else:
+      type_options = ['x_ray', 'n_gaussian', 'wk1995', 'it1992', 'electron', 'neutron']
+      if model_type not in type_options:
+        raise Sorry('Unrecognized model type, "%s," possible choices are %s.' %
+                    (model_type, ', '.join(type_options)))
+      check_type = model_type
+      if check_type in ['n_gaussian', 'wk1995', 'it1992']:
+        check_type = 'x_ray'
+      if check_type not in self.get_model_type(filename=filename):
+        raise Sorry('''
+The model type, {}, is not one of the types set for the model, {}.
+The choices are {}.
+'''.format(model_type, filename, self.get_model_type(filename=filename)))
+      if len(self.get_model_type(filename=filename)) > 1 \
+        and model_type not in self.get_default_model_type():
+          model = model.deep_copy()
+
+      # set scattering dictionary based on model type
+      # if model_type == 'x_ray':
+      #   model_type = 'n_gaussian'
+      # model.setup_scattering_dictionaries(scattering_table=model_type)
+
     return model
 
   def set_model_type(self, filename=None, model_type=None):
@@ -104,7 +190,7 @@ model
       filename = self.get_default_model_name()
     if (model_type is None):
       model_type = self._default_model_type
-    elif (model_type not in self._possible_model_types):
+    elif not self._is_valid_model_type(model_type):
       raise Sorry('Unrecognized model type, "%s," possible choices are %s.' %
                   (model_type, ', '.join(self._possible_model_types)))
     self._model_types[filename] = model_type
@@ -121,7 +207,7 @@ model
       names = all_names
     else:
       for filename in all_names:
-        if (model_type == self.get_model_type(filename)):
+        if (model_type in self.get_model_type(filename)):
           names.append(filename)
     return names
 
@@ -135,28 +221,44 @@ model
     return self._has_data(ModelDataManager.datatype, expected_n=expected_n,
                           exact_count=exact_count, raise_sorry=raise_sorry)
 
-  def process_model_file(self, filename, pdb_interpretation_extract=None):
+  def process_model_file(self, filename):
+    """
+    Parse a model file and store the mmtbx.model.manager object
+
+    Parameters
+    ----------
+    filename : str
+        The filepath as a string
+
+    Returns
+    -------
+    None
+        The model is added to the DataManager
+
+    """
     # unique because any_file does not return a model object
     if (filename not in self.get_model_names()):
       a = any_file(filename)
       if (a.file_type != 'pdb'):
         raise Sorry('%s is not a recognized model file' % filename)
       else:
-        model_in = iotbx.pdb.input(a.file_name)
+        model_in = a.file_content.input
         expand_with_mtrix = True  # default
+        skip_ss_annotations = False
         if 'model_skip_expand_with_mtrix' in self.custom_options:
           expand_with_mtrix = False
+        if 'model_skip_ss_annotations' in self.custom_options:
+          skip_ss_annotations = True
         model = mmtbx.model.manager(
           model_input=model_in,
-          pdb_interpretation_params=pdb_interpretation_extract,
           expand_with_mtrix=expand_with_mtrix,
+          skip_ss_annotations=skip_ss_annotations,
           log=self.logger)
         self.add_model(filename, model)
 
-  def process_model_str(self, label, model_str, pdb_interpretation_extract=None):
+  def process_model_str(self, label, model_str):
     model = mmtbx.model.manager(
       model_input=iotbx.pdb.input(source_info=None, lines=model_str),
-      pdb_interpretation_params=pdb_interpretation_extract,
       log=self.logger)
     self.add_model(label, model)
 
@@ -197,7 +299,11 @@ model
 
     Returns
     -------
-      Nothing
+      filename: str
+        The actual output filename. This may differ from the
+        get_default_output_model_filename function since that sets the
+        extension to cif by default. This function may alter the extension
+        based on the desired format.
     '''
     if isinstance(model_str, mmtbx.model.manager):
       if format == 'cif' or (
@@ -211,17 +317,8 @@ model
       filename = self.get_default_output_model_filename(extension=extension)
     elif extension is not Auto and (not filename.endswith(extension)):
       filename += extension
-    self._write_text(ModelDataManager.datatype, model_str,
-                     filename=filename, overwrite=overwrite)
-
-  def update_pdb_interpretation_for_model(
-    self, filename, pdb_interpretation_extract):
-    '''
-    Pass PHIL extract to model class
-    model class handles finding and matching of PHIL scopes
-    '''
-    self.get_model(filename=filename).set_pdb_interpretation_params(
-      pdb_interpretation_extract)
+    return self._write_text(ModelDataManager.datatype, model_str,
+                            filename=filename, overwrite=overwrite)
 
 # =============================================================================
 # end

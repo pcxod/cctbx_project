@@ -3,6 +3,7 @@ from libtbx import test_utils
 import libtbx.load_env
 
 tst_list = [
+  "$D/regression/tst_sf_low_res_accuracy.py",
   "$D/regression/tst_miller_double_step_filtration.py",
   "$D/regression/tst_map_is_periodic.py",
   "$D/miller/tst_reindexing.py",
@@ -29,6 +30,7 @@ tst_list = [
   "$D/sgtbx/boost_python/tst_N_fold_rot.py",
   "$D/crystal/tst_ext.py",
   "$D/crystal/tst_distance_based_connectivity.py",
+  "$D/crystal/tst_super_cell.py",
   "$D/adptbx/boost_python/tst_adptbx.py",
   #["$D/adptbx/boost_python/tst_hirshfeld.py", "--fix-random-seeds"],
   "$D/miller/boost_python/tst_miller.py",
@@ -44,6 +46,7 @@ tst_list = [
   "$D/eltbx/tests/tst_formula.py",
   "$D/eltbx/tests/tst_attenuation_coefficient.py",
   "$D/maptbx/boost_python/tst_maptbx.py",
+  "$D/maptbx/tst_bcr.py",
   "$D/dmtbx/boost_python/tst_dmtbx.py",
   "$D/translation_search/boost_python/tst_translation_search.py",
   "$D/geometry_restraints/tst_ext.py",
@@ -149,6 +152,8 @@ tst_list = [
    "$D/regression/tst_connectivity_allsym.py",
    "$D/regression/tst_diffuse.py",
    "$D/regression/tst_grm_modifications.py",
+   "$D/regression/tst_prepare_map_for_docking.py",
+   "$D/regression/tst_wavelength_units.py",
   ]
 
 tst_list_expected_unstable = [

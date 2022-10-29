@@ -38,6 +38,8 @@ tst_list_base = [
   "$D/tst_representation.py",
   "$D/tst_find_unused_imports.py",
   "$D/tst_program_template.py",
+  "$D/tst_version.py",
+  '$D/tst_easy_mp_multicore.py',
   ]
 
 # generally failing tests

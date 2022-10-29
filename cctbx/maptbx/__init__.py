@@ -1453,6 +1453,44 @@ Fourier image of specified resolution, etc.
         return 4*math.pi * s**2 * self.form_factor(ss, b_iso)
     return compute
 
+  def bcr_approx(self,
+                 d_min,
+                 radius_max,
+                 radius_step,
+                 mxp=5, epsc=0.001, kpres=0 # BCR params
+                 ):
+    b_iso = 0 # Must always be 0! All image vals below are for b_iso=0 !!!
+    from cctbx.maptbx.bcr import bcr
+    im = self.image(
+      d_min=d_min, b_iso=0, radius_max=radius_max, radius_step=radius_step)
+    bpeak, cpeak, rpeak, _,_,_ = bcr.get_BCR(
+      dens=im.image_values, dist=im.radii, mxp=mxp, epsc=epsc, kpres=kpres)
+    bcr_approx_values = flex.double()
+    # FILTER
+    bpeak_, cpeak_, rpeak_ = [],[],[]
+    for bi, ci, ri in zip(bpeak, cpeak, rpeak):
+      if(abs(bi)<1.e-6 or abs(ci)<1.e-6): continue
+      else:
+        bpeak_.append(bi)
+        cpeak_.append(ci)
+        rpeak_.append(ri)
+    bpeak, cpeak, rpeak = bpeak_, cpeak_, rpeak_
+    #
+    for r in im.radii:
+      first = 0
+      second = 0
+      for B, C, R in zip(bpeak, cpeak, rpeak):
+        if(abs(R)<1.e-6):
+          first += bcr.gauss(B=B, C=C, r=r, b_iso=0)
+        else:
+          second += C*bcr.chi(B=B, R=R, r=r, b_iso=0)
+      bcr_approx_values.append(first + second)
+    return group_args(
+      radii             = im.radii,
+      image_values      = im.image_values,
+      bcr_approx_values = bcr_approx_values,
+      B=bpeak, C=cpeak, R=rpeak)
+
   def image(self,
             d_min,
             b_iso,
@@ -2180,3 +2218,33 @@ def is_periodic(map_data,
         return False
     else:
         return None # Really do not know
+
+def map_values_along_line_connecting_two_points(map_data, points_cart, step,
+      unit_cell, interpolation):
+  """
+  Calculate interpolated map values along the line connecting two points in
+  space.
+  """
+  assert interpolation in ["eight_point", "tricubic"]
+  points_frac = unit_cell.fractionalize(points_cart)
+  dist = unit_cell.distance(points_frac[0], points_frac[1])
+  assert step<dist, "step cannot be greater than the distance between two points"
+  #
+  alp = 0
+  dist = flex.double()
+  vals = flex.double()
+  while alp <= 1.0+1.e-6:
+    x1,y1,z1 = points_cart[0]
+    x2,y2,z2 = points_cart[1]
+    xp = x1+alp*(x2-x1)
+    yp = y1+alp*(y2-y1)
+    zp = z1+alp*(z2-z1)
+    dist.append(alp)
+    pf = unit_cell.fractionalize([xp,yp,zp])
+    if(interpolation=="eight_point"):
+      mv = map_data.eight_point_interpolation(pf)
+    else:
+      mv = map_data.tricubic_interpolation(pf)
+    vals.append(mv)
+    alp += step
+  return group_args(dist = dist, vals = vals)

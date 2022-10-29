@@ -10,28 +10,26 @@
 #   prefix: <build artifact prefix>
 
 jobs:
-- job: ${{ format('{0}_{1}', parameters.distribution, join('_', parameters.version) ) }}
+- job: ${{ format('{0}{1}_{2}', parameters.prefix, parameters.distribution, join('_', parameters.version) ) }}
   pool:
     vmImage: ubuntu-latest
-  timeoutInMinutes: 120
+  timeoutInMinutes: 180
   strategy:
     maxParallel: 2
     matrix:
-      python3.6:
+      ${{ if not(eq(parameters.prefix, 'xfel_psana_')) }}:
+        python3.8:
+          CONDA: Linux
+          OS: linux
+          PYTHON_VERSION: py38
+          PYTHON_FULL_VERSION: 3.8
+          MODULES: ${{ parameters.modules }}
+      python3.9:
         CONDA: Linux
-        OS: linux-64
-        PYTHON_VERSION: py36
+        OS: linux
+        PYTHON_VERSION: py39
+        PYTHON_FULL_VERSION: 3.9
         MODULES: ${{ parameters.modules }}
-      # python3.7:
-      #   CONDA: Linux
-      #   OS: linux-64
-      #   PYTHON_VERSION: py37
-      #   MODULES: ${{ parameters.modules }}
-      # python3.8:
-      #   CONDA: Linux
-      #   OS: linux-64
-      #   PYTHON_VERSION: py38
-      #   MODULES: ${{ parameters.modules }}
 
   container:
     image: ${{ parameters.distribution }}:${{ join('.', parameters.version) }}
@@ -55,7 +53,7 @@ jobs:
 
   # centos setup
   - script: |
-      set -x -e
+      set -xe
       /tmp/docker exec -t -u 0 ci-container \
       sh -c "sed -i 's/mirrorlist=http/#mirrorlist=http/g' /etc/yum.repos.d/CentOS-Base.repo"
       /tmp/docker exec -t -u 0 ci-container \
@@ -122,13 +120,14 @@ jobs:
       path: $(Pipeline.Workspace)
     displayName: Download cached build
     condition: >
-      or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
-             ne(variables['day'], 'Sunday')),
-         eq(variables['Build.DefinitionName'], 'CI'),
-         eq(variables['Build.DefinitionName'], 'CI branch'),
-         eq(variables['Build.DefinitionName'], 'XFEL CI'),
-         eq(variables['Build.DefinitionName'], 'XFEL CI branch'),
-         eq(variables['Build.DefinitionName'], 'Full'))
+      and(or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
+                 ne(variables['day'], 'Sunday')),
+             eq(variables['Build.DefinitionName'], 'CI'),
+             eq(variables['Build.DefinitionName'], 'CI branch'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI branch'),
+             eq(variables['Build.DefinitionName'], 'Full')),
+          ne(variables['SKIP_CACHED_BUILD'], 'true'))
     continueOnError: true
 
   - script: |
@@ -137,13 +136,14 @@ jobs:
       rm build.tar
     displayName: Extract build tarball
     condition: >
-      or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
-             ne(variables['day'], 'Sunday')),
-         eq(variables['Build.DefinitionName'], 'CI'),
-         eq(variables['Build.DefinitionName'], 'CI branch'),
-         eq(variables['Build.DefinitionName'], 'XFEL CI'),
-         eq(variables['Build.DefinitionName'], 'XFEL CI branch'),
-         eq(variables['Build.DefinitionName'], 'Full'))
+      and(or(and(eq(variables['Build.DefinitionName'], 'Update build cache'),
+                 ne(variables['day'], 'Sunday')),
+             eq(variables['Build.DefinitionName'], 'CI'),
+             eq(variables['Build.DefinitionName'], 'CI branch'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI'),
+             eq(variables['Build.DefinitionName'], 'XFEL CI branch'),
+             eq(variables['Build.DefinitionName'], 'Full')),
+          ne(variables['SKIP_CACHED_BUILD'], 'true'))
     continueOnError: true
     failOnStderr: false
 

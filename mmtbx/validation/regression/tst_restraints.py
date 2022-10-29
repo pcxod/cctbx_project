@@ -66,7 +66,8 @@ ATOM      0 HG23 VAL A   2       4.620  12.960   7.962  1.00  6.00           H
 END
 """
   pdb_file = "tst_validate_restraints_simple.pdb"
-  open(pdb_file, "w").write(pdb_in)
+  with open(pdb_file, "w") as f:
+    f.write(pdb_in)
   v1 = run_validation(pdb_file, ignore_hd=True)
   out1 = StringIO()
   v1.show(out=out1)
@@ -90,8 +91,8 @@ atoms                   ideal    model    delta   sigma  residual   deviation
   assert (out2.getvalue() != out1.getvalue())
   assert ("""\
  A   1  LYS  HA        110.00    57.00    53.00  3.00e+00  3.12e+02  17.7*sigma
- A   2  VAL  N
- A   2  VAL  CA
+ A   1  LYS  N
+ A   1  LYS  CA
 """ in "\n".join([ l.rstrip() for l in out2.getvalue().splitlines() ]))
   #
   # C-alpha-only model (from 3b5d)
@@ -107,7 +108,8 @@ ATOM      7  CA  LEU A  12     -10.023  -2.071 -17.056  1.00230.80           C
 ATOM      8  CA  ALA A  13      -7.313  -1.820 -14.420  1.00141.04           C
 """
   pdb_file = "tst_validate_restraints_calpha.pdb"
-  open(pdb_file, "w").write(pdb_raw)
+  with open(pdb_file, "w") as f:
+    f.write(pdb_raw)
   v1 = run_validation(pdb_file, ignore_hd=True)
 
 if (__name__ == "__main__"):

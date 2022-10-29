@@ -3,6 +3,7 @@ from xfel.merging.application.worker import worker
 from dials.array_family import flex
 from dxtbx.model.experiment_list import ExperimentList
 from xfel.merging.application.reflection_table_utils import reflection_table_utils
+import math
 
 class load_balancer(worker):
   def __init__(self, params, mpi_helper=None, mpi_logger=None):
@@ -25,9 +26,19 @@ class load_balancer(worker):
     self.logger.log("Rebalancing input load -- %s method..."%self.params.input.parallel_file_load.balance)
     if self.mpi_helper.rank == 0:
       self.logger.main_log("Rebalancing input load -- %s method..."%self.params.input.parallel_file_load.balance)
+    if self.params.input.parallel_file_load.balance == "global2":
+      # get status BEFORE balancing and print to main_log for EACH RANK if we have balance_verbose set
+      from xfel.merging.application.utils.data_counter import data_counter
+      if self.params.input.parallel_file_load.balance_verbose and self.mpi_helper.rank == 0:
+        self.logger.main_log("Data distribution before load balancing:")
+      expt_counts_by_rank, _, _ = data_counter(self.params).count_each(experiments, reflections, verbose=self.params.input.parallel_file_load.balance_verbose)
+    else:
+      expt_counts_by_rank = None
 
-    if self.params.input.parallel_file_load.balance == "global":
-      new_experiments, new_reflections = self.distribute_over_ranks(experiments, reflections, self.mpi_helper.comm, self.mpi_helper.size)
+    if self.params.input.parallel_file_load.balance == "global1":
+      new_experiments, new_reflections = self.distribute_over_ranks_shuffle(experiments, reflections, self.mpi_helper.comm, self.mpi_helper.size)
+    elif self.params.input.parallel_file_load.balance == "global2":
+      new_experiments, new_reflections = self.distribute_over_ranks_minimalist(experiments, reflections, self.mpi_helper.comm, self.mpi_helper.size, expt_counts_by_rank)
     elif self.params.input.parallel_file_load.balance == "per_node":
       mpi_color = int(self.mpi_helper.rank / self.params.input.parallel_file_load.ranks_per_node)
       mpi_new_rank = self.mpi_helper.rank % self.params.input.parallel_file_load.ranks_per_node
@@ -47,13 +58,18 @@ class load_balancer(worker):
         id_col[i] = reverse_map[ident_col[i]]
       self.logger.log('Column reset done')
 
-    # Do we have any data?
-    from xfel.merging.application.utils.data_counter import data_counter
-    data_counter(self.params).count(new_experiments, new_reflections)
+    if self.params.input.parallel_file_load.balance == "global2":
+      # Do we have any data?
+      data_counter(self.params).count(new_experiments, new_reflections)
+
+      # get status again AFTER balancing and report back number of experiments on EACH RANK in the main_log if balance_verbose is set
+      if self.params.input.parallel_file_load.balance_verbose and self.mpi_helper.rank == 0:
+        self.logger.main_log("Data distribution after load balancing:")
+        data_counter(self.params).count_each(experiments, reflections, verbose=True)
 
     return new_experiments, new_reflections
 
-  def distribute_over_ranks(self, experiments, reflections, mpi_communicator, number_of_mpi_ranks):
+  def distribute_over_ranks_shuffle(self, experiments, reflections, mpi_communicator, number_of_mpi_ranks):
     self.logger.log_step_time("LB_SPLIT_LIST")
     self.split_experiments = self.divide_list_into_chunks(experiments, number_of_mpi_ranks)
     self.logger.log_step_time("LB_SPLIT_LIST", True)
@@ -190,6 +206,90 @@ class load_balancer(worker):
         distributed_reflection_count += ref_table.size()
 
     self.logger.log("Distributed %d out of %d reflections"%(distributed_reflection_count, reflection_count))
+
+  def distribute_over_ranks_minimalist(self, experiments, reflections, mpi_communicator, number_of_mpi_ranks, current_counts_by_rank):
+    self.logger.log_step_time("LB_SPLIT_LIST")
+    if self.mpi_helper.rank == 0:
+      def first(lst, test):
+        for i in range(len(lst)):
+          if test(lst[i]):
+            return i
+
+      # quota: max number of counts that should end up on one rank once balanced
+      # difference: how unbalanced each rank is currently
+      # send_tuples: instructions for redistributing load, a list [L1,L2,L3...Li] where i is the rank
+      # sending data and Li describes where to send it
+
+      quota = int(math.ceil(sum(current_counts_by_rank)/len(current_counts_by_rank)))
+      difference = [count - quota for count in current_counts_by_rank]
+      send_tuples = [[] for i in range(len(current_counts_by_rank))]
+
+      # algorithm (deterministic):
+      # - for each rank, if we are overburdened, find the first rank that is underburdened
+      # - send it as much of the load as it can take before hitting quota (denoted by a tuple of the target
+      #   rank and the number of counts to send)
+      # - repeat until no rank is overburdened (assert this to be the case)
+      # - it may still be the case that ranks are underburdened unequally (e.g. [10,10,10,8,8])
+      # - to address this, for each rank that is underburdened by more than 1, find the first rank at quota
+      # - request one count from it
+      # - assert all ranks are now within one count of each other
+
+      for i in range(len(current_counts_by_rank)):
+        while difference[i] > 0:
+          j = first(difference, lambda count: count<0)
+          send = min(difference[i], -1 * difference[j])
+          send_tuples[i].append((j, send))
+          difference[i] -= send
+          difference[j] += send
+      assert max(difference) == 0
+      for i in range(len(current_counts_by_rank)):
+        while difference[i] < -1:
+          j = first(difference, lambda count: count==0)
+          send_tuples[j].append((i, 1))
+          difference[i] += 1
+          difference[j] -= 1
+      assert max(difference) == 0
+      assert min(difference) >= -1
+
+    else:
+      send_tuples = None # not sure if we need this?
+
+    # broadcast instructions
+    send_tuples = mpi_communicator.bcast(send_tuples, root=0)
+
+    self.logger.log_step_time("LB_SPLIT_LIST", True)
+    self.logger.log_step_time("LB_EXPTS_AND_REFLS_ALLTOALL")
+
+    # carry out load balancing with all-to-all mpi communication
+    send_instructions = send_tuples[self.mpi_helper.rank]
+
+    # pare down balanced_experiments and balanced_reflections as we separate off what to send out
+    send_data = [(None, None) for j in range(len(send_tuples))]
+    recv_data = [(None, None) for j in range(len(send_tuples))]
+    for (j, count) in send_instructions:
+      send_expt_j = experiments[-count:]
+      experiments = experiments[:-count]
+      send_refl_j = self.reflection_table_stub(reflections)
+      for k, e in enumerate(send_expt_j):
+        r = reflections.select(reflections['exp_id'] == e.identifier) # select matching reflections to send
+        r['id'] = flex.int(len(r), k)
+        send_refl_j.extend(r)
+        reflections = reflections.select(reflections['exp_id'] != e.identifier) # remove from this rank's reflections
+      send_data[j] = (send_expt_j, send_refl_j)
+    recv_data = mpi_communicator.alltoall(send_data)
+
+    # tack on only what was targeted to be received by the current rank
+    for (received_expt_i, received_refl_i) in recv_data:
+      if received_expt_i is None: continue
+      current_ids = set([e.identifier for e in experiments])
+      recv_ids = set([e.identifier for e in received_expt_i])
+      assert current_ids.isdisjoint(recv_ids)
+      experiments.extend(received_expt_i)
+      reflections.extend(received_refl_i)
+
+    self.logger.log_step_time("LB_EXPTS_AND_REFLS_ALLTOALL", True)
+
+    return experiments, reflections
 
 if __name__ == '__main__':
   from xfel.merging.application.worker import exercise_worker

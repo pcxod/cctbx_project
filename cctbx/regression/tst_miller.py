@@ -739,9 +739,10 @@ def exercise_array():
     assert approx_equal(tuple(hm.sigmas()), (0.2,0.4))
   assert approx_equal(ma.anomalous_signal(), 0.5063697)
   app = ma.anomalous_probability_plot()
-  assert approx_equal(app.slope, 6.280403781181725)
-  assert approx_equal(app.intercept, -0.23606797749978936)
-  assert app.n_pairs ==  2
+  for app in (app, pickle.loads(pickle.dumps(app))):
+    assert approx_equal(app.slope, 6.280403781181725)
+    assert approx_equal(app.intercept, -0.23606797749978936)
+    assert app.n_pairs ==  2
   assert ma.measurability() == 1.0
   assert approx_equal(ma.anomalous_completeness(), 0.018018)
   assert approx_equal(ma.anomalous_completeness(
@@ -2585,7 +2586,18 @@ def exercise_as_map_manager():
   mm = fc.as_map_manager(d_min=1, d_max=3)
   mm = fc.as_map_manager(wrapping=False, apply_volume_scaling=False)
 
+def exercise_make_up_hl_coeffs():
+  xrs = random_structure.xray_structure(
+    space_group_info = sgtbx.space_group_info(number=19),
+    elements=["C"]*50,
+    volume_per_atom=50,
+    min_distance=1.0,
+    general_positions_only=False)
+  fc = xrs.structure_factors(d_min=2.0).f_calc()
+  hl = fc.make_up_hl_coeffs(k_blur=1, b_blur=20)
+
 def run(args):
+  exercise_make_up_hl_coeffs()
   exercise_as_map_manager()
   exercise_generate_bijvoet_mates_set()
   exercise_counting_sorted_n_bins_reflections_per_bin()

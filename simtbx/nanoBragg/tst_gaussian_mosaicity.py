@@ -40,8 +40,9 @@ class plotter:
     return (vector[perm[0]], vector[perm[1]], vector[perm[2]],)
 
 class plotter2:  # compare the transformation of 001 with that of .57735,.57735,.57735
-  def __init__(self, tophat, normal, plot):
+  def __init__(self, tophat, normal, plot, eps=1e-4):
     # take U-mats from two different distributions, apply them to unit vectors, and plot
+    self.eps = eps
     if plot:
       from matplotlib import pyplot as plt
       fig, axes = plt.subplots(2, 2,figsize=(8,7))
@@ -79,7 +80,7 @@ class plotter2:  # compare the transformation of 001 with that of .57735,.57735,
           axis.set_xlim(-0.05,0.05)
           axis.set_ylim(-0.05,0.05)
 
-      assert approx_equal(differences[0],differences[1],eps=1e-04), \
+      assert approx_equal(differences[0],differences[1], eps=self.eps), \
       "RMS mosaic distribution for axis vector and diagonal vector should be similar, as proposed by J Holton"
 
     if plot: plt.show()
@@ -93,6 +94,17 @@ class check_distributions:
         umat).r3_rotation_matrix_as_unit_quaternion().unit_quaternion_as_axis_and_angle(deg=True)
       angle_deg.append(angle)
     return angle_deg
+  @staticmethod
+  def get_angle_deg_and_axes(dist):
+    angle_deg = flex.double()
+    rot_ax = flex.vec3_double()
+    for umat in dist:
+      angle,axis = sqr(
+        umat).r3_rotation_matrix_as_unit_quaternion().unit_quaternion_as_axis_and_angle(deg=True)
+      angle_deg.append(angle)
+      rot_ax.append(axis)
+    return angle_deg, rot_ax
+
 
 MOSAIC_SPREAD = 2.0 # top hat half width rotation in degrees
 SAMPLE_SIZE = 100000

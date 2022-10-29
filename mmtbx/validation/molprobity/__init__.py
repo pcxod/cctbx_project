@@ -177,16 +177,21 @@ class molprobity(slots_getstate_setstate):
 
     # use objects from model
     self.model = model
-    self.model.process_input_model(make_restraints=True)
+    if(not self.model.processed()):
+      self.model.process(make_restraints=True)
     if(self.model is None and pdb_hierarchy is not None):
       import mmtbx.model
       self.model = mmtbx.model.manager(
         model_input = pdb_hierarchy.as_pdb_input())
+      self.model.process(make_restraints=True)
+
     pdb_hierarchy = self.model.get_hierarchy()
     if(nuclear):
       self.model.setup_scattering_dictionaries(scattering_table="neutron")
 
     if (self.model is not None):
+      if(self.model.get_restraints_manager() is None):
+        self.model.process(make_restraints=True)
       pdb_hierarchy = self.model.get_hierarchy()
       xray_structure = self.model.get_xray_structure()
       geometry_restraints_manager = self.model.get_restraints_manager().geometry
@@ -797,7 +802,8 @@ class pdb_header_info(slots_getstate_setstate):
         self.d_max = published_results.low
       self.refinement_program = pdb_in.input.get_program_name()
       # XXX phenix.refine hack, won't work for other programs
-      lines = open(pdb_file).readlines()
+      with open(pdb_file) as f:
+        lines = f.readlines()
       for line in lines :
         if (line.startswith("REMARK Final:")):
           fields = line.strip().split()
@@ -891,6 +897,24 @@ class residue_multi_criterion(residue):
 
   def __cmp__(self, other):
     return cmp(self.i_seq, other.i_seq)
+
+  def __eq__(self, other):
+    return self.i_seq == other.i_seq
+
+  def __ne__(self, other):
+    return self.i_seq != other.i_seq
+
+  def __lt__(self, other):
+    return self.i_seq < other.i_seq
+
+  def __le__(self, other):
+    return self.i_seq <= other.i_seq
+
+  def __gt__ (self, other):
+    return self.i_seq > other.i_seq
+
+  def __ge__(self, other):
+    return self.i_seq >= other.i_seq
 
   def get_real_space_plot_values(self, use_numpy_NaN=True):
     for outlier in self.outliers :

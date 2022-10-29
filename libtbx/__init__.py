@@ -262,8 +262,8 @@ class group_args(dda):
   def __call__(self):
     return self.__dict__
 
-  def get(self,kw):
-    return self.__dict__.get(kw)
+  def get(self,kw, default_value = None):
+    return self.__dict__.get(kw, default_value)
 
   def keys(self):
     return self.__dict__.keys()
@@ -285,6 +285,10 @@ class group_args(dda):
 
   def add(self,key=None,value=None):
     self.__dict__[key]=value
+
+  def copy(self):
+    """ produce shallow copy of self by converting to dict and back"""
+    return group_args(**self().copy())
 
 if os.environ.get("LIBTBX_PRINT_TRACE"):
   import libtbx.start_print_trace

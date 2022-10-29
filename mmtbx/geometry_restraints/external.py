@@ -1,13 +1,14 @@
 
 """
 Accessory module for interfacing phenix.refine (or similar programs) with
-various external third-party software such as Amber, AFITT, DivCon,
-Schrodinger, or Rosetta (obsoleted and removed).
+various external third-party software such as AFITT, DivCon, Schrodinger.
 """
 
 from __future__ import absolute_import, division, print_function
 import libtbx.load_env
 import os
+
+VERBOSE=False
 
 external_energy_params_str = ""
 
@@ -19,6 +20,9 @@ if libtbx.env.has_module("amber_adaptbx"):
   if sander:
   #if (build_dir is not None) and (os.path.isdir(build_dir)):
     amber_installed = True
+
+if VERBOSE:
+  print(libtbx.env.has_module("amber_adaptbx"))
 
 if (amber_installed):
   external_energy_params_str += """
@@ -100,3 +104,13 @@ if schrodinger_installed:
 """
   except ImportError:
     schrodinger_installed = False
+
+from mmtbx.geometry_restraints.quantum_interface import is_any_quantum_package_installed
+
+any_quantum_package_installed = is_any_quantum_package_installed(os.environ)
+if any_quantum_package_installed:
+  external_energy_params_str += any_quantum_package_installed
+
+if __name__=='__main__':
+  print('external_energy_params_str',external_energy_params_str)
+  assert external_energy_params_str.find('amber')>-1

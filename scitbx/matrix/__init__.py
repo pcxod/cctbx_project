@@ -452,6 +452,10 @@ class rec(object):
   def axis_and_angle_as_unit_quaternion(self, angle, deg=False):
     assert self.n in ((3,1), (1,3))
     if (deg): angle *= math.pi/180
+
+    if not angle % (2 * math.pi):
+      return col((1, 0, 0, 0))
+
     h = angle * 0.5
     c, s = math.cos(h), math.sin(h)
     u,v,w = self.normalize().elems
@@ -461,7 +465,7 @@ class rec(object):
     uq = self.axis_and_angle_as_unit_quaternion(angle=angle, deg=deg)
     return uq.unit_quaternion_as_r3_rotation_matrix()
 
-  def axis_and_angle_as_r3_derivative_wrt_angle(self, angle, deg=False):
+  def axis_and_angle_as_r3_derivative_wrt_angle(self, angle, deg=False, second_order=False):
     assert self.n in ((3,1), (1,3))
     prefactor = 1.
     if (deg): angle *= math.pi/180; prefactor = 180./math.pi
@@ -471,7 +475,10 @@ class rec(object):
     OP = unit_axis.outer_product(unit_axis)
     CP = cross_product_matrix(unit_axis.elems)
     c, s = math.cos(angle), math.sin(angle)
-    return prefactor * ( -I3*s + OP*s + CP*c ) # bug fix 8/27/13 NKS
+    if second_order:
+      return prefactor * (-I3*c + OP*c - CP*s)
+    else:
+      return prefactor * ( -I3*s + OP*s + CP*c ) # bug fix 8/27/13 NKS
     # note: the rotation operator itself is prefactor * (I3*c + OP*(1-c) + CP*s)
 
   def rt_for_rotation_around_axis_through(self, point, angle, deg=False):
@@ -1304,6 +1311,36 @@ def determinant_via_lu(m):
     result = -result
   return result
 
+def find_nearest_orthonormal_matrix(Mmx):
+  """
+  Return nearest orthonormal matrix, R, of M from
+  R := M*(M^t * M)^{-1/2}  where ^t means transpose of matrix or vector
+  e1, e2, e3, lambda1, lambda2, lambda3  are eigenvectors and respective eigenvalues of (M^t * M )
+  (M^t * M )^{-1/2} = 1/sqrt(lambda1) * e1*e1^t + 1/sqrt(lambda2) * e2*e2^t + 1/sqrt(lambda3) * e3*e3^t
+  http://people.csail.mit.edu/bkph/articles/Nearest_Orthonormal_Matrix.pdf
+  """
+  assert Mmx.n == (3,3)
+  assert abs(Mmx.determinant()) > 1e-8
+  # compute (M^t * M ) below
+  MtMmx = Mmx.transpose()*Mmx
+  # its eigenvalues and vectors
+  from scitbx.linalg import eigensystem
+  es = eigensystem.real_symmetric(MtMmx.as_flex_double_matrix())
+  evalues =  list(es.values())
+  evectors = list(es.vectors())
+  # eigenvectors as row vectors
+  evec1 = rec(([evectors[0],evectors[1], evectors[2] ]),n=(1,3))
+  evec2 = rec(([evectors[3],evectors[4], evectors[5] ]),n=(1,3))
+  evec3 = rec(([evectors[6],evectors[7], evectors[8] ]),n=(1,3))
+  # compute (M^t * M )^{-1/2} as 1/sqrt(lambda1) * e1*e1^t + 1/sqrt(lambda2) * e2*e2^t + 1/sqrt(lambda3) * e3*e3^t
+  MtMinvsqrtmx = \
+    (1.0/math.sqrt(evalues[0]))*evec1.transpose() * evec1 + \
+    (1.0/math.sqrt(evalues[1]))*evec2.transpose() * evec2 + \
+    (1.0/math.sqrt(evalues[2]))*evec3.transpose() * evec3
+  #compute R as M*(M^t * M)^{-1/2}
+  Rmx = Mmx * MtMinvsqrtmx
+  return Rmx
+
 def exercise_1():
   try:
     from libtbx import test_utils
@@ -1655,6 +1692,17 @@ def exercise_1():
   assert approx_equal(abs(y), 0.913597670681)
   assert approx_equal(x.angle(y, deg=True), 25.6685689758)
   assert approx_equal(y, (0.2739222799, -0.5364841936, -0.6868857244))
+
+  # Check that a rotation of 0 degrees around a dummy axis of (0, 0, 0) is tolerated.
+  zero_rotation = col((0, 0, 0)).axis_and_angle_as_unit_quaternion(angle=0)
+  assert approx_equal(zero_rotation, (1, 0, 0, 0))
+  # Check that we can therefore do a round trip from R3 identity matrix to axis and
+  # angle and back again.
+  id = identity(3)
+  q = id.r3_rotation_matrix_as_unit_quaternion()
+  angle, axis = q.unit_quaternion_as_axis_and_angle()
+  assert approx_equal(axis.axis_and_angle_as_r3_rotation_matrix(angle), id)
+
   uq = a.axis_and_angle_as_unit_quaternion(angle=37, deg=True)
   assert approx_equal(uq, (0.94832366, 0.15312122, 0.04372175, -0.27445317))
   r = uq.unit_quaternion_as_r3_rotation_matrix()
@@ -1889,6 +1937,22 @@ def exercise_1():
     m = rec(elems=list(range(6)), n=(2,3))
     n = m.as_numpy_array()
     assert n.tolist() == [[0, 1, 2], [3, 4, 5]]
+  # Test finding nearest orthonormal 3x3 matrix
+  m = sqr([1, 0.5, 0, -0.5, -1, 0,  0, 0.333, 0.8 ])
+  R = find_nearest_orthonormal_matrix(m)
+  assert approx_equal(R.elems, (0.9984906928673, 0.000907775788, 0.054913679537,
+                               -0.0099022914593, -0.980501661525, 0.196261143308,
+                               -0.0540211151411, 0.196508696217, 0.979012794313) )
+  assert approx_equal(R.determinant(), -1.0)
+  assert R.is_r3_rotation_matrix() == False
+
+  m = sqr([1, 0.5, 0, -0.5, 1, 0,  0, 0.333, 1.8 ])
+  R = find_nearest_orthonormal_matrix(m)
+  assert approx_equal(R.elems, (0.894427190999, 0.44432972299, -0.0507059884,
+                                -0.447213595499, 0.88865944596, -0.1014119769,
+                                0.0,            0.11338203706, 0.9935514650) )
+  assert approx_equal(R.determinant(), 1.0)
+  assert R.is_r3_rotation_matrix()
   #
   print("OK")
 

@@ -55,8 +55,7 @@ class IntegrateCharacters:
 
     print("Cell in setting",setting["counter"],local["cell"])
 
-    frames = self.spotfinder_results.pd['osc_start'].keys()
-    frames.sort()
+    frames = list(sorted(self.spotfinder_results.pd['osc_start'].keys()))
 
     local['maxcel']='0'
     local['xbeam']="%f"%setting['minimizer'].new['xbeam']
@@ -163,7 +162,7 @@ class IntegrateCharacters:
           work_params = work_phil.work.extract()
 
           app = wx.App(0)
-          wx.SystemOptions.SetOptionInt("osx.openfiledialog.always-show-types", 1)
+          wx.SystemOptions.SetOption("osx.openfiledialog.always-show-types", "1")
           frame = SlipXrayFrame(None, -1, "X-ray image display", size=(800,720))
           frame.Show()
 

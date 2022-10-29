@@ -496,6 +496,10 @@ def exercise_misc():
     a.reshape(flex.grid(2,5))
     b = flex.long([0,1,2,-1,-2,2**30,2**31-1,-2**30,-2**31, 0])
     assert a.all_eq(b)
+  for flex_type in (flex.int, flex.int32, flex.long, flex.int64):
+    a = flex_type([0,1,2,2**30,2**31-1]).as_size_t()
+    b = flex.size_t([0,1,2,2**30,2**31-1])
+    assert a.all_eq(b)
   for flex_type in (flex.int8, flex.int16):
     a = flex_type([0,1,2,-1,-2,2**6,2**7-1,-2**6,-2**7, 0]).as_long()
     a.reshape(flex.grid(2,5))
@@ -1494,6 +1498,12 @@ mean:   2.00
   assert approx_equal(flex.double([3,7]).sample_standard_deviation(), 8**0.5)
 
 def exercise_complex_functions():
+  assert (flex.complex_double() == None) is False
+  try:
+    cd_none = flex.complex_double([None])
+  except TypeError as e:
+    assert "converter" in str(e)
+  else: raise Exception_expected
   c = 1+2j
   x = flex.complex_double((c,))
   y = flex.real(x)
@@ -1936,6 +1946,16 @@ def exercise_flex_vec2_double():
   assert approx_equal(tuple(a.dot(a)), (17,29,45))
   assert approx_equal(tuple(a.dot()), (17,29,45))
   b = flex.vec2_double(y,x)
+  assert approx_equal(a.each_normalize().dot(), [1]*3)
+  zoz = flex.vec2_double([(0,0),(0,1),(1,0)])
+  try:
+    zoz.each_normalize()
+  except RuntimeError as e:
+    assert str(e) == "flex.vec2_double.each_normalize():" \
+      " number of vectors with length zero: 1 of 3"
+  else: raise Exception_expected
+  assert approx_equal(
+    zoz.each_normalize(raise_if_length_zero=False).dot(), [0,1,1])
   assert approx_equal(
     a.max_distance(b)**2,
     max(flex.vec2_double(a.as_double()-b.as_double()).dot()))
@@ -1987,6 +2007,12 @@ def exercise_flex_vec2_double():
     for j in range(len(x2)):
       pydist = math.sqrt( (x[i]-x2[j])**2 + (y[i]-y2[j])**2 )
       assert approx_equal(pydist, DIST[i,j])
+
+  #
+  a = flex.vec2_double([(1,2), (-2,3), (3,4)])
+  assert approx_equal(a, a.rotate_around_origin(2*math.pi))
+  assert approx_equal(
+    a, a.rotate_around_origin(flex.double(3, 2*math.pi)))
 
 def exercise_flex_vec3_int():
   flex.exercise_triple(flex.vec3_int)
@@ -3692,6 +3718,27 @@ def exercise_fixed_width_int_types():
 
   print("Ok")
 
+def exercise_numpy_conversions():
+  try:
+    import numpy as np
+  except ImportError:
+    print("Skipping exercise_numpy_conversions (numpy not available)")
+    return
+
+  for npy_type_name in ['int8', 'int16', 'int32', 'int64',
+                        'uint8', 'uint16', 'uint32', 'uint64',
+                        'single', 'double']:
+    npy_type = getattr(np, npy_type_name)
+    for flex_type_name in ['int8', 'int16', 'int32', 'int64',
+                           'uint8', 'uint16', 'uint32', 'uint64',
+                           'int', 'long', 'float', 'double']:
+      flex_type = getattr(flex, flex_type_name)
+      l = 2**7 - 1
+      n = np.arange(l).astype(npy_type)
+      f = flex_type(n)
+      for i in range(l):
+        assert(approx_equal(n[i], f[i]))
+
 def run(iterations):
   i = 0
   while (iterations == 0 or i < iterations):
@@ -3755,6 +3802,7 @@ def run(iterations):
     exercise_python_functions()
     exercise_vec3_double_as_numpy_array()
     exercise_fixed_width_int_types()
+    exercise_numpy_conversions()
     i += 1
 
 if (__name__ == "__main__"):

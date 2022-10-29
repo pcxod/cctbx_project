@@ -4,13 +4,13 @@
 jobs:
   - template: ./conda-win.yml
     parameters:
-      vmImage: vs2017-win2016
-      vs: vs2015
+      vmImage: windows-2019
+      vs: 2019
       modules: ${{ parameters.modules }}
   - template: ./conda-win.yml
     parameters:
-      vmImage: vs2017-win2016
-      vs: vs2017
+      vmImage: windows-2022
+      vs: 2022
       modules: ${{ parameters.modules }}
   - template: ./conda-linux.yml
     parameters:
@@ -26,7 +26,7 @@ jobs:
       template: ./unix-conda-build.yml
   - template: ./conda-linux.yml
     parameters:
-      distribution: centos
+      distribution: rockylinux
       version: [8]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml
@@ -50,19 +50,19 @@ jobs:
       template: ./unix-conda-build.yml
   - template: ./conda-osx.yml
     parameters:
-      vmImage: [10, 15]
-      xcode_version: [12, 2]
+      vmImage: [12]
+      xcode_version: [14, 0]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml
   - template: ./conda-osx.yml
     parameters:
-      vmImage: [10, 14]
-      xcode_version: [11, 3, 1]
+      vmImage: [12]
+      xcode_version: [13, 4, 1]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml
   - template: ./conda-osx.yml
     parameters:
-      vmImage: [10, 14]
-      xcode_version: [10, 3]
+      vmImage: [11]
+      xcode_version: [12, 5, 1]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml

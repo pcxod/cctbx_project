@@ -40,8 +40,10 @@ def setup_test(pdb_answer, pdb_poor, i_pdb, d_min, resolution_factor,
   pip.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
   # answer
   pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_answer)
-  model_answer = mmtbx.model.manager(model_input=pdb_inp, process_input=True,
-    log=null_out(), pdb_interpretation_params=pip, build_grm=True)
+  model_answer = mmtbx.model.manager(model_input=pdb_inp,
+    log=null_out())
+  model_answer.process(pdb_interpretation_params=pip,
+    make_restraints=True)
   with open("answer_%s.pdb"%str(i_pdb), "w") as the_file:
     the_file.write(model_answer.model_as_pdb())
   #
@@ -60,8 +62,9 @@ def setup_test(pdb_answer, pdb_poor, i_pdb, d_min, resolution_factor,
   mtz_object.write(file_name = "answer_%s.mtz"%str(i_pdb))
   # poor
   pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_poor)
-  model_poor = mmtbx.model.manager(model_input=pdb_inp, log=null_out(),
-    pdb_interpretation_params=pip, build_grm=True)
+  model_poor = mmtbx.model.manager(model_input=pdb_inp, log=null_out())
+  model_poor.process(pdb_interpretation_params=pip,
+    make_restraints=True)
   with open("poor_%s.pdb"%str(i_pdb), "w") as the_file:
     the_file.write(model_poor.model_as_pdb())
   #
@@ -195,7 +198,14 @@ def get_radius(atom, vdw_radii):
     residue_name = atom.parent().resname, atom_names = atom_names)
   if(converter.atom_name_interpretation is not None):
     atom_names = converter.atom_name_interpretation.mon_lib_names()
-  n = atom_names[0].strip()
+  if(atom_names[0] is not None):
+    n = atom_names[0].strip()
+  else:
+    converter = iotbx.pdb.residue_name_plus_atom_names_interpreter(
+      residue_name = atom.parent().resname,
+      atom_names   = [atom.element])
+    n = converter.atom_name_interpretation.mon_lib_names()[0].strip()
+    if(n is None): return 1.5
   try:             return vdw_radii[n.strip()]-0.25
   except KeyError: return 1.5 # XXX U, Uranium, OXT are problems!
 
@@ -233,7 +243,7 @@ class side_chain_fit_evaluator(object):
   def __init__(self,
                pdb_hierarchy,
                crystal_symmetry,
-               restraints_manager = None,
+               exclude_selection = None,
                rotamer_evaluator = None,
                map_data = None,
                diff_map_data = None,
@@ -248,28 +258,6 @@ class side_chain_fit_evaluator(object):
         map_data      = map_data)
     get_class = iotbx.pdb.common_residue_names_get_class
     mainchain=["C","N","O","CA","CB"]
-    # Exclude side-chains involved into covalent bonds
-    if(restraints_manager is not None):
-      exclude_selection = flex.size_t()
-      atoms = pdb_hierarchy.atoms()
-      bond_proxies_simple, asu = restraints_manager.get_all_bond_proxies(
-        sites_cart = atoms.extract_xyz())
-      for proxy in bond_proxies_simple:
-        i,j = proxy.i_seqs
-        # is i the same as atoms[i].i_seq ? Shall I assert this?
-        resseq_i  = atoms[i].parent().parent().resseq
-        resseq_j  = atoms[j].parent().parent().resseq
-        resname_i = atoms[i].parent().resname
-        resname_j = atoms[j].parent().resname
-        i_aa = get_class(resname_i)=="common_amino_acid"
-        j_aa = get_class(resname_j)=="common_amino_acid"
-        if(resseq_i != resseq_j and
-           (i_aa or j_aa) and
-           not atoms[i].name.strip() in mainchain and
-           not atoms[j].name.strip() in mainchain):
-          if(i_aa): exclude_selection.append(atoms[i].i_seq)
-          if(j_aa): exclude_selection.append(atoms[j].i_seq)
-    #
     self.crystal_symmetry = crystal_symmetry
     unit_cell = crystal_symmetry.unit_cell()
     self.pdb_hierarchy = pdb_hierarchy
@@ -285,7 +273,7 @@ class side_chain_fit_evaluator(object):
       if(get_class(residue.resname) != "common_amino_acid"): return True
       if(residue.resname.strip().upper() in ["ALA","GLY"]): return True
       if(self._on_spacial_position(residue)): return True
-      if(restraints_manager is not None):
+      if(exclude_selection is not None):
         for atom in residue.atoms():
           if(atom.i_seq in exclude_selection):
             return True
@@ -347,7 +335,7 @@ class side_chain_fit_evaluator(object):
                 atoms.extract_i_seq(), True)
               self.cntr_poormap+=1
     #
-    fmt = "%-d residues out of total %-d (non-ALA, GLY, PRO) need a fit."
+    fmt = "%-d residues out of total %-d non-(ALA, GLY, PRO) need fitting."
     self.mes.append(
       fmt%(self.cntr_poormap+self.cntr_outliers, self.cntr_residues))
     self.mes.append("  rotamer outliers: %d"%self.cntr_outliers)

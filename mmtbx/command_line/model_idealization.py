@@ -30,6 +30,7 @@ import mmtbx.model
 import mmtbx.refinement.real_space.fit_residues
 import scitbx.math
 import mmtbx.idealized_aa_residues.rotamer_manager
+from iotbx import extract_xtal_data
 
 from elbow.command_line.ready_set import model_interface as ready_set_model_interface
 
@@ -214,8 +215,8 @@ class model_idealization():
     params.pdb_interpretation.restraints_library.rdl = True
     params.pdb_interpretation.secondary_structure = self.params.secondary_structure
     self.params_for_model = params
-    self.model.set_pdb_interpretation_params(params)
-    self.model.process_input_model(make_restraints=True)
+    self.model.process(
+      make_restraints=True, pdb_interpretation_params=params)
 
 
     self.original_hierarchy = self.model.get_hierarchy().deep_copy() # original pdb_h, without any processing
@@ -481,7 +482,7 @@ class model_idealization():
     params_h.pdb_interpretation.use_neutron_distances=True
     params_h.pdb_interpretation.ncs_search = self.params_for_model.pdb_interpretation.ncs_search
     params_h.pdb_interpretation.ncs_search.exclude_selection="water"
-    self.model_h.set_pdb_interpretation_params(params_h)
+    #self.model_h.set_pdb_interpretation_params(params_h)
     self.model_h.get_restraints_manager()
     self.model_h.idealize_h_riding()
     self.model_h.setup_ncs_constraints_groups(filter_groups=True)
@@ -516,7 +517,7 @@ class model_idealization():
     self._update_model_h()
     rotman = mmtbx.idealized_aa_residues.rotamer_manager.load(
           rotamers="favored")
-    self.model_h.process_input_model(make_restraints=True)
+    self.model_h.process(make_restraints=True)
     o = mmtbx.refinement.real_space.side_chain_fit_evaluator(
       pdb_hierarchy      = self.model_h.get_hierarchy(),
       crystal_symmetry   = self.model.crystal_symmetry(),
@@ -547,7 +548,7 @@ class model_idealization():
     self._setup_model_h()
     self.model.set_restraint_objects(self.model_h.get_restraint_objects())
 
-    self.model.process_input_model(make_restraints=True)
+    self.model.process(make_restraints=True)
     # set SS restratins
     self.set_ss_restraints(self.ann)
 
@@ -908,18 +909,16 @@ def get_map_from_hkl(hkl_file_object, params, xrs, log):
     err              = StringIO())
 
 
-  parameters = mmtbx.utils.data_and_flags_master_params().extract()
+  parameters = extract_xtal_data.data_and_flags_master_params().extract()
   if (params.data_labels is not None):
     parameters.labels = params.data_labels
   if (params.r_free_flags_labels is not None):
     parameters.r_free_flags.label = params.r_free_flags_labels
-  determined_data_and_flags = mmtbx.utils.determine_data_and_flags(
+  determined_data_and_flags = extract_xtal_data.run(
     reflection_file_server = rfs,
     parameters             = parameters,
     keep_going             = True,
-    working_point_group = crystal_symmetry.space_group().build_derived_point_group(),
-    log                    = StringIO(),
-    symmetry_safety_check  = True)
+    working_point_group = crystal_symmetry.space_group().build_derived_point_group())
   f_obs = determined_data_and_flags.f_obs
 
   if (params.data_labels is None):
@@ -1073,7 +1072,6 @@ def run(args):
       model_input = pdb_input,
       restraint_objects = input_objects.cif_objects,
       crystal_symmetry = crystal_symmetry,
-      process_input = False,
       log=log)
 
   map_data = None
@@ -1110,6 +1108,8 @@ def run(args):
   mi_object.print_runtime()
   # add hydrogens if needed ?
   print("All done.", file=log)
+  log.flush()
+  sys.stderr = sys.__stderr__
   log.close()
 
 if __name__ == "__main__":

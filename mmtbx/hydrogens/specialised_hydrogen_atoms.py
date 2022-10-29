@@ -8,6 +8,12 @@ from mmtbx.ligands.hierarchy_utils import add_hydrogens_to_atom_group_using_bad
 from cctbx.geometry_restraints.linking_class import linking_class
 origin_ids = linking_class()
 
+def get_proton_info(ag):
+  proton_name=proton_element='H'
+  if is_perdeuterated(ag):
+    proton_name=proton_element='D'
+  return proton_element, proton_name
+
 def _generate_bonds_with_origin_ids_in_list(bond_proxies, specific_origin_ids=None):
   assert specific_origin_ids
   for specific_origin_id in specific_origin_ids:
@@ -173,6 +179,7 @@ def add_cys_hg_to_residue_group(residue_group,
 def conditional_add_cys_hg_to_atom_group(geometry_restraints_manager,
                                          residue_group,
                                          element='H',
+                                         append_to_end_of_model=False,
                                          ):
   """Adds HG atom to CYS if no disulfur bridge
 
@@ -184,7 +191,7 @@ def conditional_add_cys_hg_to_atom_group(geometry_restraints_manager,
   resnames = []
   for atom_group in residue_group.atom_groups():
     resnames.append(atom_group.resname)
-  if 'CYS' not in resnames: return -1
+  if 'CYS' not in resnames: return None
   sgs = []
   for atom in residue_group.atoms():
     if atom.name.strip()=='SG' and atom.parent().resname=='CYS':
@@ -203,8 +210,10 @@ def conditional_add_cys_hg_to_atom_group(geometry_restraints_manager,
           sg_bonds.append(p.i_seqs)
   rc = []
   if len(sg_bonds)==0:
-    rc += add_cys_hg_to_residue_group(residue_group, element=element)
-    assert not rc
+    rc += add_cys_hg_to_residue_group(residue_group,
+                                      element=element,
+                                      append_to_end_of_model=append_to_end_of_model,
+                                      )
   return rc
 
 def add_disulfur_hydrogen_atoms(geometry_restraints_manager,
@@ -223,3 +232,39 @@ def add_disulfur_hydrogen_atoms(geometry_restraints_manager,
                                                 residue_group,
                                                 element=element,
                                                 )
+
+def remove_cys_hg_from_residue_group(rg):
+  proton_element, proton_name = get_proton_info(rg)
+  for ag in rg.atom_groups():
+    if ag.resname not in ['CYS']: continue
+    for atom in ag.atoms():
+      if atom.name==' %sG ' % proton_element:
+        ag.remove_atom(atom)
+        break
+
+def generate_bonded_i_seqs(geometry_restraints_manager, rg, j_seq):
+  def _not_j_seq(j_seq, i_seqs):
+    i_seqs.remove(j_seq)
+    return i_seqs[0]
+  bonds = []
+  for bond in geometry_restraints_manager.pair_proxies().bond_proxies.simple:
+    if j_seq in bond.i_seqs:
+      bonds.append(_not_j_seq(j_seq, list(bond.i_seqs)))
+  for bond in geometry_restraints_manager.pair_proxies().bond_proxies.asu:
+    if j_seq in [bond.i_seq, bond.j_seq]:
+      bonds.append(_not_j_seq(j_seq, [bond.i_seq, bond.j_seq]))
+  return bonds
+
+def conditional_remove_cys_hg_to_atom_group(geometry_restraints_manager,
+                                            rg,
+                                            ):
+  sgs = None
+  for atom in rg.atoms():
+    if atom.name.strip()=='SG' and atom.parent().resname=='CYS':
+      sgs = atom.i_seq
+      break
+  if sgs:
+    sg_bonds = generate_bonded_i_seqs(geometry_restraints_manager, rg, sgs)
+    if len(sg_bonds)>2:
+      remove_cys_hg_from_residue_group(rg)
+

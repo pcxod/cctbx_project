@@ -70,18 +70,31 @@ def miller_array_export_as_shelx_hklf(
           assert len(result) == 8
       return result
     def fmt_fullrange_data(v):
-      if (abs(v) >= 1.):
-        result = "%8.6g" % v
+      if (v < 0.):
+        if (abs(v) < 1.):
+          result = "%8.5f" % v
+        else:
+          result = "%8.6g" % v
+          if ("." not in result): # FORTRAN F8.2 interprets -123456 as -1234.56
+            result = "%7d." % round(v)
       else:
-        result = "%8.5f" % v
+        if (v < 1.):
+          result = "%8.6f" % v
+        else:
+          result = "%8.7g" % v
+      if ("." not in result): # FORTRAN F8.2 interprets 1234567 as 12345.67
+        result = "%7d." % round(v) # Add "."
+      assert len(result) == 8
       return result
     def fmt_fullrange_sigma(v):
       if (abs(v) >= 1.):
-        result = "%8.6g" % v
+        result = "%8.7g" % v
+        if ("." not in result):
+          result = "%7d." % round(v)
       elif (abs(v) < 0.00001):
-        result = "%8.5f" % 0.00001
+        result = "%8.5g" % 0.00001
       else:
-        result = "%8.5f" % v
+        result = "%8.6g" % v
       return result
     if (full_dynamic_range):
       line = fmt_3i4(h) + fmt_fullrange_data(data[i]*scale) + fmt_fullrange_sigma(s*scale)
