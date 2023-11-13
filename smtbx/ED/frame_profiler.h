@@ -116,7 +116,7 @@ namespace smtbx { namespace ED {
             if (floating) {
               n_beam_dc.init(h, r.first, parent.Fcs_k, parent.mi_lookup);
             }
-            rv[i] = std::norm(n_beam_dc.calc_amp(r));
+            rv[ai] = std::norm(n_beam_dc.calc_amp(r));
           }
           return rv;
         }
