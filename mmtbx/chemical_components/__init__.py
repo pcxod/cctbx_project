@@ -1,4 +1,3 @@
-
 from __future__ import absolute_import, division, print_function
 from mmtbx.chemical_components import cif_parser
 from libtbx.utils import Sorry
@@ -26,16 +25,18 @@ dna_types = [
   ]
 rna_dna_types = rna_types + dna_types
 
+l_sugar_types = ["L-SACCHARIDE",
+                 'L-SACCHARIDE, ALPHA LINKING',
+                 'L-SACCHARIDE, BETA LINKING',
+                 'L-SACCHARIDE 1,4 AND 1,4 LINKING',
+                 ]
+d_sugar_types = ["D-SACCHARIDE",
+                 'D-SACCHARIDE, ALPHA LINKING',
+                 'D-SACCHARIDE, BETA LINKING',
+                 'D-SACCHARIDE 1,4 AND 1,4 LINKING',
+                 ]
 sugar_types = ["SACCHARIDE",
-               "L-SACCHARIDE",
-               "D-SACCHARIDE",
-               'D-SACCHARIDE, ALPHA LINKING',
-               'D-SACCHARIDE, BETA LINKING',
-               'L-SACCHARIDE, ALPHA LINKING',
-               'L-SACCHARIDE, BETA LINKING',
-               'D-SACCHARIDE 1,4 AND 1,4 LINKING',
-               'L-SACCHARIDE 1,4 AND 1,4 LINKING',
-               ]
+              ] + l_sugar_types + d_sugar_types
 terminii = [
   'L-PEPTIDE NH3 AMINO TERMINUS',
   'L-PEPTIDE COOH CARBOXY TERMINUS',
@@ -72,6 +73,15 @@ def get_cif_filename(code):
     raise Sorry("Residue code is blank.")
   return os.path.join(
     data_dir, "%s" % code[0].lower(), "data_%s.cif" % code.upper())
+
+def is_chemical_components_file(filename):
+  try:
+    cif_model = iotbx.cif.reader(file_path=file_name).model()
+    for cif_block in cif_model.values():
+      if "_atom_site" in cif_block:
+        return True
+  except Exception as e:
+    return False
 
 def is_code(code):
   filename = get_cif_filename(code)
@@ -222,7 +232,7 @@ def get_bond_pairs(code, alternate=False, heavy_atom_only=False, use_tuple=False
   return tmp
 
 def generate_chemical_components_codes(sort_reverse_by_smiles=False,
-                                       only_non_polyer=False,
+                                       only_non_polymer=False,
                                        ):
   def _cmp_smiles_length(f1, f2):
     c1 = f1[5:-4]
@@ -245,14 +255,16 @@ def generate_chemical_components_codes(sort_reverse_by_smiles=False,
   for d in dirs:
     if not os.path.isdir(os.path.join(data_dir, d)): continue
     filenames += os.listdir(os.path.join(data_dir, d))
+    # if len(filenames)>100: break
   if sort_reverse_by_smiles:
-    filenames.sort(_cmp_smiles_length)
+    import functools
+    filenames = sorted(filenames, key=functools.cmp_to_key(_cmp_smiles_length))
   else:
     filenames.sort()
   for filename in filenames:
     if filename.find("data_")!=0: continue
     code = filename[5:-4]
-    if only_non_polyer and get_group(code)!='non-polymer': continue
+    if only_non_polymer and get_group(code)!='non-polymer': continue
     yield code
 
 def get_header(code):
@@ -269,12 +281,21 @@ def get_header(code):
       break
   return outl
 
-def get_group(code, split_rna_dna=False, split_l_d=False):
+def get_group(code, split_rna_dna=False, split_l_d=False, verbose=False):
   t = get_type(code)
-  t=t.replace('"','').upper()
+  if verbose: print('get_group',code, t)
+  if t is not None:
+    t=t.replace('"','').upper()
+  else:
+    if code in ['AD', 'TD']:
+      t='L-DNA LINKING'
   if t in sugar_types:
-    assert not split_l_d
-    return 'sugar'
+    if split_l_d:
+      if t in l_sugar_types:
+        return 'L-saccharide'
+      elif t in d_sugar_types:
+        return 'D-saccharide'
+    return 'saccharide'
   elif t in amino_types:
     if split_l_d:
       if t in l_amino_types:
@@ -288,21 +309,23 @@ def get_group(code, split_rna_dna=False, split_l_d=False):
     assert not split_l_d
     return 'non-alpha peptide'
   elif t in terminii:
-    assert not split_l_d
+    # assert not split_l_d
     return 'amino_acid_terminal'
   elif t in rna_dna_types:
-    assert not split_rna_dna
+    # assert not split_rna_dna
     if split_rna_dna:
       if t in rna_types:
-        return 'rna'
+        return 'RNA'
       elif t in dna_types:
-        return dna
+        return 'DNA'
       else:
         assert 0
     return 'rna_dna'
   elif t in ['NON-POLYMER',
              'PEPTIDE-LIKE',
             ]:
+    return t.lower()
+  elif t in ['OTHER']:
     return t.lower()
   print(t)
   assert 0
@@ -311,13 +334,97 @@ def get_restraints_group(code, split_rna_dna=True, split_l_d=True):
   g = get_group(code, split_rna_dna, split_l_d)
   print(g)
   if g in ['L-peptide', 'D-peptide', 'peptide',
+            'L-saccharide', 'D-saccharide', 'saccharide',
            # 'non-polymer',
+           'RNA', 'DNA',
           ]:
     return g
-  return {'amino_acid' : 'peptide',
-          'non-polymer': 'ligand',
+  return {'amino_acid'          : 'peptide',
+          'amino_acid_terminal' : 'peptide',
+          'non-polymer'         : 'ligand',
+          # 'saccharide' : 'pyranose',
           }[g]
   assert 0
+
+def get_as_atom_group(code):
+  import iotbx
+  from mmtbx.ligands.hierarchy_utils import _new_atom
+  cif = get_cif_dictionary(code)
+  if not cif: return cif
+  tmp = []
+  ag = iotbx.pdb.hierarchy.atom_group()
+  ag.resname=code
+  '''comp_id : BB9 <class 'str'>
+  atom_id : HG <class 'str'>
+  alt_atom_id : HG <class 'str'>
+  type_symbol : H <class 'str'>
+  charge : 0 <class 'int'>
+  pdbx_align : 1 <class 'int'>
+  pdbx_aromatic_flag : N <class 'str'>
+  pdbx_leaving_atom_flag : N <class 'str'>
+  pdbx_stereo_config : N <class 'str'>
+  model_Cartn_x : 14.295 <class 'float'>
+  model_Cartn_y : -4.046 <class 'float'>
+  model_Cartn_z : 26.134 <class 'float'>
+  pdbx_model_Cartn_x_ideal : -3.161 <class 'float'>
+  pdbx_model_Cartn_y_ideal : -1.326 <class 'float'>
+  pdbx_model_Cartn_z_ideal : -0.0 <class 'float'>
+  pdbx_component_atom_id : HG <class 'str'>
+  pdbx_component_comp_id : BB9 <class 'str'>
+  pdbx_ordinal : 12 <class 'int'>'''
+# def _new_atom(name, element, xyz, occ, b, hetero, segid=' '*4):
+  use_model=True
+  for item in cif["_chem_comp_atom"]:
+    xyz = (item.model_Cartn_x,
+           item.model_Cartn_y,
+           item.model_Cartn_z,
+           )
+    print(xyz)
+    if '?' in xyz:
+      xyz = (item.pdbx_model_Cartn_x_ideal,
+             item.pdbx_model_Cartn_y_ideal,
+             item.pdbx_model_Cartn_z_ideal,
+             )
+      print(xyz)
+      use_model=False
+      break
+  for item in cif["_chem_comp_atom"]:
+    if use_model:
+      xyz = (item.model_Cartn_x,
+             item.model_Cartn_y,
+             item.model_Cartn_z,
+             )
+    else:
+      xyz = (item.pdbx_model_Cartn_x_ideal,
+             item.pdbx_model_Cartn_y_ideal,
+             item.pdbx_model_Cartn_z_ideal,
+             )
+    assert '?' not in xyz
+    atom = _new_atom(item.atom_id,
+                     item.type_symbol,
+                     xyz,
+                     1.,
+                     20.,
+                     True,
+                     )
+    ag.append_atom(atom)
+  return ag
+
+def get_as_hierarchy(code):
+  import iotbx
+  ag = get_as_atom_group(code)
+  rg = iotbx.pdb.hierarchy.residue_group()
+  rg.resseq='1'
+  rg.append_atom_group(ag)
+  chain = iotbx.pdb.hierarchy.chain()
+  chain.id='A'
+  chain.append_residue_group(rg)
+  model = iotbx.pdb.hierarchy.model()
+  model.append_chain(chain)
+  ph = iotbx.pdb.hierarchy.root()
+  ph.append_model(model)
+  ph.reset_atom_i_seqs()
+  return ph
 
 if __name__=="__main__":
   print('\nSMILES')

@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function
 
-cctbx_buttonsdeflist = [
+buttonsdeflist = [
   ("Intensities", "Show Intensities", """
             viewer {
               data_array {
@@ -18,11 +18,11 @@ cctbx_buttonsdeflist = [
               }
             }
 """),
-# ConstanAxesSliceIntens and ConstanAxesSliceAmpl rely on hard coded names "H-axis (1,0,0)", "K-axis (0,1,0)"
+# ConstantAxesSliceIntens and ConstantAxesSliceAmpl rely on hard coded names "H-axis (1,0,0)", "K-axis (0,1,0)"
 # and "L-axis (0,0,1)" being present in the list of vectors. The button PHIL parameter show_vector="['-axis', True]"
 # will then entail comboboxes being created from where H, K or L axes can be selected. This is more compact
 # than having threee separate buttons for each axes
-  ("ConstanAxesSliceIntens", "Show plane of intensities with constant: ", """
+  ("ConstantAxesSliceIntens", "Show plane of intensities with constant: ", """
           clip_plane {
             normal_vector = "-axis"
             is_assoc_real_space_vector = True
@@ -42,7 +42,7 @@ cctbx_buttonsdeflist = [
           }
  """),
 
-   ("ConstanAxesSliceAmpl", "Show plane of amplitudes with constant: ", """
+   ("ConstantAxesSliceAmpl", "Show plane of amplitudes with constant: ", """
           clip_plane {
             normal_vector = "-axis"
             is_assoc_real_space_vector = True
@@ -62,26 +62,26 @@ cctbx_buttonsdeflist = [
           }
 """),
 
-("FoversigF", "F/SigF ( from miller_array.data()/miller_array.sigmas() )",
+("FoversigF", "F/SigF",
  """
-          miller_array_operation = "('newarray._data= array1.data()/array1.sigmas()\\nnewarray._sigmas = None', 'FoverSigF2', ['FOBS,SIGFOBS', 'Amplitude'], ['', ''])"
+          miller_array_operation = "('newarray._data= array1.data()/array1.sigmas()\\nnewarray._sigmas = None', 'FoverSigF', ['FOBS,SIGFOBS', 'Amplitude'], ['', ''])"
           viewer {
             data_array {
-              label = "FoverSigF2"
+              label = "FoverSigF"
               datatype = "Amplitude"
             }
           }
 
  """),
 
-("IoverSigI", "I/SigI >= 2 ( from miller_array.data()/miller_array.sigmas() )",
+("IoverSigI", "I/SigI",
  """
-        miller_array_operation = "('newarray._data=array1.data()/array1.sigmas()', 'IoverSigI', ['I<<FSQ,SIGI<<FSQ', 'Intensity'], ['', ''])"
+        miller_array_operation = "('newarray._data=array1.data()/array1.sigmas()\\nnewarray._sigmas = None', 'IoverSigI', ['I<<FSQ,SIGI<<FSQ', 'Intensity'], ['', ''])"
         binning {
           scene_bin_thresholds = -10000 1 2 3 4 5 460 793.55 2750
           binlabel = "IoverSigI"
-          bin_opacity = 0 0
-          bin_opacity = 0 1
+          bin_opacity = 1 0
+          bin_opacity = 1 1
           bin_opacity = 1 2
           bin_opacity = 1 3
           bin_opacity = 1 4
@@ -101,9 +101,9 @@ cctbx_buttonsdeflist = [
         }
  """),
 
-("Evalues", "E-values ( miller_array.normalize() )",
+("Evalues", "E-values",
  """
-          miller_array_operation = "('newarray._data = array1.normalize().data()\\nnewarray._sigmas = array1.normalize().sigmas()\\n', 'E-values', ['FP,SIGFP', 'Amplitude'], ['', ''])"
+          miller_array_operation = "('newarray._data = array1.normalize().data()\\nnewarray._sigmas = None', 'E-values', ['FP', 'Amplitude'], ['', ''])"
           viewer {
             data_array {
               label = "E-values"
@@ -112,14 +112,31 @@ cctbx_buttonsdeflist = [
           }
  """),
 
-]
+("Merged", "Merged Intensities",
+ """
+      miller_array_operation = "('from crys3d.hklviewer import display2\\nnewarray = display2.MergeData( array1, show_anomalous_pairs=False)[0]\\nfrom cctbx.xray import observation_types\\nnewarray.set_observation_type( observation_types.intensity())', 'Imerge', ['I,SIGI','Intensity'], ['', ''])"
+      viewer {
+        data_array {
+          label = "Imerge,SigImerge"
+          datatype = "Intensity"
+        }
+      }
 
+ """),
 
+("Multiplicities", "Multiplicities",
+ """
+      miller_array_operation = "('from crys3d.hklviewer import display2\\nmultiplicities = display2.MergeData( array1, show_anomalous_pairs=False)[1]\\n# use double to avoid being interpreted as R-free\\nnewarray._data = multiplicities.data().as_double()\\nnewarray._indices = multiplicities.indices()\\nnewarray._sigmas = None\\nfrom cctbx.xray import observation_types\\nnewarray.set_observation_type(None)', 'multiplicity', ['I,SIGI','Intensity'], ['', ''])"
+      viewer {
+        data_array {
+          label = "multiplicity"
+          datatype = "Floating-point"
+        }
+      }
 
+ """),
 
-
-phenix_buttonsdeflist = [
-("INFO", "Reflections with information bits less than 0.35", """
+("INFO035", "INFO < 0.35 bits", """
         binning {
           scene_bin_thresholds = -1 0.35 0.7 1 1.25 1.85 17.59 100
           binlabel = 'INFO'
@@ -140,7 +157,28 @@ phenix_buttonsdeflist = [
         }
  """),
 
+("InfoISigI05", "INFO > 0.2 bits and I/SigI < 0.5", """
+        miller_array_operation = "('ISigIarray = array2.deep_copy()\\nISigIarray._data = array2.data()/array2.sigmas()\\nnewarray = array1.select(ISigIarray.data()<0.5)', 'INFO_ISigI_0.5', ['INFO', None], ['IOBS,SIGIOBS', 'Intensity'])"
+        binning {
+          scene_bin_thresholds = -0.1 0.2 nan nan
+          binlabel = 'INFO_ISigI_0.5'
+          bin_opacity = 0 0
+          bin_opacity = 1 1
+          bin_opacity = 1 2
+          bin_opacity = 1 3
+          nbins = 4
+        }
+        viewer {
+          data_array {
+            label = "INFO_ISigI_0.5"
+            datatype = "Floating-point"
+          }
+        }
+ """),
+ # we omit datatype of INFO in miller_array_operation as to force validate_preset_buttons()
+ # only to match an array that is labelled INFO
   ("aniso4", "Rotate around one anisotropy principal axis:", """
+        real_space_unit_cell_scale_fraction = 0.9
         binning {
           binlabel = "ANISO"
           bin_opacity = 1 0
@@ -170,9 +208,10 @@ phenix_buttonsdeflist = [
   """),
 
   ("aniso", "Show anisotropy principal axes", """
-          real_space_unit_cell_scale_fraction = 0
+          draw_real_space_unit_cell = True
+          real_space_unit_cell_scale_fraction = 0.9
           binning {
-            binlabel = 'ANISO'
+            binlabel = "ANISO"
             bin_opacity = 1 0
             bin_opacity = 1 1
             bin_opacity = 0 2
@@ -197,9 +236,9 @@ phenix_buttonsdeflist = [
             expand_anomalous = True
           }
   """),
-  ("TNCSlayer", "Slice perpendicular to TNCS vector", """
+  ("TNCSlayer_xtricorder", "Slice perpendicular to tNCS_xtricorder vector", """
           clip_plane {
-            normal_vector = "TNCS"
+            normal_vector = "tNCS_xtricorder"
             clip_width = 0.380397231
           }
           viewer {
@@ -207,7 +246,7 @@ phenix_buttonsdeflist = [
               label = "TEPS"
               datatype = "Floating-point"
             }
-            show_vector = "['TNCS', True]"
+            show_vector = "['tNCS_xtricorder', True]"
             fixorientation = *vector None
           }
           hkls {
@@ -216,7 +255,7 @@ phenix_buttonsdeflist = [
           }
 
 """),
-  ("TNCSvecrotate", "Rotate around TNCS vector", """
+  ("TNCSvecrotate_xtricorder", "Rotate around tNCS_xtricorder vector", """
             clip_plane {
               clip_width = 6
               auto_clip_width = False
@@ -226,10 +265,81 @@ phenix_buttonsdeflist = [
                 label = "TEPS"
                 datatype = "Floating-point"
               }
-              show_vector = "['TNCS', True]"
+              show_vector = "['tNCS_xtricorder', True]"
               is_parallel = True
               fixorientation = *vector None
-              animate_rotation_around_vector = "['TNCS', 5.0]"
+              animate_rotation_around_vector = "['tNCS_xtricorder', 5.0]"
+            }
+            hkls {
+              expand_to_p1 = True
+              expand_anomalous = True
+            }
+"""),
+  ("TNCSlayer_xtriage", "Slice perpendicular to tNCS_xtriage vector", """
+          clip_plane {
+            normal_vector = "tNCS_xtriage"
+            clip_width = 0.380397231
+          }
+          miller_array_operation = "('newarray._data = array1.normalize().data()\\nnewarray._sigmas = None', 'E-values', ['FP', 'Amplitude'], ['', ''])"
+          viewer {
+            data_array {
+              label = "E-values"
+              datatype = "Amplitude"
+            }
+            show_vector = "['tNCS_xtriage', True]"
+            user_vector {
+              label = "tNCS_xtriage"
+            }
+            fixorientation = *vector None
+          }
+          hkls {
+            expand_to_p1 = True
+            expand_anomalous = True
+          }
+
+"""),
+  ("TNCSvecrotate_xtriage_F", "Rotate around tNCS_xtriage vector", """
+            clip_plane {
+              clip_width = 6
+              auto_clip_width = False
+            }
+            miller_array_operation = "('newarray._data = array1.normalize().data()\\nnewarray._sigmas = None', 'E-values(F)', ['FP', 'Amplitude'], ['', ''])"
+            viewer {
+              data_array {
+                label = "E-values(F)"
+                datatype = "Amplitude"
+              }
+              show_vector = "['tNCS_xtriage', True]"
+              user_vector {
+                label = "tNCS_xtriage"
+              }
+              is_parallel = True
+              fixorientation = *vector None
+              animate_rotation_around_vector = "['tNCS_xtriage', 5.0]"
+            }
+            hkls {
+              expand_to_p1 = True
+              expand_anomalous = True
+            }
+"""),
+  ("TNCSvecrotate_xtriage_I", "Rotate around tNCS_xtriage vector", """
+            clip_plane {
+              clip_width = 6
+              auto_clip_width = False
+            }
+            miller_array_operation = "('newarray._data = array1.normalize().data()\\nnewarray._sigmas = None', 'E-values(I)', ['I', 'Intensity'], ['', ''])"
+            viewer {
+              data_array {
+                label = "E-values(I)"
+                datatype = "Amplitude"
+              }
+              show_vector = "['tNCS_xtriage', True]"
+              user_vector {
+                label = "tNCS_xtriage"
+              }
+              is_parallel = True
+              fixorientation = *vector None
+              animate_rotation_around_vector = "['tNCS_xtriage', 5.0]"
             }
             hkls {
               expand_to_p1 = True
@@ -266,32 +376,6 @@ phenix_buttonsdeflist = [
 
   """),
 
-  ("TwinAxisrotampl", "Rotate amplitudes around twin axis", """
-
-          clip_plane {
-            clip_width = 10
-            auto_clip_width = False
-          }
-          viewer {
-            data_array {
-              label = "F,SIGF"
-              datatype = "Amplitude"
-            }
-            show_vector = "['twin', True]"
-            is_parallel = True
-            user_vector {
-              label = "twin"
-            }
-            fixorientation = *vector None
-            animate_rotation_around_vector = "['twin', 2.0]"
-          }
-          hkls {
-            expand_to_p1 = True
-            expand_anomalous = True
-          }
-
-  """),
-
   ("TwinAxisintens", "Slice intensities perpendicular to twin axis", """
 
           clip_plane {
@@ -309,32 +393,6 @@ phenix_buttonsdeflist = [
               label = "twin"
             }
             fixorientation = *vector None
-          }
-          hkls {
-            expand_to_p1 = True
-            expand_anomalous = True
-          }
-
-  """),
-
-  ("TwinAxisintensrot", "Rotate intensities around twin axis", """
-
-          clip_plane {
-            clip_width = 10
-            auto_clip_width = False
-          }
-          viewer {
-            data_array {
-              label = "I,SIGI"
-              datatype = "Intensity"
-            }
-            show_vector = "['twin', True]"
-            is_parallel = True
-            user_vector {
-              label = "twin"
-            }
-            fixorientation = *vector None
-            animate_rotation_around_vector = "['twin', 2.0]"
           }
           hkls {
             expand_to_p1 = True

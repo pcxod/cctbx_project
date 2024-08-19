@@ -20,7 +20,7 @@ from iotbx.file_reader import any_file
 from libtbx import citations
 from libtbx.program_template import ProgramTemplate
 from libtbx.str_utils import wordwrap
-from libtbx.utils import multi_out, show_times, Sorry
+from libtbx.utils import multi_out, null_out, show_times, Sorry
 
 # =============================================================================
 class ParserBase(argparse.ArgumentParser):
@@ -128,6 +128,9 @@ class CCTBXParser(ParserBase):
     if program_class.program_name is None:
       program_class.program_name = self.prog
     self.prefix = self.prog.split('.')[-1]
+    # Windows dispatchers may have the .bat extension
+    if sys.platform == 'win32' and self.prefix.lower() == 'bat':
+      self.prefix = self.prog.split('.')[-2]
 
     # PHIL filenames
     self.data_filename = self.prefix + '_data.eff'
@@ -161,6 +164,7 @@ class CCTBXParser(ParserBase):
     self.data_manager = DataManager(
       datatypes=program_class.datatypes,
       custom_options=program_class.data_manager_options,
+      custom_master_phil_str=program_class.data_manager_custom_master_phil_str,
       logger=self.logger)
     self.namespace = None
 
@@ -244,8 +248,21 @@ class CCTBXParser(ParserBase):
     # return JSON output from program
     self.add_argument(
       '--json', action='store_true',
-      help='writes or overwrites the JSON output for the program to file (%s)' %
-      self.json_filename
+      help='''\
+writes or overwrites the JSON output for the program to file (%s).
+Use --json-filename to specify a different filename for the output.''' %
+      self.json_filename,
+    )
+
+    # --json-filename
+    # set a non-default filename for JSON output
+    self.add_argument(
+      '--json-filename', '--json_filename', action='store',
+      type=str, default=None,
+      help='''\
+optionally specify a filename for JSON output. If a filename is provided,
+the .json extension will be added automatically if it does not already exist.
+Also, specifying this flag implies that --json is also specified.'''
     )
 
     # --overwrite
@@ -295,11 +312,11 @@ class CCTBXParser(ParserBase):
     )
 
   # ---------------------------------------------------------------------------
-  def parse_args(self, args):
+  def parse_args(self, args, skip_help = False):
     '''
     '''
     # default behavior with no arguments
-    if len(args) == 0:
+    if (len(args) == 0) and (not skip_help):
       self.print_help()
       self.exit()
 
@@ -319,6 +336,11 @@ class CCTBXParser(ParserBase):
     if self.namespace.show_defaults is not None:
       if self.namespace.attributes_level is None:
         self.namespace.attributes_level = 0
+      if self.program_class.show_data_manager_scope_by_default:
+        self.data_manager.master_phil.show(
+          expert_level=self.namespace.show_defaults,
+          attributes_level=self.namespace.attributes_level,
+          out=self.logger)
       self.master_phil.show(expert_level=self.namespace.show_defaults,
                             attributes_level=self.namespace.attributes_level,
                             out=self.logger)
@@ -335,6 +357,7 @@ class CCTBXParser(ParserBase):
     print('on %s by %s' % (time.asctime(), getpass.getuser()), file=self.logger)
     print('='*self.text_width, file=self.logger)
     print('', file=self.logger)
+    self.logger.flush()
 
     # process files
     if self.parse_files:
@@ -488,8 +511,10 @@ class CCTBXParser(ParserBase):
     # command-line PHIL arguments override any previous settings and are
     # processed in given order
     if len(phil_list) > 0:
-      interpreter = self.master_phil.command_line_argument_interpreter()
-      data_manager_interpreter = self.data_manager.master_phil.command_line_argument_interpreter()
+      interpreter = self.master_phil.command_line_argument_interpreter(
+        assume_when_ambiguous=self.program_class.assume_when_ambiguous)
+      data_manager_interpreter = self.data_manager.master_phil.command_line_argument_interpreter(
+        assume_when_ambiguous=self.program_class.assume_when_ambiguous)
       print('  Adding command-line PHIL:', file=self.logger)
       print('  -------------------------', file=self.logger)
       for phil in phil_list:
@@ -510,12 +535,99 @@ class CCTBXParser(ParserBase):
             except Sorry as e2:
               if e2.__str__().startswith('Unknown'):
                 self.unused_phil.append(phil)
+              else:
+                raise
           else:
             raise
         if processed_arg is not None:
           sources.append(processed_arg)
         if data_manager_processed_arg is not None:
           data_manager_sources.append(data_manager_processed_arg)
+
+      # collect multiple DataManager label specifications from command-line
+      #   data_manager.miller_array.labels.name
+      #   data_manager.miller_array.user_selected_labels
+      def _get_last_object(phil_scope):
+        if phil_scope.is_definition:
+          return phil_scope
+        return _get_last_object(phil_scope.objects[0])
+
+      label_objects = []
+      type_objects = []
+      for source in data_manager_sources:
+        phil_object = _get_last_object(source)
+        if phil_object.full_path() in [
+          'data_manager.miller_array.labels.name',
+          'data_manager.miller_array.user_selected_labels',
+          'data_manager.map_coefficients.labels.name',
+          'data_manager.map_coefficients.user_selected_labels']:
+          label_objects.append(source)
+        if phil_object.full_path() == 'data_manager.model.type':
+          type_objects.append(source)
+
+      if len(label_objects) > 0:
+        print('  Found labels in command-line', file=self.logger)
+        print('  ----------------------------', file=self.logger)
+
+        # combine labels of the same datatype
+        datatypes = ['miller_array', 'map_coefficients']
+        for datatype in datatypes:
+          for parent_label_object in label_objects:
+            parent_object = _get_last_object(parent_label_object)  # name / user_selected_labels
+            pps = parent_object.primary_parent_scope  # miller_array
+            if parent_object.primary_parent_scope.name == 'datatype':
+              break
+          if parent_object.full_path() == 'data_manager.%s.labels.name' % datatype:
+            pps = parent_object.primary_parent_scope.primary_parent_scope
+          for child_label_object in label_objects:
+            if child_label_object is not parent_label_object \
+              and child_label_object in data_manager_data_sources \
+              and child_label_object in label_objects:
+              data_manager_sources.remove(child_label_object)
+              phil_object = _get_last_object(child_label_object)
+              if phil_object.full_path() == 'data_manager.%s.labels.name' % datatype:
+                phil_object = phil_object.primary_parent_scope
+              pps.objects.append(phil_object)
+              phil_object.primary_parent_scope = pps
+
+        # finally combine labels into one scope
+        label_phil = label_objects[0]
+        if len(label_objects) == len(datatypes):
+          for label_object in label_objects[1:]:
+            label_phil.adopt_scope(label_object)
+            if label_object in data_manager_sources:
+              data_manager_sources.remove(label_object)
+
+        print('', file=self.logger)
+
+        print('  Combined labels PHIL', file=self.logger)
+        print('  --------------------', file=self.logger)
+        tmp_working_phil = self.data_manager.master_phil.fetch_diff(label_phil)
+        print(tmp_working_phil.as_str(prefix='    '), file=self.logger)
+        print('', file=self.logger)
+
+      # set model types for each model
+      # if model type is specified, a model type needs to be specified
+      # for each model even if it is the default.
+      if len(type_objects) > 0:
+        model_names = self.data_manager.get_model_names()
+        if len(type_objects) != len(model_names):
+          raise Sorry('Please specify exactly one "model.type" for each model.')
+        print('  Matching model type PHIL:', file=self.logger)
+        print('  -------------------------', file=self.logger)
+        for model_name, type_object in zip(model_names, type_objects):
+          type_phil = self.data_manager.master_phil.fetch(source=type_object)
+          type_extract = type_phil.extract()
+          model_extract = type_extract.data_manager.model[0]
+          model_extract.file = model_name
+          print('    %s %s' % (model_extract.file, model_extract.type), file=self.logger)
+          new_type_object = self.data_manager.master_phil.format(python_object=type_extract)
+          for object in new_type_object.objects[0].objects:
+            if object.name == 'model':
+              e = object.extract()
+              if e.file == model_name:
+                type_object.objects[0].objects = [object]
+        print('', file=self.logger)
 
     if self.namespace.overwrite:  # override overwrite if True
       sources.append(iotbx.phil.parse('output.overwrite=True'))
@@ -547,14 +659,14 @@ class CCTBXParser(ParserBase):
     diff_phil = self.master_phil.fetch_diff(self.working_phil)
     paths = self.check_phil_for_paths(diff_phil)
     if len(paths) > 0:
-      files = []
-      dirs = []
+      files = set()
+      dirs = set()
       for path in paths:
         if path is not None:
           if os.path.isfile(path):
-            files.append(path)
+            files.add(path)
           elif os.path.isdir(path):
-            dirs.append(path)
+            dirs.add(path)
       if self.parse_files:
         self.process_files(files, message='Processing files from PHIL:')
       if self.parse_dir:
@@ -644,6 +756,9 @@ class CCTBXParser(ParserBase):
       or self.namespace.write_modified or self.namespace.write_all:
       print('Writing program PHIL file(s):', file=self.logger)
 
+    if self.data_manager.get_default_output_filename() is None:
+      self.data_manager.set_default_output_filename('cctbx_program')
+
     # write DataManager scope
     if self.namespace.write_data:
       if data_is_different:
@@ -665,10 +780,10 @@ class CCTBXParser(ParserBase):
 
     # write differences
     if self.namespace.write_modified or self.namespace.diff_params:
-      if phil_is_different:
+      if is_different:
         ow = overwrite or self.namespace.diff_params
         self.data_manager.write_phil_file(
-          phil_diff.as_str(), filename=self.modified_filename,
+          data_diff.as_str() + phil_diff.as_str(), filename=self.modified_filename,
           overwrite=ow)
         print('  Modified PHIL parameters written to %s.' %
               self.modified_filename, file=self.logger)
@@ -740,7 +855,8 @@ or with pip run
 
 # =============================================================================
 def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arguments=None,
-                unused_phil_raises_sorry=True, args=None, json=False, logger=None):
+                unused_phil_raises_sorry=True, args=None, json=False, logger=None,
+                hide_parsing_output=False):
   '''
   Function for running programs using CCTBXParser and the program template
 
@@ -760,6 +876,8 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
     If True, get_results_as_JSON is called for the return value instead of get_results
   logger: multi_out
     For logging output (optional)
+  hide_parsing_output: bool
+    If True, hides the output from parsing the command-line arguments
 
   Returns
   -------
@@ -789,6 +907,12 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
     logger.register('stdout', sys.stdout)
     logger.register('parser_log', StringIO())
 
+  program_logger = logger
+  if hide_parsing_output:
+    logger = multi_out()
+    logger.register('stderr', sys.stderr)
+    logger.register('parser_log', StringIO())
+
   # start timer
   t = show_times(out=logger)
 
@@ -807,7 +931,7 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
   print('='*79, file=logger)
   task = program_class(parser.data_manager, parser.working_phil.extract(),
                        master_phil=parser.master_phil,
-                       logger=logger)
+                       logger=program_logger)
 
   # validate inputs
   task.validate()
@@ -830,15 +954,20 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
     pr.dump_stats('profile.out')
 
   # output JSON
-  if namespace.json:
+  if namespace.json or namespace.json_filename:
     result = task.get_results_as_JSON()
     if result is not None:
-      with open(parser.json_filename, 'w') as f:
+      json_filename = parser.json_filename
+      if namespace.json_filename is not None:
+        json_filename = namespace.json_filename
+        if not json_filename.endswith('.json'):
+          json_filename += '.json'
+      with open(json_filename, 'w') as f:
         f.write(result)
     else:
       print('', file=logger)
       print('!'*79, file=logger)
-      print('WARNING: The get_results_as_JSON function has not been defined for this program')
+      print('WARNING: The get_results_as_JSON function has not been defined for this program', file=logger)
       print('!'*79, file=logger)
 
   # stop timer
@@ -857,6 +986,21 @@ def run_program(program_class=None, parser_class=CCTBXParser, custom_process_arg
     result = task.get_results()
 
   return result
+
+# =============================================================================
+def get_program_params(run):
+    """Tool to get parameters object for a program that runs with
+      the program template.
+    params: run:  the program template object
+    returns: parameters for this program as set up by the program template
+    Get the run something like this way:
+     from phenix.programs import map_to_model as run
+    """
+
+    parser = CCTBXParser(program_class=run.Program,
+                         logger=null_out())
+    _ = parser.parse_args([], skip_help = True)
+    return parser.working_phil.extract()
 
 # =============================================================================
 # end

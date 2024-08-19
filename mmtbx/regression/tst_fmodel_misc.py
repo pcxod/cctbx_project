@@ -1,14 +1,16 @@
 
 from __future__ import absolute_import, division, print_function
+import os
 from mmtbx.regression import make_fake_anomalous_data
-from mmtbx.command_line import fmodel
+from mmtbx.programs import fmodel
+from iotbx.cli_parser import run_program
 from iotbx import file_reader
 from cctbx import miller
 from scitbx.array_family import flex
 from libtbx.test_utils import approx_equal, Exception_expected
 from libtbx.utils import null_out, Sorry
-from libtbx import easy_run
-import os
+import iotbx.pdb
+
 
 def exercise():
   if (os.path.isfile("tst_fmodel_anomalous.mtz")):
@@ -25,18 +27,16 @@ def exercise():
     "output.file_name=tst_fmodel_anomalous.mtz",
     "r_free_flags_fraction=0.1",
   ]
-  fmodel.run(args=args, log=null_out())
+  run_program(program_class=fmodel.Program, args=args, logger=null_out())
   assert os.path.isfile("tst_fmodel_anomalous.mtz")
   mtz_in = file_reader.any_file("tst_fmodel_anomalous.mtz")
   array = mtz_in.file_server.miller_arrays[0]
   assert (array.anomalous_flag())
   anom_diffs = array.anomalous_differences()
   assert approx_equal(flex.max(anom_diffs.data()), 5.72, eps=0.01)
-  # mmtbx.fmodel_simple
-  result = easy_run.call(
-    "mmtbx.fmodel_simple \"%s\" tst_fmodel_anomalous.mtz high_resolution=2.0"
-      % pdb_file)
   print("OK")
+  os.remove('tst_fmodel_anomalous.mtz')
+  os.remove('tst_fmodel_anomalous.pdb')
 
 def exercise_intensity_output():
   if (os.path.isfile("tst_fmodel_anomalous.mtz")):
@@ -54,22 +54,25 @@ def exercise_intensity_output():
     "r_free_flags_fraction=0.1",
   ]
   args2 = args + ["label=Imodel"]
-  fmodel.run(args=args2, log=null_out())
+  run_program(program_class=fmodel.Program, args=args2)
   assert os.path.isfile("tst_fmodel_intensity.mtz")
   mtz_in = file_reader.any_file("tst_fmodel_intensity.mtz")
   assert mtz_in.file_server.miller_arrays[0].is_xray_intensity_array()
   try :
-    fmodel.run(args=args, log=null_out())
+    run_program(program_class=fmodel.Program, args=args)
   except Sorry :
     pass
   else :
     raise Exception_expected
   try :
-    fmodel.run(args=args+["format=cns"], log=null_out())
+    run_program(program_class=fmodel.Program, args=args+["format=cns"],
+      logger=null_out())
   except Sorry :
     pass
   else :
     raise Exception_expected
+
+  os.remove('tst_fmodel_intensity.mtz')
 
 def exercise_selection_consistency():
   """
@@ -109,7 +112,6 @@ ATOM    949  CD2 LEU A 125       6.533  11.408  15.996  1.00 26.02           C
     f.write(pdb_str)
   with open("tst_fmodel_misc.eff", "w") as f:
     f.write("""\
-pdb_file = tst_fmodel_misc.pdb
 high_resolution = 1.0
 output.file_name = tst_fmodel_misc.mtz
 generate_fake_p1_symmetry = True
@@ -121,7 +123,7 @@ anomalous_scatterers {
   }
 }
 """)
-  fmodel.run(args=["tst_fmodel_misc.eff"], log=null_out())
+  run_program(program_class=fmodel.Program, args=["tst_fmodel_misc.pdb","tst_fmodel_misc.eff"], logger=null_out())
   mtz_in = file_reader.any_file("tst_fmodel_misc.mtz")
   f_model = mtz_in.file_server.miller_arrays[0]
   dano = abs(f_model).anomalous_differences()
@@ -134,8 +136,8 @@ anomalous_scatterers {
   map_coeffs.as_mtz_dataset(column_root_label="ANOM").mtz_object().write("anom.mtz")
   fft_map = map_coeffs.fft_map(resolution_factor=0.25).apply_sigma_scaling()
   real_map = fft_map.real_map_unpadded()
-  pdb_in = file_reader.any_file("tst_fmodel_misc.pdb")
-  for atom in pdb_in.file_object.hierarchy.atoms():
+  hierarchy = iotbx.pdb.input("tst_fmodel_misc.pdb").construct_hierarchy()
+  for atom in hierarchy.atoms():
     if (atom.element == "SE"):
       site = f_model.unit_cell().fractionalize(site_cart=atom.xyz)
       map_val = real_map.eight_point_interpolation(site)
@@ -144,6 +146,11 @@ anomalous_scatterers {
       site = f_model.unit_cell().fractionalize(site_cart=atom.xyz)
       map_val = real_map.eight_point_interpolation(site)
       assert (map_val < 5)
+
+  os.remove('tst_fmodel_misc.mtz')
+  os.remove('tst_fmodel_misc.pdb')
+  os.remove('tst_fmodel_misc.eff')
+  os.remove('anom.mtz')
 
 if (__name__ == "__main__"):
   exercise_intensity_output()

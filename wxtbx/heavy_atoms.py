@@ -7,15 +7,16 @@ from libtbx.utils import Sorry
 import sys
 from six.moves import range
 
-class SitesList(wx.ListCtrl,
-                  wx.lib.mixins.listctrl.CheckListCtrlMixin):
+# XXX TEMPORARY PYTHON 3 FIX TT
+class SitesList(wx.ListCtrl): #wx.lib.mixins.listctrl.CheckListCtrlMixin):
   """
   ListCtrl for displaying and editing heavy-atom sites.  Only the occupancy
   and the selection of sites may be changed.
   """
   def __init__(self, *args, **kwds):
     wx.ListCtrl.__init__(self, *args, **kwds)
-    wx.lib.mixins.listctrl.CheckListCtrlMixin.__init__(self)
+    # XXX TEMPORARY PYTHON 3 FIX TT
+    #wx.lib.mixins.listctrl.CheckListCtrlMixin.__init__(self)
     self._atoms = None
     self._symm = None
     self.InsertColumn(0, "#", format=wx.LIST_FORMAT_RIGHT, width=64)
@@ -30,11 +31,10 @@ class SitesList(wx.ListCtrl,
     Read sites from a PDB file.  An error will be raised if the model contains
     other residue types (protein, NA, water, etc.).
     """
-    from iotbx import file_reader
-    pdb_in = file_reader.any_file(file_name, force_type="pdb")
-    pdb_in.check_file_type("pdb")
-    self._symm = pdb_in.file_object.crystal_symmetry()
-    hierarchy = pdb_in.file_object.hierarchy
+    import iotbx.pdb
+    pdb_in = iotbx.pdb.input(file_name)
+    self._symm = pdb_in.crystal_symmetry()
+    hierarchy = pdb_in.construct_hierarchy()
     counts = hierarchy.overall_counts()
     if (counts.n_models > 1):
       raise Sorry("Multi-model PDB files not allowed.")
@@ -60,7 +60,8 @@ class SitesList(wx.ListCtrl,
       self.SetStringItem(item, 3, "%.3f" % atom.xyz[1])
       self.SetStringItem(item, 4, "%.3f" % atom.xyz[2])
       self.SetStringItem(item, 5, "%.2f" % atom.occ)
-      self.CheckItem(item)
+      if hasattr(self,'CheckItem'):  # XXX Python 3 fix
+        self.CheckItem(item)
 
   def SetSymmetry(self, symmetry):
     self._symm = symmetry
@@ -104,10 +105,12 @@ class SitesList(wx.ListCtrl,
 
   def OnSaveSites(self, event):
     from iotbx import file_reader
+    # XXX Python 3 fix needed here (flags and wildcard not allowed)
     wildcards = file_reader.get_wildcard_strings(["pdb"])
     file_name = wx.FileSelector(
       flags=wx.FD_SAVE,
-      wildcard=wildcards)
+      wildcard=wildcards,
+      )
     if (file_name != ""):
       self.SaveSites(file_name)
 
@@ -195,7 +198,8 @@ class sites_panel_mixin(object):
     self.sites_list = SitesList(self, -1,
       size=(540,200),
       style=wx.LC_REPORT|wx.LC_SINGLE_SEL)
-    sizer.Add(self.sites_list, 1, wx.ALL|wx.EXPAND|wx.ALIGN_CENTER_VERTICAL, 5)
+    # XXX  TEMPORARY PYTHON 3 FIX TT
+    sizer.Add(self.sites_list, 1, wx.ALL, 5) # |wx.EXPAND|wx.ALIGN_CENTER_VERTICAL, 5)
     szr2 = wx.BoxSizer(wx.HORIZONTAL)
     sizer.Add(szr2)
     if (show_load_button):

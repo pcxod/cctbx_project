@@ -1,11 +1,12 @@
 from __future__ import absolute_import, division, print_function
 from xfel.merging.application.worker import worker
-import math
 from dials.array_family import flex
 from dxtbx.model.experiment_list import ExperimentList
 from cctbx import miller
 from cctbx.crystal import symmetry
-import sys
+from scipy.optimize import curve_fit
+from scipy.stats import pearsonr
+import numpy as np
 
 class scaling_result(object):
   '''Stores results of scaling of an experiment'''
@@ -50,8 +51,8 @@ class experiment_scaler(worker):
     experiments_rejected_because_of_low_correlation_with_reference = 0
 
     target_symm = symmetry(unit_cell = self.params.scaling.unit_cell, space_group_info = self.params.scaling.space_group)
-    for experiment in experiments:
-      exp_reflections = reflections.select(reflections['exp_id'] == experiment.identifier)
+    for expt_id, experiment in enumerate(experiments):
+      exp_reflections = reflections.select(reflections['id'] == expt_id)
 
       # Build a miller array for the experiment reflections
       exp_miller_indices = miller.set(target_symm, exp_reflections['miller_index_asymmetric'], True)
@@ -63,7 +64,8 @@ class experiment_scaler(worker):
       matching_indices = miller.match_multi_indices(miller_indices_unique = model_intensities.indices(), miller_indices = exp_intensities.indices())
 
       # Least squares
-      result = self.fit_experiment_to_reference(model_intensities, exp_intensities, matching_indices)
+      weights = self.params.scaling.weights
+      result = self.fit_experiment_to_reference(model_intensities, exp_intensities, matching_indices, weights)
 
       if result.error == scaling_result.err_low_signal:
         experiments_rejected_because_of_low_signal += 1
@@ -89,10 +91,11 @@ class experiment_scaler(worker):
       ):
         exp_reflections['intensity.sum.value'] *= result.slope
         exp_reflections['intensity.sum.variance'] *= (result.slope**2)
-
+      exp_reflections['correlation'] = flex.double(len(exp_reflections), result.correlation)
       new_experiments.append(experiment)
       new_reflections.extend(exp_reflections)
 
+    new_reflections.reset_ids()
     rejected_experiments = len(experiments) - len(new_experiments)
     assert rejected_experiments == experiments_rejected_because_of_low_signal + \
                                     experiments_rejected_because_of_low_correlation_with_reference
@@ -103,7 +106,7 @@ class experiment_scaler(worker):
     self.logger.log("Experiments rejected because of low correlation with reference: %d"%experiments_rejected_because_of_low_correlation_with_reference)
     self.logger.log("Reflections rejected because of rejected experiments: %d"%reflections_removed_because_of_rejected_experiments)
     self.logger.log("High resolution experiments: %d"%high_res_experiments)
-    if self.params.postrefinement.enable:
+    if self.params.postrefinement.enable and 'postrefine' in self.params.dispatch.step_list:
       self.logger.log("Note: scale factors were not applied, because postrefinement is enabled")
 
     # MPI-reduce all counts
@@ -131,7 +134,7 @@ class experiment_scaler(worker):
         self.logger.main_log('Average experiment correlation with reference: %f +/- %f'%(
             stats_correlation.mean(), stats_correlation.unweighted_sample_standard_deviation()))
 
-      if self.params.postrefinement.enable:
+      if self.params.postrefinement.enable and 'postrefine' in self.params.dispatch.step_list:
         self.logger.main_log("Note: scale factors were not applied, because postrefinement is enabled")
 
     self.logger.log_step_time("SCALE_FRAMES", True)
@@ -142,53 +145,53 @@ class experiment_scaler(worker):
 
     return new_experiments, new_reflections
 
-  def fit_experiment_to_reference(self, model_intensities, experiment_intensities, matching_indices):
+  def fit_experiment_to_reference(self,
+      model_intensities,
+      experiment_intensities,
+      matching_indices,
+      weights='unit'
+  ):
     'Scale the observed intensities to the reference, or model, using a linear least squares fit.'
      # Y = offset + slope * X, where Y is I_r and X is I_o
 
     result = scaling_result()
     result.data_count = matching_indices.pairs().size()
-
-    if result.data_count == 0:
+    if result.data_count < 3:
       result.error = scaling_result.err_low_signal
       return result
 
-    # Do various auxilliary summations
-    sum_xx = 0.
-    sum_xy = 0.
-    sum_yy = 0.
-    sum_x = 0.
-    sum_y = 0.
-    sum_w = 0.
+    model_subset = []
+    exp_subset = []
+    exp_sigmas = []
     for pair in matching_indices.pairs():
-      I_w = 1. # Use unit weights for starters
-      I_r = model_intensities.data()[pair[0]]
-      I_o = experiment_intensities.data()[pair[1]]
+      model_subset.append(model_intensities.data()[pair[0]])
+      exp_subset.append(experiment_intensities.data()[pair[1]])
+      exp_sigmas.append(experiment_intensities.sigmas()[pair[1]])
+    model_subset = np.array(model_subset)
+    exp_subset = np.array(exp_subset)
+    exp_sigmas = np.array(exp_sigmas)
 
-      sum_xx += I_w * I_o**2
-      sum_yy += I_w * I_r**2
-      sum_xy += I_w * I_o * I_r
-      sum_x += I_w * I_o
-      sum_y += I_w * I_r
-      sum_w += I_w
-
-    # calculate Pearson correlation coefficient between X and Y and test it
-    DELTA_1 = result.data_count * sum_xx - sum_x**2
-    DELTA_2 = result.data_count * sum_yy - sum_y**2
-    if (abs(DELTA_1) < sys.float_info.epsilon) or (abs(DELTA_2) < sys.float_info.epsilon):
-      result.error = scaling_result.err_low_signal
-      return result
-    result.correlation = (result.data_count * sum_xy - sum_x * sum_y) / (math.sqrt(DELTA_1) * math.sqrt(DELTA_2))
-    if result.correlation < self.params.filter.outlier.min_corr:
+    correlation = pearsonr(exp_subset, model_subset)[0]
+    if correlation < self.params.filter.outlier.min_corr:
       result.error = scaling_result.err_low_correlation
       return result
+    result.correlation = correlation
 
-    DELTA = sum_w * sum_xx
-    if abs(DELTA) < sys.float_info.epsilon:
-      result.error = scaling_result.err_low_signal
-      return result
-    result.slope = sum_w * sum_xy / DELTA
+    def linfunc(x, m): return x*m
+    # For weighting, we need to put the Icalc values on the scale of Iobs, so
+    # we do a first-pass scale with unit weights and apply it to model_subset.
+    slope_unwt = curve_fit(linfunc, exp_subset, model_subset)[0][0]
+    model_subset_scaled = model_subset / slope_unwt
+    if weights == 'unit':
+      slope = slope_unwt
+    elif weights == 'icalc_sigma':
+      sigma = (model_subset_scaled**2 + exp_sigmas**2)**.5
+      slope = curve_fit(linfunc, exp_subset, model_subset, sigma=sigma)[0][0]
+    elif weights == 'icalc':
+      sigma = model_subset_scaled**.5
+      slope = curve_fit(linfunc, exp_subset, model_subset, sigma=sigma)[0][0]
 
+    result.slope = slope
     return result
 
 if __name__ == '__main__':

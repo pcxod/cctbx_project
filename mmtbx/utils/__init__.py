@@ -45,6 +45,7 @@ import mmtbx.restraints
 import mmtbx.tls.tools
 from mmtbx.scaling import outlier_rejection
 import mmtbx.command_line.fmodel
+import mmtbx.programs.fmodel
 import libtbx.callbacks # import dependency
 from libtbx.math_utils import ifloor, iceil
 from cctbx import maptbx
@@ -265,8 +266,6 @@ class process_pdb_file_srv(object):
         use_neutron_distances=use_neutron_distances,
         )
     else: self.ener_lib = ener_lib
-    if(self.log is None): self.log = sys.stdout
-    if(self.log == False): self.log = None
 
   def process_pdb_files(self, pdb_file_names = None, raw_records = None,
                         pdb_inp=None,
@@ -663,6 +662,53 @@ def setup_scattering_dictionaries(scattering_table,
   return xray_scattering_dict, neutron_scattering_dict
 # END_MARKED_FOR_DELETION_OLEG
 
+def fmodel_manager2(
+  f_obs,
+  r_free_flags,
+  abcd,
+  xray_structure,
+  twin_law,
+  ignore_r_free_flags,
+  mask_params,
+  mtz_object=None,
+  data_type=None):
+  """
+  This makes a basic fmodel manager.
+  alpha_beta_params, sf_and_grads_accuracy_params, mask_params, tNCS epsilons,
+  target_name should be set separately if needed.
+  """
+  if(r_free_flags is None or ignore_r_free_flags):
+    r_free_flags = f_obs.array(data = flex.bool(f_obs.data().size(), False))
+  if(twin_law is None):
+    fmodel = mmtbx.f_model.manager(
+      f_obs          = f_obs,
+      r_free_flags   = r_free_flags,
+      abcd           = abcd,
+      mask_params    = mask_params,
+      xray_structure = xray_structure,
+      origin         = mtz_object,
+      data_type      = data_type)
+  else:
+    from cctbx import sgtbx
+    twin_law_xyz = sgtbx.rt_mx(symbol=twin_law, r_den=12, t_den=144)
+    twin_params = twin_f_model.master_params.extract()
+    fmodel = twin_f_model.twin_model_manager(
+      f_obs          = f_obs,
+      r_free_flags   = r_free_flags,
+      xray_structure = xray_structure,
+      twin_law       = twin_law_xyz,
+      twin_law_str   = twin_law,
+      detwin_mode    = twin_params.detwin.mode,
+      map_types      = twin_params.detwin.map_types,
+      origin         = mtz_object,
+      mask_params    = mask_params,
+      data_type      = data_type)
+    fmodel.twin = twin_law
+  return fmodel
+
+# XXX
+# XXX PVA: DELETE LATER !
+# XXX
 def fmodel_manager(
       f_obs,
       i_obs                         = None,
@@ -678,8 +724,8 @@ def fmodel_manager(
       epsilons                      = None,
       use_f_model_scaled            = False,
       twin_law                      = None,
-      detwin_mode                   = None,
-      detwin_map_types              = None,
+      #detwin_mode                   = None,
+      #detwin_map_types              = None,
       alpha_beta_params             = None,
       sf_and_grads_accuracy_params  = mmtbx.f_model.sf_and_grads_accuracy_master_params.extract(),
       mask_params                   = None,
@@ -707,6 +753,7 @@ def fmodel_manager(
   else:
     from cctbx import sgtbx
     twin_law_xyz = sgtbx.rt_mx(symbol=twin_law, r_den=12, t_den=144)
+    twin_params = twin_f_model.master_params.extract()
     fmodel = twin_f_model.twin_model_manager(
       f_obs                        = f_obs,
       f_mask                       = f_mask,
@@ -717,8 +764,8 @@ def fmodel_manager(
       twin_law                     = twin_law_xyz,
       twin_law_str                 = twin_law,
       mask_params                  = mask_params,
-      detwin_mode                  = detwin_mode,
-      map_types                    = detwin_map_types)
+      detwin_mode                  = twin_params.detwin.mode,
+      map_types                    = twin_params.detwin.map_types)
     fmodel.twin = twin_law
   return fmodel
 
@@ -1207,23 +1254,35 @@ class fmodel_from_xray_structure(object):
                      twin_fraction = None,
                      target = "ml",
                      out = None,
-                     merge_r_free_flags = None):
+                     merge_r_free_flags = None,
+                     use_custom_scattering_dictionary = False):
     if(out is None): out = sys.stdout
     self.add_sigmas = add_sigmas
     if(params is None):
-      params = mmtbx.command_line.fmodel.\
-        fmodel_from_xray_structure_master_params.extract()
+      params = mmtbx.programs.fmodel.master_phil.extract()
     if(r_free_flags_fraction is None):
       if(params.r_free_flags_fraction is not None):
         r_free_flags_fraction = params.r_free_flags_fraction
       else:
         r_free_flags_fraction = 0.1
+
+    new_scattering_dictionary = None
+    if use_custom_scattering_dictionary:
+      from cctbx.eltbx import read_custom_scattering_dict
+      new_scattering_dictionary = read_custom_scattering_dict.run(
+        filename = params.custom_scattering_factors, log = out)
+
     if(f_obs is None):
       hr = None
       try: hr = params.high_resolution
       except Exception: self.Sorry_high_resolution_is_not_defined()
       if(params.scattering_table == "neutron"):
-        xray_structure.switch_to_neutron_scattering_dictionary()
+        if(new_scattering_dictionary):
+          xray_structure.scattering_type_registry(
+            custom_dict = new_scattering_dictionary)
+          xray_structure.scattering_type_registry().show(out = out)
+        else:
+          xray_structure.switch_to_neutron_scattering_dictionary()
       else:
         xray_structure.scattering_type_registry(
           table = params.scattering_table, d_min = hr)
@@ -1255,7 +1314,12 @@ class fmodel_from_xray_structure(object):
       except Exception: lr = None
       f_obs = f_obs.resolution_filter(d_max = lr, d_min = hr)
       if(params.scattering_table == "neutron"):
-        xray_structure.switch_to_neutron_scattering_dictionary()
+        if(new_scattering_dictionary):
+          xray_structure.scattering_type_registry(
+            custom_dict = new_scattering_dictionary)
+          xray_structure.scattering_type_registry().show(out = out)
+        else:
+          xray_structure.switch_to_neutron_scattering_dictionary()
       else:
         xray_structure.scattering_type_registry(
           table = params.scattering_table, d_min = f_obs.d_min())
@@ -2144,6 +2208,14 @@ class run_reduce_with_timeout(easy_run.fully_buffered):
     assert [stdin_lines, file_name].count(None) == 1
     if stdin_lines is not None and parameters.split()[-1] != '-':
       raise Sorry(" - should appear at the end of parameters when using stdin_lines mode.")
+
+    # Verify that we're not trying to run on an mMCIF file.
+    if file_name is not None:
+      if ".cif".lower() in file_name.lower():
+        raise Sorry("Reduce cannot read mmCIF files. Please convert to PDB format or use mmtbx.reduce2.")
+    else:
+      if "data_" == stdin_lines[0:5]:
+        raise Sorry("Reduce cannot read mmCIF files. Please convert to PDB format or use mmtbx.reduce2.")
 
     size_bytes = len(stdin_lines) if stdin_lines is not None else 0
     command_to_run="molprobity.reduce "

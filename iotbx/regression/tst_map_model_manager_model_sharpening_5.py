@@ -42,7 +42,11 @@ def test_01(method = 'model_sharpen',
     wrapping = False)
   mmm.add_map_manager_by_id(
      map_id='external_map',map_manager=mmm.map_manager().deep_copy())
-  mmm.set_resolution(3)
+  if method == 'local_resolution_map':
+    mmm.generate_map(map_id = 'map_manager_2')
+    dd = mmm.resolution()
+  else:
+    mmm.set_resolution(3)
   mmm.set_log(sys.stdout)
 
   dc = mmm.deep_copy()
@@ -50,18 +54,27 @@ def test_01(method = 'model_sharpen',
   sharpen_method = getattr(mmm,method)
 
   # sharpen by method (can be model_sharpen, half_map_sharpen or
-  #     external_sharpen)
+  #     external_sharpen and also local_resolution_map)
 
-  sharpen_method(anisotropic_sharpen = False, n_bins=10)
-  assert mmm.map_model_cc() > 0.9
-  sharpen_method(anisotropic_sharpen = False, n_bins=10,
-     local_sharpen = True)
-  assert mmm.map_model_cc() > 0.9
-  sharpen_method(anisotropic_sharpen = True, n_bins=10)
-  assert mmm.map_model_cc() > 0.9
-  sharpen_method(anisotropic_sharpen = True, n_bins=10,
-     local_sharpen = True, n_boxes = 1)
-  assert mmm.map_model_cc() > 0.9
+  if method == 'local_resolution_map':
+    mm = sharpen_method()
+    x = mm.map_data().as_1d().min_max_mean()
+    from libtbx.test_utils import approx_equal
+    assert approx_equal((x.min,x.max,x.mean),
+      (1.9835316316768663, 2.3146054110530336, 2.1600110833032353),
+       eps = 0.01)
+
+  else: # usual
+    sharpen_method(anisotropic_sharpen = False, n_bins=10)
+    assert mmm.map_model_cc() > 0.9
+    sharpen_method(anisotropic_sharpen = False, n_bins=10,
+       local_sharpen = True)
+    assert mmm.map_model_cc() > 0.9
+    sharpen_method(anisotropic_sharpen = True, n_bins=10)
+    assert mmm.map_model_cc() > 0.9
+    sharpen_method(anisotropic_sharpen = True, n_bins=10,
+       local_sharpen = True, n_boxes = 1)
+    assert mmm.map_model_cc() > 0.9
 
 
 # ----------------------------------------------------------------------------

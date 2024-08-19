@@ -6,6 +6,7 @@ import math
 from iotbx.pdb import get_one_letter_rna_dna_name
 from libtbx.utils import Sorry
 from cctbx import geometry_restraints
+from mmtbx.monomer_library import bondlength_defaults
 import iotbx.phil
 
 import six
@@ -19,13 +20,6 @@ hbond_distance_cutoff = 3.4
   .short_caption = Distance cutoff for hydrogen bonds
   .help = Hydrogen bonds with length exceeding this limit will not be \
     established
-angle_between_bond_and_nucleobase_cutoff = 35.0
-  .type = float
-  .short_caption = Angle between bond and nucleobase cutoff for \
-    hydrogen bonds
-  .help = If angle between supposed hydrogen bond and \
-    basepair plane (defined by C4, C5, C6 atoms) is less than this \
-    value (in degrees), the bond will not be established.
 scale_bonds_sigma = 1.
   .type = float
   .short_caption = Scale h-bond sigma
@@ -95,10 +89,10 @@ def output_hbonds(hbond_proxies, pdb_atoms):
   if hbond_proxies is not None:
     dashes = open('dashes.pml', 'w')
     for p in hbond_proxies:
-      s1 = pdb_atoms[p.i_seqs[0]].id_str()
-      s2 = pdb_atoms[p.i_seqs[1]].id_str()
+      awl1 = pdb_atoms[p.i_seqs[0]].fetch_labels()
+      awl2 = pdb_atoms[p.i_seqs[1]].fetch_labels()
       ps = "dist chain \"%s\" and resi %s and name %s, chain \"%s\" and resi %s and name %s\n" % (
-        s1[14:15], s1[15:19], s1[5:8], s2[14:15], s2[15:19], s2[5:8])
+        awl1.chain_id, awl1.resseq, awl1.name, awl2.chain_id, awl2.resseq, awl2.name)
       dashes.write(ps)
     dashes.close()
 
@@ -216,14 +210,11 @@ def get_phil_stacking_pairs(pdb_hierarchy, skip_gendron_check=False,
   return result
 
 def consecutive_residues(atom1, atom2):
-  atom1_idstr = atom1.id_str()
-  atom2_idstr = atom2.id_str()
-  try:
-    if ((atom1_idstr[14:15] == atom2_idstr[14:15]) and
-        abs(int(atom1_idstr[16:19]) - int(atom2_idstr[16:19])) < 2 ):
-      return True
-  except ValueError:
-    pass
+  awl1 = atom1.fetch_labels()
+  awl2 = atom2.fetch_labels()
+  if ((awl1.chain_id == awl2.chain_id) and
+      abs(awl1.resseq_as_int() - awl2.resseq_as_int()) < 2 ):
+    return True
   return False
 
 def unify_residue_names_and_order(r1, r2):
@@ -256,7 +247,6 @@ def get_h_bonds_for_basepair(a1, a2, distance_cutoff=100, log=sys.stdout, verbos
   r1 = a1.parent()
   r2 = a2.parent()
   r1, r2, r1n, r2n = unify_residue_names_and_order(a1.parent(), a2.parent())
-  from mmtbx.monomer_library import bondlength_defaults
   best_possible_link_list = []
   best_score = 100.
   best_class_number = None
@@ -281,8 +271,8 @@ def get_h_bonds_for_basepair(a1, a2, distance_cutoff=100, log=sys.stdout, verbos
               print(a.id_str(), file=log)
           print("  Was trying to link: %s%s with %s%s, Saenger class: %d" % (
               r1.id_str(), l[0], r2.id_str(), l[1], class_number), file=log)
-          a1_id = a1.id_str() if a1 is not None else "None"
-          a2_id = a2.id_str() if a2 is not None else "None"
+          # a1_id = a1.id_str() if a1 is not None else "None"
+          # a2_id = a2.id_str() if a2 is not None else "None"
           # msg = "Something is wrong in .pdb file around '%s' or '%s'.\n" % (
           #     a1_id, a2_id)
           # msg += "If it is not clear to you, please contact developers and "
@@ -423,7 +413,7 @@ def get_plane_i_seqs_from_residues(r1, r2, grm,mon_lib_srv, plane_cache):
     # print resname
     # print r.resname
     # print new_res.resname.strip()
-    print("Warning, Cannot make NA restraints for %s residue" % resname)
+    print("Warning, Cannot make NA restraints for %s residue (no planarity definition)" % rn)
   i_seqs = []
   result = []
   r1_i_seqs = {}
@@ -574,8 +564,8 @@ def get_angle_proxies_for_bond(atoms):
   proxies = []
   anames = [atoms[0].name.strip(),
             atoms[1].name.strip()]
-  rnames = [atoms[0].id_str().split()[1],
-            atoms[1].id_str().split()[1]]
+  rnames = [atoms[0].parent().resname,
+            atoms[1].parent().resname]
   if sorted(anames) == ['N1', 'N3']:
     if get_one_letter_rna_dna_name(rnames[0]) in ['G', 'C']:
       if anames[0] == 'N1':
@@ -610,18 +600,24 @@ def get_angle_proxies_for_bond(atoms):
           angle_ideal=vals[i][0],
           weight=1./vals[i][1]**2,
           origin_id=origin_ids.get_origin_id('hydrogen bonds'))
-      proxies.append(p)
+        proxies.append(p)
   return proxies
 
 def get_h_bonds_for_particular_basepair(atoms, saenger_class=0):
   result = []
   if saenger_class == 0:
     return result
+  if saenger_class == 16:
+    # We don't have values for this one.
+    return result
   assert len(atoms) == 2
   new_hbonds = []
   r1, r2, r1n, r2n = unify_residue_names_and_order(
       atoms[0].parent(), atoms[1].parent())
-  from mmtbx.monomer_library import bondlength_defaults
+  if bondlength_defaults.basepairs_lengths.get(saenger_class, None) == None:
+    raise Sorry("""
+Bad or unknown Saenger class. Presently we don't have enough
+data to support Saenger class #16. """)
   if bondlength_defaults.basepairs_lengths[saenger_class][0] != (r1n, r2n):
     print(bondlength_defaults.basepairs_lengths[saenger_class][0], r1n, r2n,saenger_class)
     print(r1.id_str(), r2.id_str())

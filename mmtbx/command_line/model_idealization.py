@@ -359,8 +359,7 @@ class model_idealization():
     rama_allowed_sel = asc.selection(allowed_selection_txt)
 
 
-    # side_chain_no_cb_selection = ~ xrs.main_chain_selection()
-    side_chain_no_cb_selection = ~ xrs.backbone_selection()
+    side_chain_no_cb_selection = ~ self.model.sel_backbone()
     sc_rama_out = rama_out_sel & side_chain_no_cb_selection
     sc_rama_allowed =rama_allowed_sel & side_chain_no_cb_selection
     xrs=xrs.set_b_iso(value=10)
@@ -397,8 +396,7 @@ class model_idealization():
     rama_out_sel = asc.selection(outlier_selection_txt)
     xrs=xrs.set_b_iso(value=50)
 
-    # side_chain_no_cb_selection = ~ xrs.main_chain_selection()
-    side_chain_no_cb_selection = ~ xrs.backbone_selection()
+    side_chain_no_cb_selection = ~ self.model.sel_backbone()
     xrs = xrs.set_b_iso(value=200, selection=side_chain_no_cb_selection)
     xrs = xrs.set_b_iso(value=150, selection=rama_out_sel)
     # xrs = xrs.set_occupancies(value=0.3, selection=rama_out_sel)
@@ -475,7 +473,7 @@ class model_idealization():
     else:
       self.model_h = self.model.deep_copy()
     params_h = mmtbx.model.manager.get_default_pdb_interpretation_params()
-    params_h.pdb_interpretation = self.model._pdb_interpretation_params.pdb_interpretation
+    params_h.pdb_interpretation = self.model.get_current_pdb_interpretation_params().pdb_interpretation
     # customization for model with H
     params_h.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
     params_h.pdb_interpretation.max_reasonable_bond_distance = None

@@ -358,8 +358,10 @@ class manager(manager_mixin):
          _target_memory               = None,
          n_resolution_bins_output     = None,
          scale_method="combo",
-         origin=None):
+         origin=None,
+         data_type=None):
     self._origin = origin
+    self._data_type = data_type
     self.russ = None
     if(twin_law is not None): target_name = "twin_lsq_f"
     self.k_sol, self.b_sol, self.b_cart = k_sol, b_sol, b_cart
@@ -421,6 +423,8 @@ class manager(manager_mixin):
       self.mask_params = mask_params
     else:
       self.mask_params = mmtbx.masks.mask_master_params.extract()
+    if(self._data_type == "neutron"):
+      self.mask_params.ignore_hydrogens=False
     self.mask_manager = mask_manager
     if(self.mask_manager is None):
       self.mask_manager = masks.manager(
@@ -484,6 +488,9 @@ class manager(manager_mixin):
 
   def origin(self):
     return self._origin
+
+  def data_type(self):
+    return self._data_type
 
   def is_twin_fmodel_manager(self):
     return False
@@ -728,7 +735,8 @@ class manager(manager_mixin):
       k_sol                        = self.k_sol,
       b_sol                        = self.b_sol,
       b_cart                       = self.b_cart,
-      origin                       = self.origin())
+      origin                       = self.origin(),
+      data_type                    = self.data_type())
     result.twin = self.twin
     result.twin_law_str = self.twin_law_str
     result.k_h = self.k_h
@@ -776,7 +784,7 @@ class manager(manager_mixin):
       if(mngmsks is not None):
         f_masks = mngmsks[:] # copy
       if(mngmsks is not None and curfmsks is not None):
-        assert len(curfmsks) == len(mngmsks)
+        assert len(curfmsks) == len(mngmsks), [len(curfmsks), len(mngmsks)]
         for i in range(len(curfmsks)):
           if( mngmsks[i].data().size() != curfmsks[i].data().size() ):
             f_masks[i] = mngmsks[i].common_set(curfmsks[i])
@@ -1606,6 +1614,13 @@ class manager(manager_mixin):
   def target_unscaled_t(self, alpha_beta=None):
     return self.target_t(alpha_beta=alpha_beta)*self.f_calc_t().data().size()
 
+  def _update_mask_params(self, mask_params):
+    self.mask_params = mask_params
+    self.mask_manager = masks.manager(
+      miller_array      = self.f_obs(),
+      miller_array_twin = self.twin_set,
+      mask_params       = self.mask_params)
+
   def update(self, f_calc                       = None,
                    f_obs                        = None,
                    f_mask                       = None,
@@ -1619,6 +1634,7 @@ class manager(manager_mixin):
                    alpha_beta_params            = None,
                    twin_fraction                = None,
                    xray_structure               = None,
+                   epsilons                     = None,
                    mask_params                  = None):
     self.update_core(
       f_calc = f_calc,
@@ -1626,8 +1642,10 @@ class manager(manager_mixin):
       f_part1 = f_part1,
       k_mask = k_mask,
       k_anisotropic=k_anisotropic)
-    if(mask_params is not None):
-      self.mask_params = mask_params
+    if(epsilons is not None):
+      self.epsilons = epsilons
+    if(mask_params is not None): # Reguires updating mask manager!
+      self._update_mask_params(mask_params=mask_params)
     if(f_obs is not None):
       self.arrays.f_obs = f_obs
       self.update_core()
@@ -1733,6 +1751,10 @@ class manager(manager_mixin):
   def k_total(self):
     return self.k_isotropic()*self.k_anisotropic()*self.scale_k1()*\
       self.arrays.core.k_isotropic_exp
+
+  def k_total_work(self):
+    return self.k_isotropic_work()*self.k_anisotropic_work()*self.scale_k1_w()*\
+      self.arrays.core.k_isotropic_exp.select(self.arrays.work_sel)
 
   def f_obs_work(self):
     return self.arrays.f_obs_work
@@ -2043,10 +2065,10 @@ class manager(manager_mixin):
     if([d_min, d_max].count(None) < 2):
       assert selection is None and d_spacings is not None
     timer = user_plus_sys_time()
-    if([d_min, d_max].count(None) == 0):
+    if(d_min is not None or d_max is not None):
       keep = flex.bool(d_spacings.size(), True)
-      if (d_max): keep &= d_spacings <= d_max
-      if (d_min): keep &= d_spacings >= d_min
+      if (d_max is not None): keep &= d_spacings <= d_max
+      if (d_min is not None): keep &= d_spacings >= d_min
       f_obs   = f_obs.select(keep)
       f_model = f_model.select(keep)
     if(selection is not None):
@@ -2584,6 +2606,9 @@ class manager(manager_mixin):
         miller_array=alpha, column_root_label="ALPHA")
       mtz_dataset.add_miller_array(
         miller_array=beta, column_root_label="BETA")
+      mtz_dataset.add_miller_array(
+        miller_array=self.f_obs().centric_flags(),
+        column_root_label="CENTRIC_FLAGS")
       if(self.hl_coeffs() is not None):
         mtz_dataset.add_miller_array(
           miller_array=self.hl_coeffs(), column_root_label="HL")

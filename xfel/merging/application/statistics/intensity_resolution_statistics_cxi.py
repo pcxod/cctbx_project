@@ -347,7 +347,7 @@ class intensity_resolution_statistics_cxi(worker):
 
   def r1_factor(self, this, other, scale_factor=None, assume_index_matching=False,
                   use_binning=False):
-      """Get the R1 factor according to this formula
+      r"""Get the R1 factor according to this formula
 
       .. math::
          R1 = \dfrac{\sum{||F| - k|F'||}}{\sum{|F|}}
@@ -476,13 +476,14 @@ class intensity_resolution_statistics_cxi(worker):
        (it is necessary to pick which indexing choice gives the sensible CC iso):'''%self.params.scaling.model_reindex_op)
 
     try:
-
-      #TODO: respect params.statistics.cciso.mtz_column_F
-
-      data_SR = mtz.object(self.params.statistics.cciso.mtz_file)
-
+      model_file_path = self.params.statistics.cciso.mtz_file
+      assert model_file_path.endswith(("mtz", "sf.cif"))
+      # support both old-style *.mtz and structure factor *-sf.cif
+      from iotbx import reflection_file_reader
+      data_SR = reflection_file_reader.any_reflection_file(
+                file_name = model_file_path)
       have_iso_ref = True
-    except RuntimeError:
+    except (RuntimeError, AttributeError): # Attribute error if model_file_path is None
       data_SR = None
       have_iso_ref = False
 
@@ -517,7 +518,7 @@ class intensity_resolution_statistics_cxi(worker):
            self.logger.main_log(this_label + ' ' + str(array.observation_type()))
            uniform.append(array.as_intensity_array())
            break
-         if this_label.find(self.params.statistics.cciso.mtz_column_F) == 0:
+         if self.params.statistics.cciso.mtz_column_F.lower() in this_label:
            self.logger.main_log(this_label + ' ' + str(array.observation_type()))
            uniform.append(array.as_intensity_array())
            break
@@ -586,6 +587,10 @@ class intensity_resolution_statistics_cxi(worker):
 
     selected_uniform = []
     if have_iso_ref:
+      # quickly circumvent the odd case where the reference intensities have no sigmas
+      # (which is the case for model F's)
+      if uniform[0].sigmas() is None:
+        uniform[0].set_sigmas( uniform[0].data() )
       uniformA = (uniform[0].sigmas() > 0.).__and__(uniform[1].sigmas() > 0.)
 
       for x in [0, 1]:

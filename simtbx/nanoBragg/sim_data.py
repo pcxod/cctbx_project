@@ -83,6 +83,9 @@ class SimData:
     self.num_xtals = 1  # number of xtals, used in the hopper script
     self.dxtbx_spec = None  # spectrum object from dxtbx
     self.functionals = []  # target functionals  container ?
+    self.use_psf = False  # flag to specify whether psf should be applied to the model
+    self.PSF = None   # place holder for the point-spread-function returned by diffBragg/psf.py method makeMoffat_integPSF
+    self.psf_args = None # place holder for a dictionary containing the 3 PSF arguments (see example in diffBragg/psf.py
 
   @property
   def background_raw_pixels(self):
@@ -348,15 +351,40 @@ class SimData:
   def include_noise(self, val):
     self._include_noise = val
 
+  def get_detector_corner_res(self):
+    dmin = np.inf
+    for p in self.detector:
+      panel_corner_res = p.get_max_resolution_at_corners(self.beam.nanoBragg_constructor_beam.get_s0())
+      dmin = np.min([dmin, panel_corner_res])
+    return dmin
+
   def update_Fhkl_tuple(self):
     if self.crystal.miller_array is not None:
+      if np.all(self.crystal.miller_array.data().as_numpy_array()==0):
+        raise ValueError("Seems all miller indices are 0")
+      d_max, _ = self.crystal.miller_array.resolution_range()
+      d_min = self.get_detector_corner_res()
+      ma_on_detector = self.crystal.miller_array.resolution_filter(d_min=d_min, d_max=d_max)
       if self.using_diffBragg_spots and self.crystal.miller_is_complex:
-        Freal, Fimag = zip(*[(val.real, val.imag) for val in self.crystal.miller_array.data()])
+        Freal, Fimag = zip(*[(val.real, val.imag) for val in ma_on_detector.data()])
         Freal = flex.double(Freal)
         Fimag = flex.double(Fimag)
-        self.D.Fhkl_tuple = self.crystal.miller_array.indices(), Freal, Fimag
+        self.D.Fhkl_tuple = ma_on_detector.indices(), Freal, Fimag
+      elif self.using_diffBragg_spots:
+        self.D.Fhkl_tuple = ma_on_detector.indices(), ma_on_detector.data(), None
       else:
         self.D.Fhkl_tuple = self.crystal.miller_array.indices(), self.crystal.miller_array.data(), None
+
+  def set_dspace_binning(self, nbins, verbose=False):
+    dsp = self.D.Fhkl.d_spacings().data().as_numpy_array()
+    dsp = np.sort(dsp[dsp >= self.get_detector_corner_res()])
+    bins = [vals[0] for vals in np.array_split(dsp, nbins)] + [dsp[-1]]
+    bins[0] = bins[0]-1e-4
+    bins[-1] = bins[-1]+1e-4
+    if verbose:
+      for d in bins:
+        print(d)
+    self.D.dspace_bins = bins
 
   def _crystal_properties(self):
     if self.crystal is None:
@@ -368,16 +396,20 @@ class SimData:
       self.D.mosaic_domains = 1
 
     self.D.xtal_shape = self.crystal.xtal_shape
+    self.D.hall_symbol = self.crystal.space_group_info.type().hall_symbol()
+    if hasattr(self.D, "laue_group_num"):
+      self.D.laue_group_num = 1
 
-    self.update_Fhkl_tuple()
-
-    ## TODO: am I unnecessary?
-    #self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
+    # TODO: am I unnecessary?
+    self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
     if self.using_diffBragg_spots:
       self.D.Omatrix = self.crystal.Omatrix
       self.D.Bmatrix = self.crystal.dxtbx_crystal.get_B() #
       self.D.Umatrix = self.crystal.dxtbx_crystal.get_U()
+    self.update_Fhkl_tuple()
+    self.D.unit_cell_tuple = self.crystal.dxtbx_crystal.get_unit_cell().parameters()
 
+    if self.using_diffBragg_spots:
       # init mosaic domain size:
       if self.crystal.isotropic_ncells:
         self.D.Ncells_abc = self.crystal.Ncells_abc[0]
@@ -438,8 +470,14 @@ class SimData:
     otherwise, no mosaic spread will be modeled
     """
     if self.crystal.anisotropic_mos_spread_deg is not None:
-      self.D.has_anisotropic_mosaic_spread = True
-      mosaicity = self.crystal.anisotropic_mos_spread_deg
+      if tuple(self.crystal.anisotropic_mos_spread_deg) == (0,0,0) and self.crystal.n_mos_domains != 1:
+        raise ValueError("If more than 1 mosaic domain are passed, must set a positive value for anisotropic_mos_spread")
+      if len(set(self.crystal.anisotropic_mos_spread_deg))==1:
+        self.D.has_anisotropic_mosaic_spread = False
+        mosaicity = self.crystal.anisotropic_mos_spread_deg[0]
+      else:
+        self.D.has_anisotropic_mosaic_spread = True
+        mosaicity = self.crystal.anisotropic_mos_spread_deg
     else:
       self.D.has_anisotropic_mosaic_spread = False
       mosaicity = self.crystal.mos_spread_deg
@@ -567,9 +605,9 @@ class SimData:
     else:
       self.D.vectorize_umats()
 
-  def generate_simulated_image(self, instantiate=False):
+  def generate_simulated_image(self, instantiate=False, use_diffBragg=True):
     if instantiate:
-      self.instantiate_diffBragg()
+      self.instantiate_diffBragg(use_diffBragg=use_diffBragg)
     self._add_nanoBragg_spots()
     self._add_background()
     if self.include_noise:
@@ -654,8 +692,9 @@ class SimData:
     return DetectorFactory.make_detector("", fast, slow, origin,
                                          (pixelsize_mm, pixelsize_mm), image_shape, trusted_range)
 
+
 if __name__ == "__main__":
-  S = SimData()
-  img = S.generate_simulated_image()
+  S = SimData(use_default_crystal=True)
+  img = S.generate_simulated_image(instantiate=True, use_diffBragg=False)
   print ("Maximum pixel value: %.3g" % img.max())
   print ("Minimum pixel value: %.3g" % img.min())

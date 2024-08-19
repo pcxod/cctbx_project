@@ -4,6 +4,7 @@ import iotbx.pdb
 from libtbx.utils import Sorry
 from six import string_types
 from six.moves import range, zip
+from cctbx.array_family import flex
 
 class container(object):
 
@@ -84,29 +85,34 @@ def parse_MTRIX_BIOMT_records_cif(cif_block, recs='mtrix'):
   coordinates_present = []
   ncs_oper = cif_block.get('%s.id' % block_name)
   if ncs_oper is not None:
-    if recs=='mtrix' or (recs=='biomt' and ncs_oper != "P" and ncs_oper != "X0" and ncs_oper != "H"):
-      # filter everything for X0 and P here:
-      # Why??? Nobody promised that id would be integer, it is a 'single word':
+    for i,sn in enumerate(ncs_oper):
+      # filter everything for X0 and P here because they represent some other translations
+      # not related to whole molecule reproduction in BIOMT:
       # http://mmcif.wwpdb.org/dictionaries/mmcif_pdbx_v50.dic/Items/_pdbx_struct_oper_list.id.html
-      for i,sn in enumerate(ncs_oper):
-        serial_number.append((sn,i))
-        if recs == 'mtrix':
-          coordinates_present.append(cif_block.get('%s.code' % block_name)[i] == 'given')
+      if recs=='biomt' and (sn == "P" or sn == "X0" or sn == "H"):
+        continue
+      serial_number.append((sn,i))
+      if recs == 'mtrix':
+        code_loop_or_item = cif_block.get('%s.code' % block_name)
+        if isinstance(code_loop_or_item, flex.std_string):
+          coordinates_present.append(code_loop_or_item[i] == 'given')
         else:
-          coordinates_present.append(False) # no way to figure out
-        r = [(cif_block.get('%s.matrix[%s][%s]' %(block_name,x,y)))
-          for x,y in ('11', '12', '13', '21', '22', '23', '31','32', '33')]
-        if not isinstance(r[0], string_types):
-          r = [elem[i] for elem in r]
-        try:
-          rots.append(matrix.sqr([float(r_elem) for r_elem in r]) )
-          t = [(cif_block.get('%s.vector[%s]' %(block_name, x)))
-            for x in '123']
-          if not isinstance(t[0], string_types):
-            t = [elem[i] for elem in t]
-          trans.append(matrix.col([float(t_elem) for t_elem in t]))
-        except ValueError:
-          raise Sorry("Error in %s information. Likely '?' instead of a number." % block_name)
+          coordinates_present.append(code_loop_or_item == 'given')
+      else:
+        coordinates_present.append(False) # no way to figure out
+      r = [(cif_block.get('%s.matrix[%s][%s]' %(block_name,x,y)))
+        for x,y in ('11', '12', '13', '21', '22', '23', '31','32', '33')]
+      if not isinstance(r[0], string_types):
+        r = [elem[i] for elem in r]
+      try:
+        rots.append(matrix.sqr([float(r_elem) for r_elem in r]) )
+        t = [(cif_block.get('%s.vector[%s]' %(block_name, x)))
+          for x in '123']
+        if not isinstance(t[0], string_types):
+          t = [elem[i] for elem in t]
+        trans.append(matrix.col([float(t_elem) for t_elem in t]))
+      except ValueError:
+        raise Sorry("Error in %s information. Likely '?' instead of a number." % block_name)
   if recs=='mtrix':
     # sort records by serial number
     serial_number.sort()

@@ -14,16 +14,16 @@ jobs:
       modules: ${{ parameters.modules }}
   - template: ./conda-linux.yml
     parameters:
-      distribution: centos
-      version: [6]
+      distribution: rockylinux
+      version: [9]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml
-  - template: ./conda-linux.yml
-    parameters:
-      distribution: centos
-      version: [7]
-      modules: ${{ parameters.modules }}
-      template: ./unix-conda-build.yml
+  # - template: ./conda-linux.yml
+  #   parameters:
+  #     distribution: centos
+  #     version: [7]
+  #     modules: ${{ parameters.modules }}
+  #     template: ./unix-conda-build.yml
   - template: ./conda-linux.yml
     parameters:
       distribution: rockylinux
@@ -39,7 +39,7 @@ jobs:
   - template: ./conda-linux.yml
     parameters:
       distribution: ubuntu
-      version: ['16', '04']
+      version: ['22', '04']
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml
   - template: ./conda-linux.yml
@@ -50,8 +50,8 @@ jobs:
       template: ./unix-conda-build.yml
   - template: ./conda-osx.yml
     parameters:
-      vmImage: [12]
-      xcode_version: [14, 0]
+      vmImage: [13]
+      xcode_version: [14, 3, 1]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml
   - template: ./conda-osx.yml
@@ -62,7 +62,7 @@ jobs:
       template: ./unix-conda-build.yml
   - template: ./conda-osx.yml
     parameters:
-      vmImage: [11]
-      xcode_version: [12, 5, 1]
+      vmImage: [13]
+      xcode_version: [15, 2]
       modules: ${{ parameters.modules }}
       template: ./unix-conda-build.yml

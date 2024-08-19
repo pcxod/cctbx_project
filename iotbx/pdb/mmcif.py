@@ -8,6 +8,7 @@ from libtbx.str_utils import format_value
 import iotbx.pdb
 from iotbx.pdb import hierarchy
 from iotbx.pdb import hy36encode
+from iotbx.pdb.experiment_type import experiment_type
 from iotbx.pdb.remark_3_interpretation import \
      refmac_range_to_phenix_string_selection, tls
 import iotbx.cif
@@ -20,6 +21,15 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
 
   # The recommended translation for ATOM records can be found at:
   #   http://mmcif.rcsb.org/dictionaries/pdb-correspondence/pdb2mmcif-2010.html#ATOM
+  #   https://www.ebi.ac.uk/pdbe/docs/exchange/pdb-correspondence/pdb2mmcif.html#ATOM
+
+  #  Note: pdb_hierarchy allows the same chain ID to be used in multiple chains.
+  #    This is indicated in PDB format with a TER record indicating the end of a chain
+  #    The corresponding information in mmCIF is the label_asym_id changes for each
+  #    new chain (the auth_asym_id matches the chain ID).
+  #    Catch cases where one chain id is split into multiple chains in the following way:
+  #    If label_asym_id changes and previous residue was protein or rna/dna or modified
+  #    (or auth_asym_id or model_id changes), create a chain break.
 
   def __init__(self, cif_block):
     crystal_symmetry_builder.__init__(self, cif_block)
@@ -33,6 +43,8 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
     alt_id = self._wrap_loop_if_needed(cif_block,"_atom_site.label_alt_id") # alternate conformer id
     label_asym_id = self._wrap_loop_if_needed(cif_block, "_atom_site.label_asym_id") # chain id
     auth_asym_id = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_asym_id")
+    auth_segid = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_segid")
+    auth_break = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_break")
     if label_asym_id is None: label_asym_id = auth_asym_id
     if auth_asym_id is None: auth_asym_id = label_asym_id
     comp_id = self._wrap_loop_if_needed(cif_block, "_atom_site.auth_comp_id")
@@ -113,8 +125,12 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
         "record with empty auth_asym_id, which is wrong."
       assert current_label_asym_id is not None
       if (current_auth_asym_id != last_auth_asym_id
-          or current_model_id != last_model_id):
+          or current_model_id != last_model_id
+          or (current_label_asym_id != last_label_asym_id and
+             i_atom > 0 and is_aa_or_rna_dna(comp_id[i_atom-1]))
+         ): # insert chain breaks
         chain = hierarchy.chain(id=current_auth_asym_id)
+        is_first_in_chain = None
         model.append_chain(chain)
       else:
         assert current_auth_asym_id == last_auth_asym_id
@@ -141,6 +157,10 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
           resseq=resseq,
           icode=current_ins_code)
         chain.append_residue_group(residue_group)
+        if is_first_in_chain is None:
+          is_first_in_chain = True
+        else:
+          is_first_in_chain = False
         atom_groups = OrderedDict() # reset atom_groups cache
       # atom_group(s)
       # defined by resname and altloc id
@@ -150,7 +170,7 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
       current_resname = comp_id[i_atom]
       if (current_altloc, current_resname) not in atom_groups:
         atom_group = hierarchy.atom_group(
-          altloc=current_altloc, resname=current_resname)
+          altloc=current_altloc, resname="%3s" % current_resname)
         atom_groups[(current_altloc, current_resname)] = atom_group
         if current_altloc == "":
           residue_group.insert_atom_group(0, atom_group)
@@ -174,7 +194,13 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
       atom.set_serial(
         hy36encode(width=5, value=int(atom_site_id[i_atom])))
       # some code relies on an empty segid being 4 spaces
-      atom.set_segid("    ")
+      if auth_segid:
+        atom.set_segid(auth_segid[i_atom][:4]+(4-len(auth_segid[i_atom]))*" ")
+      else:
+        atom.set_segid("    ")
+      if auth_break and (not is_first_in_chain) and auth_break[i_atom] == "1":
+        # insert break before this residue
+        residue_group.link_to_previous = False
       if group_PDB is not None and group_PDB[i_atom] == "HETATM":
         atom.hetero = True
       if formal_charge is not None:
@@ -212,6 +238,16 @@ class pdb_hierarchy_builder(crystal_symmetry_builder):
       data = flex.std_string([data])
     return data
 
+
+def is_aa_or_rna_dna(resname):
+   from iotbx.pdb import common_residue_names_get_class
+   resname = resname.strip()
+   residue_class = common_residue_names_get_class(resname)
+   if residue_class in ['common_amino_acid', 'modified_amino_acid',
+                'common_rna_dna', 'modified_rna_dna']:
+     return True
+   else:
+     return False
 
 def format_pdb_atom_name(atom_name, atom_type):
   # The PDB-format atom name is 4 characters long (columns 13 - 16):
@@ -351,6 +387,8 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
     return "mmcif"
 
   def construct_hierarchy(self, set_atom_i_seq=True, sort_atoms=True):
+    if self.hierarchy is not None:
+      return self.hierarchy
     self.builder = pdb_hierarchy_builder(self.cif_block)
     self.hierarchy = self.builder.hierarchy
     if sort_atoms:
@@ -377,7 +415,10 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
   def model_indices(self):
     if self.hierarchy is None:
       self.construct_hierarchy()
-    return flex.size_t([m.atoms_size() for m in self.hierarchy.models()])
+    mi = flex.size_t([m.atoms_size() for m in self.hierarchy.models()])
+    for i in range(1, len(mi)):
+      mi[i] += mi[i-1]
+    return mi
 
   def ter_indices(self):
     # for compatibility with pdb_input
@@ -432,12 +473,21 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
   def extract_header_year(self):
     yyyymmdd = self.deposition_date()
     if yyyymmdd is not None:
-      return int(yyyymmdd[:4])
+      try:
+        return int(yyyymmdd[:4])
+      except ValueError:
+        pass
+    return None
 
-  def deposition_date(self):
+
+  def deposition_date(self, us_style=True):
     # date format: yyyy-mm-dd
     cif_block = list(self.cif_model.values())[0]
-    return cif_block.get("_pdbx_database_status.recvd_initial_deposition_date")
+    date_orig = cif_block.get("_pdbx_database_status.recvd_initial_deposition_date")
+    result = date_orig
+    if not us_style:
+      raise NotImplementedError
+    return result
     #rev_num = cif_block.get('_database_PDB_rev.num')
     #if rev_num is not None:
     #  date_original = cif_block.get('_database_PDB_rev.date_original')
@@ -448,7 +498,7 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
     #    if date_original is not None:
     #      return date_original[i]
 
-  def get_r_rfree_sigma(self, file_name):
+  def get_r_rfree_sigma(self, file_name=None):
     return _cif_get_r_rfree_sigma_object(self.cif_block, file_name)
 
   def get_solvent_content(self):
@@ -456,10 +506,6 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
 
   def get_matthews_coeff(self):
     return _float_or_None(self.cif_block.get('_exptl_crystal.density_Matthews'))
-
-  def experiment_type_electron_microscopy(self):
-    et = self.get_experiment_type().strip().upper()
-    return et == "ELECTRON MICROSCOPY"
 
   def get_program_name(self):
     software_name = self.cif_block.get('_software.name')
@@ -469,7 +515,9 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
         return software_name
     elif software_classification is not None:
       i = flex.first_index(software_classification, 'refinement')
-      if i >= 0: return software_name[i]
+      if (i is not None) and (i >= 0) and (software_name is not None) and (
+           i < len(software_name)):
+        return software_name[i]
 
   def resolution(self):
     result = []
@@ -529,9 +577,13 @@ class cif_input(iotbx.pdb.pdb_input_mixin):
 
   def get_experiment_type(self):
     exptl_method = self.cif_block.get('_exptl.method')
-    if(isinstance(exptl_method,flex.std_string)):
-      exptl_method = "; ".join(list(exptl_method))
-    return exptl_method
+    lines = []
+    if exptl_method is not None:
+      if(isinstance(exptl_method,flex.std_string)):
+        lines = list(exptl_method)
+      else:
+        lines = [exptl_method]
+    return experiment_type(lines)
 
   def process_BIOMT_records(self):
     import iotbx.mtrix_biomt
@@ -620,9 +672,10 @@ def extract_f_model_core_constants(cif_block):
   r_shrink = _float_or_None(cif_block.get('_refine.pdbx_solvent_shrinkage_radii'))
   r_work = _float_or_None(cif_block.get('_refine.ls_R_factor_R_work'))
   r_free = _float_or_None(cif_block.get('_refine.ls_R_factor_R_free'))
+
+  twin_fraction = _float_or_None(cif_block.get('_pdbx_reflns_twin.fraction'))
+  twin_law = cif_block.get('_pdbx_reflns_twin.operator')
   # TODO: extract these from the CIF?
-  twin_fraction = None
-  twin_law = None
   grid_step_factor = None
   return group_args(
     k_sol            = k_sol,

@@ -6,6 +6,80 @@ from iotbx.phil import parse
 #'''
 
 hopper_phil = """
+
+filter_during_refinement {
+  enable = False
+    .type = bool
+    .help = if True, filtering will occur each N iterations, controlled by parameter after_n
+  after_n = 50
+    .type = int
+    .help = refiner will pause and check for outliers every after_n iterations
+  threshold = 20
+    .type = float
+    .help = outliers are detected by looking at the distribution of per shoebox sigmaZ
+    .help = and then using a median absolute deviation filter. Lower values of threshold will flag more pixels as outliers
+}
+
+filter_after_refinement {
+  enable = False
+    .type = bool
+    .help = if True, filter, then rerun refinement if certain conditions are met (e.g. too few refinement iterations)
+  max_attempts = 2
+    .type = int
+    .help = how many additional times to run hopper
+  min_prev_niter = 50
+    .type = int
+    .help = only repeat if the previous refinement was fewer than this many iterations
+  max_prev_sigz = 10
+    .type = float
+    .help = only repeat if the previous refinement had sigma Z more than this
+  threshold = 20
+    .type = float
+    .help = outliers are detected by looking at the distribution of per shoebox sigmaZ
+    .help = and then using a median absolute deviation filter. Lower values of threshold will flag more pixels as outliers
+}
+
+symmetrize_Flatt = False
+  .type = bool
+  .help = If True, add 3-fold symmetric mosaic blocks to the calculation of F_latt
+record_device_timings = False
+  .type = bool
+  .help = Record the execution times of diffBragg host-dev copies and kernel executions
+  .help = the results will be printed to the terminal
+consider_multicrystal_shots = False
+  .type = bool
+  .help = If True, and if there are multiple crystals in the experiment list,
+  .help = then try to model all crystals for a given shot.
+debug_mode = False
+  .type = bool
+  .help = If True, many output files are written to explore the diffBragg models in great detail
+nominal_Fhkl_only = True
+  .type = bool
+  .help = if refining Fhkls, only refine the ones that are assigned to a reflection table...
+use_geometric_mean_Fhkl = False
+  .type = bool
+  .help = whether to use the geometric mean for Fhkl restraint (when betasFhkl is not None, restratin Fhkl to the mean in each res bin)
+Fhkl_channel_bounds = None
+  .type = floats
+  .help = Energy bounds for energy-dependent structure factors. Units are eV.
+  .help = If provided refine a unique structure factor correction for each bin defined by Fhkl_channel_bins
+  .help = 0 and infinity are implicit. Providing a single number, e.g. 8950, will refine two sets of structure
+  .help = factors: one for energies [0-8950), and another for energies [8950-infinity]
+Fhkl_dspace_bins = 10
+  .type = int
+  .help = number of resolution bins (out to corner of detector) for computing the average structure factor intensity
+  .help = One can then restrain to these values when fix.Fhkl=False by using the restraint strength betas.Fhkl (default is None in which case no restraints are applied)
+try_strong_mask_only = False
+  .type = bool
+  .help = if strong spot masks are present in the input refls, then use them
+  .help = as the trusted-flags, i.e. only run strong spot pixels through diffBragg
+dilate_strong_mask = None
+  .type = int
+  .help = if using strong mask only for refinement, then dilate it this many iterations using
+  .help = scipy.ndimage method binary_dilation (has to be >= 1)
+hopper_save_freq = None
+  .type = int
+  .help = save the output files when the iteration number is a multiple of this argument
 terminate_after_n_converged_iter = None
   .type = int
   .help = optionally converge if all parameters seem converged for this many iterations. See
@@ -94,12 +168,6 @@ downsamp_spec {
     .help = final resolution of downsampled spectrum in eV
     .expert_level=0
 }
-apply_best_crystal_model = False
-  .type = bool
-  .help = depending on what experiments in the exper refl file, one may want
-  .help = to apply the optimal crystal transformations (this parameter only matters
-  .help = if params.best_pickle is not None)
-  .expert_level=10
 filter_unpredicted_refls_in_output = True
   .type = bool
   .help = filter reflections in the output refl table for which there was no model bragg peak
@@ -141,6 +209,12 @@ betas
   .help = variances for the restraint targets
   .expert_level=0
 {
+  Finit = None
+    .type = float
+  Friedel = None
+    .type = float
+    .help = set this to some value to restraint Friedel mates during refinement (ensemble mode) . Lower values are
+    .help = tightly restrained . (Exploratory, experimental phil param)
   ucell_a = None
     .type = float
     .help = restraint variance for unit cell a
@@ -159,40 +233,46 @@ betas
   ucell_gamma = None
     .type = float
     .help = restraint variance for unit cell gamma angle
-  Nvol = 1e8
+  Nvol = None
     .type = float
     .help = tightness of the Nabc volume contraint
-  detz_shift = 1e8
+  detz_shift = None
     .type = float
     .help = restraint variance for detector shift target
-  ucell = [1e8,1e8,1e8,1e8,1e8,1e8]
+  ucell = None
     .type = floats
     .help = DEPRECATED: use e.g. betas.ucell_a instead
     .help = variances for unit cell constants in order determined by unit cell manager class (see diffBragg/refiners/crystal_systems)
-  RotXYZ = 1e8
+  RotXYZ = None
     .type = float
     .help = restraint factor for the rotXYZ restraint
-  Nabc = [1e8,1e8,1e8]
+  Nabc = None
     .type = floats(size=3)
     .help = restraint factor for the ncells abc
-  Ndef = [1e8,1e8,1e8]
+  Ndef = None
     .type = floats(size=3)
     .help = restraint factor for the ncells def
-  diffuse_sigma = 1e8,1e8,1e8
+  diffuse_sigma = None
     .type = floats(size=3)
     .help = restraint factor for diffuse sigma
-  diffuse_gamma = 1e8,1e8,1e8
+  diffuse_gamma = None
     .type = floats(size=3)
     .help = restraint factor for diffuse gamma
-  G = 1e8
+  G = None
     .type = float
     .help = restraint factor for the scale G
-  B = 1e8
+  B = None
     .type = float
     .help = restraint factor for Bfactor
-  eta_abc = [1e8,1e8,1e8]
+  eta_abc = None
     .type = floats(size=3)
     .help = restrain factor for mosaic spread angles
+  spec = None
+    .type = floats(size=2)
+    .help = restraint factor for spectrum coefs
+  Fhkl = None
+    .type = float
+    .help = restraint factor for structure factor intensity scales
 }
 dual
   .help = configuration parameters for dual annealing
@@ -237,37 +317,36 @@ centers
   Nvol = None
     .type = float
     .help = if provided, constrain the product Na*Nb*Nc to this value
-  detz_shift = 0
+  detz_shift = None
     .type = float
     .help = restraint target for detector shift along z-direction
-  ucell = [63.66, 28.87, 35.86, 1.8425]
-    .type = floats
-    .help = DEPRECATED: use e.g. betas.ucell_a instead
-    .help = centers for unit cell constants in order determined by unit cell manager class (see diffBragg/refiners/crystal_systems)
-  RotXYZ = [0,0,0]
+  RotXYZ = None
     .type = floats(size=3)
     .help = restraint target for Umat rotations
-  Nabc = [100,100,100]
+  Nabc = None
     .type = floats(size=3)
     .help = restraint target for Nabc
-  Ndef = [0,0,0]
+  Ndef = None
     .type = floats(size=3)
     .help = restraint target for Ndef
-  diffuse_sigma = [1,1,1]
+  diffuse_sigma = None
     .type = floats(size=3)
     .help = restraint target for diffuse sigma
-  diffuse_gamma = [1,1,1]
+  diffuse_gamma = None
     .type = floats(size=3)
     .help = restraint target for diffuse gamma
-  G = 100
+  G = None
     .type = float
     .help = restraint target for scale G
-  B = 0
+  B = None
     .type = float
     .help = restraint target for Bfactor
-  eta_abc = [0,0,0]
+  eta_abc = None
     .type = floats(size=3)
     .help = restraint target for mosaic spread angles in degrees
+  spec = None
+    .type = floats(size=2)
+    .help = restraint target for specturm correction (0 + 1*Lambda )
 }
 skip = None
   .type = int
@@ -292,6 +371,7 @@ niter = 0
 exp_ref_spec_file = None
   .type = str
   .help = path to 3 col txt file containing file names for exper, refl, spectrum (.lam)
+  .help = Note: only single-image experiment lists are supported! Uses dials.split_experiments or diffBragg.make_input_file if necessary
   .expert_level=0
 method = None
   .type = str
@@ -322,6 +402,19 @@ max_process = -1
   .type = int
   .help = max exp to process
   .expert_level=0
+types
+  .help = type of target to parameter (see diffBragg.refiners.parameters.py)
+  .expert_level=10
+{
+  G = *ranged positive
+    .type = choice
+  Nabc = *ranged positive
+    .type = choice
+  diffuse_sigma = *ranged positive
+    .type = choice
+  diffuse_gamma = *ranged positive
+    .type = choice
+}
 sigmas
   .help = sensitivity of target to parameter (experimental)
   .expert_level=10
@@ -346,9 +439,9 @@ sigmas
   diffuse_gamma = [1,1,1]
     .type = floats(size=3)
     .help = sensitivity for diffuse gamma
-  RotXYZ = [1,1,1]
+  RotXYZ = [1e-3,1e-3,1e-3]
     .type = floats(size=3)
-    .help = sensitivity for RotXYZ
+    .help = sensitivity for RotXYZ in radians
   G = 1
     .type = float
     .help = sensitivity for scale factor
@@ -395,17 +488,17 @@ init
     .help = init for diffuse gamma
   RotXYZ = [0,0,0]
     .type = floats(size=3)
-    .help = init for RotXYZ
+    .help = init for RotXYZ in radians
   G = 1
     .type = float
     .help = init for scale factor
   B = 0
     .type = float
     .help = init for B factor
-  eta_abc = [1e-6,1e-6,1e-6]
+  eta_abc = [0,0,0]
     .type = floats(size=3)
     .help = initial values (in degrees) for anisotropic mosaic spread about the 3 crystal axes a,b,c
-    .help = Note, these can never be exactly 0 (TODO address this)
+    .help = Note, these can never be exactly 0 if fix.eta_abc=False
 }
 mins
   .help = min value allowed for parameter
@@ -426,9 +519,9 @@ mins
   diffuse_gamma = [0,0,0]
     .type = floats(size=3)
     .help = min for diffuse gamma
-  RotXYZ = [-1,-1,-1]
+  RotXYZ = [-3.1415926, -3.1415926, -3.1415926]
     .type = floats(size=3)
-    .help = min for rotXYZ in degrees
+    .help = min for rotXYZ in radians
   G = 0
     .type = float
     .help = min for scale G
@@ -438,9 +531,12 @@ mins
   Fhkl = 0
     .type = float
     .help = min for structure factors
-  eta_abc = [1e-10,1e-10,1e-10]
+  eta_abc = [0,0,0]
     .type = floats(size=3)
     .help = min value (in degrees) for mosaic spread angles
+  spec = [-0.01, 0.95]
+    .type = floats(size=2)
+    .help = min value for spectrum correction (-0.01 + Lambda *1.05)
 }
 maxs
   .help = max value allowed for parameter
@@ -461,12 +557,12 @@ maxs
   diffuse_sigma = [20,20,20]
     .type = floats(size=3)
     .help = max diffuse sigma
-  diffuse_gamma = [1000,1000,1000]
+  diffuse_gamma = [10000,10000,10000]
     .type = floats(size=3)
     .help = max for diffuse gamma
-  RotXYZ = [1,1,1]
+  RotXYZ = [3.1415926, 3.1415926, 3.1415926]
     .type = floats(size=3)
-    .help = max for rotXYZ in degrees
+    .help = max for rotXYZ in radians
   G = 1e12
     .type = float
     .help = max for scale G
@@ -479,11 +575,17 @@ maxs
   Fhkl = 1e6
     .type = float
     .help = max for structure factors
+  spec = [0.01, 1.05]
+    .type = floats(size=2)
+    .help = max value for spectrum correction (0.01 + Lambda *1.05)
 }
 fix
   .help = flags for fixing parameters during refinement
   .expert_level = 0
 {
+  Fhkl = True
+    .type = bool
+    .help = fix the structure factors scales during refinement
   spec = True
     .type = bool
     .help = fix the spectrum. If False, a spectrum correction is refined (wavelength shift and scale)
@@ -505,7 +607,7 @@ fix
   Nabc = False
     .type = bool
     .help = fix the diagonal mosaic domain size parameters during refinement
-  Ndef = False
+  Ndef = True
     .type = bool
     .help = fix the diagonal mosaic domain size parameters during refinement
   diffuse_sigma = True
@@ -517,7 +619,7 @@ fix
   ucell = False
     .type = bool
     .help = fix the unit cell during refinement
-  detz_shift = False
+  detz_shift = True
     .type = bool
     .help = fix the detector distance shift during refinement
 }
@@ -546,6 +648,9 @@ diffuse_stencil_size = 0
   .type = int
   .help = Increase to add accuracy to diffuse scattering models, at the expense of longer computations
   .help = Best to increment by values of 1 when testing
+diffuse_orientation = 1
+  .type = int
+  .help = orient the diffuse scattering features. 0 is along (a-b, a+b, c), 1 is along (a,b,c)
 symmetrize_diffuse = True
   .type = bool
   .help = use the laue group rotation operators to symmetrize diffuse signals
@@ -578,6 +683,9 @@ percentile_cut = None
   .type = float
   .help = percentile below which pixels are masked
   .expert_level = 10
+remove_duplicate_hkl = False
+  .type = bool
+  .help = for hopper, remove duplicate HKLs in input refl files
 space_group = None
   .type = str
   .help = space group to refine structure factors in
@@ -601,9 +709,9 @@ disp = False
   .type = bool
   .help = scipy minimize convergence printouts
   .expert_level = 10
-use_restraints = True
+use_restraints = False
   .type = bool
-  .help = disable the parameter restraints
+  .help = enable the parameter restraints
   .expert_level = 0
 min_multi = 2
   .type = int
@@ -646,16 +754,19 @@ logging
   overwrite = True
     .type = bool
     .help = overwrite the existing logfiles
-  logname = None
+  logname = mainLog
     .type = str
     .help = if logfiles=True, then write the log to this file, stored in the folder specified by outdir
     .help = if None, then defaults to main_stage1.log for hopper, main_pred.log for prediction, main_stage2.log for stage_two
+  log_hostname = True
+    .type = bool
+    .help = prefix logfiles with host name
 }
 profile = False
   .type = bool
   .help = profile the workhorse functions
   .expert_level = 0
-profile_name = None
+profile_name = lineProf
   .type = str
   .help = name of the output file that stores the line-by-line profile (written to folder specified by outdir)
   .help = if None, defaults to prof_stage1.log, prof_pred.log, prof_stage2.log for hopper, prediction, stage_two respectively
@@ -712,6 +823,14 @@ simulator {
       .help = three missetting angles (about X,Y,Z axes), followed by
       .help = unit cell parameters. The crystal will be rotated according to
       .help = the matrix RotX*RotY*RotZ, and then the unit cell will be updated
+  }
+  gonio {
+    delta_phi = None
+      .type = float
+      .help = Angular amount in degrees by which goniometer is rotated during shot
+    phi_steps = 50
+      .type = int
+      .help = number of discrete angular positions to model
   }
   structure_factors {
     from_pdb {
@@ -794,6 +913,17 @@ simulator {
       .help = number of layers within sensor where scattering
       .help = will be averaged over (evenly divided). This is a nanoBragg attribute
   }
+  psf {
+    use = False
+      .type = bool
+      .help = optionally apply a point-spread-function to the model
+    fwhm = 100
+      .type = float
+      .help = PSF full width half max in microns
+    radius = 7
+      .type = int
+      .help = PSF kernel radius (in pixels)
+  }
 }
 """
 
@@ -857,18 +987,12 @@ refiner {
     .help = is comma-separated substrings, formatted according to "%f-%f,%f-%f" where the first float
     .help = in each substr specifies the high-resolution for the refinement trial, and the second float
     .help = specifies the low-resolution for the refinement trial. Should be same length as max_calls
-  mask = None
-    .type = str
-    .help = path to a dials mask flagging the trusted pixels
   force_symbol = None
     .type = str
     .help = a space group lookup symbol used to map input miller indices to ASU
   force_unit_cell = None
     .type = ints(size=6)
     .help = a unit cell tuple to use
-  randomize_devices = True
-    .type = bool
-    .help = randomly select a device Id
   num_devices = 1
     .type = int
     .help = number of cuda devices on current node
@@ -979,6 +1103,9 @@ roi {
     .help = Shoeboxes are drawn around the centroids, and refinement uses pixels
     .help = within those shoeboxes.
     .help = obs: xyz.px.value  cal: xyzcal.px
+  trusted_range = None
+    .type = floats(size=2)
+    .help = optional override for detector trusted range, should be (min,max)
   mask_all_if_any_outside_trusted_range = True
     .type = bool
     .help = If a reflection has any pixels which are outside the detectors
@@ -1033,7 +1160,7 @@ roi {
     .type = str
     .help = panel list for refinement as a string, e.g. "0-8,10,32-40" . The ranges are inclusive,
     .help = e.g. 0-8 means panels 0,1,2,3,4,5,6,7,8
-  fit_tilt_using_weights = True
+  fit_tilt_using_weights = False
     .type = bool
     .help = if not using robust estimation for background, and instead using tilt plane fit,
     .help = then this parameter will toggle the use of weights. Weights are the estimated
@@ -1048,7 +1175,7 @@ roi {
 }
 
 geometry {
-  save_state_freq = 500
+  save_state_freq = 50
     .type = int
     .help = how often to save all model parameters
   save_state_overwrite = True
@@ -1148,6 +1275,8 @@ predictions {
     .type = float
     .help = Label predicted reflection as a strong reflection if its within this
     .help = many inverse Angstromg (q=2/Lambda sin(theta)) of an observed strong spot
+  label_weak_col = "xyzobs.px.value"
+    .type = str
   weak_fraction = 0.5
     .type = float
     .help = fraction of weak predictions to integrate

@@ -1,17 +1,17 @@
-
 from __future__ import absolute_import, division, print_function
+
 from libtbx.test_utils import Exception_expected
 from libtbx.utils import null_out, Sorry
 from libtbx import easy_run
+from scitbx.array_family import flex
+from cctbx import uctbx, sgtbx
+import iotbx.pdb
+from iotbx import file_reader
+from mmtbx.refinement import select_best_starting_model
+import random
 from six.moves import range
 
 def exercise_main():
-  from mmtbx.refinement import select_best_starting_model
-  from iotbx import file_reader
-  from cctbx import uctbx
-  from cctbx import sgtbx
-  from scitbx.array_family import flex
-  import random
   unit_cell = (24.937, 8.866, 25.477, 90.00, 107.08, 90.00)
   space_group = "P21"
   pdb_base = """\
@@ -92,7 +92,6 @@ END
   params = """
     high_resolution = 1.75
     add_sigmas = True
-    pdb_file = tst_start_model_base.pdb
     output {
       label = F
       type = *real complex
@@ -102,7 +101,7 @@ END
   with open("tst_start_model_fmodel.eff", "w") as f:
     f.write(params)
   assert (easy_run.fully_buffered(
-    "phenix.fmodel tst_start_model_fmodel.eff"
+    "phenix.fmodel tst_start_model_base.pdb tst_start_model_fmodel.eff"
   ).raise_if_errors().return_code == 0)
   mtz_in = file_reader.any_file("tst_start_model_base.mtz")
   f_obs = mtz_in.file_server.miller_arrays[0]
@@ -116,9 +115,9 @@ END
   mtz_data.add_miller_array(flags,
     column_root_label="FreeR_flag")
   mtz_data.mtz_object().write("tst_start_model.mtz")
-  pdb_in = file_reader.any_file("tst_start_model_base.pdb")
-  hierarchy_in = pdb_in.file_object.hierarchy
-  xrs_in = pdb_in.file_object.xray_structure_simple()
+  pdb_in = iotbx.pdb.input("tst_start_model_base.pdb")
+  hierarchy_in = pdb_in.construct_hierarchy()
+  xrs_in = pdb_in.xray_structure_simple()
   selection = hierarchy_in.atom_selection_cache().selection
   # Model 1: very few changes, but shifted by (1,0,0.5)
   symm2 = xrs_in.crystal_symmetry().customized_copy(
@@ -194,9 +193,6 @@ END
   assert (result.best_model_name == "tst_start_model_1.pdb"), result.best_model_name
 
 def exercise_misc():
-  from mmtbx.refinement import select_best_starting_model
-  from iotbx import file_reader
-  import iotbx.pdb.hierarchy
   pdb_str = """\
 REMARK this is a remark record!
 CRYST1   21.937    4.866   23.477  90.00 107.08  90.00 P 1 21 1
@@ -335,9 +331,9 @@ END
   pdb_file = "tst_start_model_misc.pdb"
   with open(pdb_file, "w") as f:
     f.write(pdb_str)
-  pdb_in = iotbx.pdb.hierarchy.input(pdb_file)
-  pdb_hierarchy = pdb_in.hierarchy
-  xray_structure = pdb_in.input.xray_structure_simple()
+  pdb_in = iotbx.pdb.input(file_name=pdb_file)
+  pdb_hierarchy = pdb_in.construct_hierarchy()
+  xray_structure = pdb_in.xray_structure_simple()
   hd_sel = xray_structure.hd_selection()
   assert hd_sel.count(True) == 55
   xray_structure.convert_to_anisotropic(selection=~hd_sel)
@@ -405,8 +401,8 @@ END
     preserve_remarks=True,
     output_file="tst_start_model_misc_new.pdb",
     log=null_out())
-  pdb_new = iotbx.pdb.hierarchy.input(file_name="tst_start_model_misc_new.pdb")
-  assert len(pdb_new.input.remark_section()) == 1
+  pdb_new = iotbx.pdb.input(file_name="tst_start_model_misc_new.pdb")
+  assert len(pdb_new.remark_section()) == 1
   # reset HETATM
   hierarchy_new, xrs_new = select_best_starting_model.strip_model(
     file_name=pdb_file,

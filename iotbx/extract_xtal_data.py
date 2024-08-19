@@ -22,7 +22,7 @@ def miller_array_symmetry_safety_check(miller_array, data_description,
     working_point_group = working_point_group).format_error_message(
       data_description = data_description)
 
-def explain_how_to_generate_array_of_r_free_flags():
+def explain_how_to_generate_array_of_r_free_flags(scope = '<parent scope>.r_free_flags.generate'):
   part1 = """\
 If previously used R-free flags are available run this command again
 with the name of the file containing the original flags as an
@@ -37,9 +37,9 @@ If the structure was refined previously using different R-free flags,
 the values for R-free will become meaningful only after many cycles of
 refinement.
 """
-  return part1 + """<parent scope>.generate=True""" + part3
+  return part1 + """%s=True""" %(scope) + part3
 
-data_and_flags_str_part1 = """\
+data_and_flags_str_part1a = """\
   file_name = None
     .type=path
     .short_caption=Reflections file
@@ -55,6 +55,9 @@ data_and_flags_str_part1 = """\
       OnChange:auto_update_label_choice child:d_min:high_resolution \
       child:d_max:low_resolution parent:file_name:file_name
     .expert_level = 0
+"""
+
+data_and_flags_str_part1b = """\
   high_resolution = None
     .type=float
     .input_size = 80
@@ -65,6 +68,10 @@ data_and_flags_str_part1 = """\
     .input_size = 80
     .style = bold renderer:draw_resolution_widget noauto
     .expert_level = 0
+  twin_law = None
+    .type=str
+    .input_size = 80
+    .style = bold noauto
   outliers_rejection = True
     .type=bool
     .short_caption = Reject outliers
@@ -88,7 +95,12 @@ data_and_flags_str_part1 = """\
     .expert_level = 0
 """
 
-data_and_flags_str_part2 = """\
+data_and_flags_str_part1 = """\
+  %s
+  %s
+"""%(data_and_flags_str_part1a, data_and_flags_str_part1b)
+
+data_and_flags_str_part2a = """\
   file_name = None
     .type=path
     .short_caption=File with R(free) flags
@@ -104,6 +116,12 @@ data_and_flags_str_part2 = """\
     .style = bold renderer:draw_rfree_label_widget noauto \
              OnChange:update_rfree_flag_value
     .expert_level = 0
+"""
+
+data_and_flags_str_part2b = """\
+  required = True
+    .type = bool
+    .help = Specify if free-r flags are must be present (or else generated)
   test_flag_value = None
     .type=int
     .help = This value is usually selected automatically - do not change \
@@ -117,8 +135,12 @@ data_and_flags_str_part2 = """\
     .expert_level=0
 """
 
-data_and_flags_str = """\
+data_and_flags_str_part2 = """\
   %s
+  %s
+"""%(data_and_flags_str_part2a, data_and_flags_str_part2b)
+
+misc1 = """\
   ignore_all_zeros = True
     .type=bool
     .short_caption = Ignore all-zero arrays
@@ -138,8 +160,8 @@ data_and_flags_str = """\
       If no test set is present in the reflections file, one can be generated \
       automatically, or you can use the reflection file editor to combine an \
       existing set with your X-ray or neutron data.
-  {
-    %s
+"""
+misc2 = """\
     disable_suitability_test = False
       .type=bool
       .expert_level = 2
@@ -153,10 +175,34 @@ data_and_flags_str = """\
       .type=bool
       .short_caption = Generate new R-free flags
       .help = Generate R-free flags (if not available in input files)
+"""
+
+data_and_flags_str = """\
+  %s
+  %s
+  {
+    %s
+    %s
     %s
   }
 """ % (data_and_flags_str_part1,
+       misc1,
        data_and_flags_str_part2,
+       misc2,
+       miller.generate_r_free_params_str)
+
+data_and_flags_str_no_filenames = """\
+  %s
+  %s
+  {
+    %s
+    %s
+    %s
+  }
+""" % (data_and_flags_str_part1b,
+       misc1,
+       data_and_flags_str_part2b,
+       misc2,
        miller.generate_r_free_params_str)
 
 xray_data_str = """\
@@ -167,6 +213,15 @@ xray_data
   %s
 }
 """%data_and_flags_str
+
+xray_data_str_no_filenames = """\
+xray_data
+  .help=Scope of X-ray data and free-R flags
+  .style = scrolled auto_align
+{
+  %s
+}
+"""%data_and_flags_str_no_filenames
 
 neutron_data_str = """\
 neutron_data
@@ -181,6 +236,20 @@ neutron_data
 }
 
 """%data_and_flags_str
+
+neutron_data_str_no_filenames = """\
+neutron_data
+  .help=Scope of neutron data and neutron free-R flags
+  .style = scrolled auto_align
+{
+  ignore_xn_free_r_mismatch = False
+    .type = bool
+    .expert_level=2
+    .short_caption = Ignore Xray/neutron R-free flags set mismatch
+  %s
+}
+
+"""%data_and_flags_str_no_filenames
 
 def data_and_flags_master_params(master_scope_name=None):
   if(master_scope_name is not None):
@@ -215,10 +284,12 @@ class run(object):
                working_point_group = None,
                remark_r_free_flags_md5_hexdigest = None,
                extract_r_free_flags = True,
+               extract_experimental_phases = True,
                keep_going = False,
                prefer_anomalous = None,
                force_non_anomalous = False,
                allow_mismatch_flags = False,
+               free_r_flags_scope = 'miller_array.labels.name',
                ):
     adopt_init_args(self, locals())
     # Buffers for error and log messages.
@@ -262,9 +333,10 @@ class run(object):
       self.f_obs        = self.f_obs.set_info(f_obs_info)
       self.r_free_flags = self.r_free_flags.set_info(flags_info)
     # extract phases
-    self.experimental_phases = self._determine_experimental_phases(
-      parameters      = experimental_phases_params,
-      parameter_scope = "")
+    if extract_experimental_phases:
+      self.experimental_phases = self._determine_experimental_phases(
+        parameters      = experimental_phases_params,
+        parameter_scope = 'miller_array.labels.name')
     # Fill in log
     self._show_summary()
 
@@ -315,6 +387,7 @@ class run(object):
       f_obs                      = self.f_obs,
       i_obs                      = i_obs,
       r_free_flags               = self.r_free_flags,
+      test_flag_value            = self.test_flag_value,
       experimental_phases        = self.experimental_phases,
       r_free_flags_md5_hexdigest = self.r_free_flags_md5_hexdigest,
       err                        = self.err,
@@ -381,8 +454,10 @@ class run(object):
           file_name        = file_name,
           labels           = labels,
           raise_no_array   = False,
+          parameter_name   = "",
           ignore_all_zeros = ignore_all_zeros,
           parameter_scope  = parameter_scope)
+
       if(experimental_phases is None): return None
     except reflection_file_utils.Sorry_No_array_of_the_required_type:
       experimental_phases = None
@@ -421,7 +496,8 @@ class run(object):
       file_name        = self.parameters.file_name,
       labels           = self.parameters.labels,
       ignore_all_zeros = self.parameters.ignore_all_zeros,
-      parameter_scope  = "",
+      parameter_name   = "",
+      parameter_scope  = "miller_array.labels.name",
       prefer_anomalous = self.prefer_anomalous)
     self.parameters.file_name = data.info().source
     self.parameters.labels    = [data.info().label_string()]
@@ -446,11 +522,12 @@ class run(object):
             label                    = params.label,
             test_flag_value          = params.test_flag_value,
             disable_suitability_test = params.disable_suitability_test,
-            parameter_scope          = "")
+            parameter_scope          = self.free_r_flags_scope)
       except reflection_file_utils.Sorry_No_array_of_the_required_type as e:
         if(self.parameters.r_free_flags.generate is not None):
           if(not self.keep_going):
-            self.err.append(explain_how_to_generate_array_of_r_free_flags())
+            self.err.append(explain_how_to_generate_array_of_r_free_flags(
+              scope = "xray_data.r_free_flags.generate"))
             self.err.append("Please try again.")
           return None
         r_free_flags, test_flag_value = None, None

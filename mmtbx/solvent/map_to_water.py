@@ -214,10 +214,6 @@ class run(object):
     self.params     = params
     self.ma         = msg_accumulator(log = self.log)
     self.total_time = 0
-    #
-    if(self.params.scattering_table=="electron"):
-      self.mmm.model().neutralize_scatterers()
-    #
     if(not self.params.keep_input_water):
       self._call(self._remove_input_water, "Removing water in input model")
     if("per_chain" in self.params.mode):
@@ -360,7 +356,8 @@ class run_one(object):
     if(self.sphericity_filter):
       self._call(self._filter_by_sphericity, "Filter peaks by sphericity")
       self._call(self._filter_by_distance  , "Filter peaks by distance")
-    if(self.cc_mask_filter):
+    if(self.cc_mask_filter and
+       self.model.solvent_selection().iselection().size()>0):
       self._call(self._refine_water_adp     , "Refine ADP")
       self._call(self._filter_by_map_model_cc, "Filter peaks by CC_mask")
       self._call(self._filter_by_distance  , "Filter peaks by distance")
@@ -505,8 +502,8 @@ class run_one(object):
       "  distance (A), min: %4.2f max: %4.2f"%(self.dist_min, self.dist_max))
     self.ma.add("  start: %d"%self.xrs_water.scatterers().size())
     sel = mmtbx.utils.filter_water(
-      sites_frac_interaction = self.sites_frac_interaction,
-      sites_frac_other       = self.model.get_sites_frac().select(~self.interaction_selection),
+      interaction_selection  = self.interaction_selection,
+      sites_frac_other       = self.model.get_sites_frac(),
       sites_frac_water       = self.xrs_water.sites_frac(),
       dist_min               = self.dist_min,
       dist_max               = self.dist_max,
@@ -627,7 +624,6 @@ class run_one(object):
       chain_id               = "S",
       refine_adp             = "isotropic")
     m_w = m.select( m.selection(string="water") )
-
     self.ma.add("  B (min/max/mean) start: %8.3f %8.3f %8.3f"%
       m_w.get_b_iso().min_max_mean().as_tuple())
     m_w.setup_scattering_dictionaries(scattering_table = self.scattering_table)
@@ -664,6 +660,7 @@ class run_one(object):
     #
     self.model.add_solvent(
       solvent_xray_structure = self.xrs_water,
+      conformer_indices = None,
       atom_name    = "O",
       residue_name = "HOH",
       chain_id     = solvent_chain,

@@ -48,6 +48,10 @@ class map_manager(map_reader, write_ccp4_map):
    shifted to place the origin at (0, 0, 0) and the original origin is
    recorded as self.origin_shift_grid_units.
 
+   NOTE: do not set self.origin_shift_grid_units directly; instead use
+   the method set_original_origin_and_gridding() or supply the value when
+   initializing the map_manager.
+
    You can also create a map_manager with a map_data object (3D flex.double()
    array) along with the meta-data below.
 
@@ -221,6 +225,15 @@ class map_manager(map_reader, write_ccp4_map):
         scattering_table (electron n_gaussian wk1995 it1992 neutron)
         resolution (nominal resolution of map)
 
+     Note on external origin: If input map had ORIGIN specified,
+       so that the value of self.external_origin is not (0,0,0) and not None,
+       and apply_external_origin_if_present is set, and shift_origin() is
+       called, then:
+       determine if self.external_origin is on a grid point and if so, convert
+        and use negative of it as origin .
+       NOTE: apply_external_origin_if_present will be ignored if
+       origin_shift_grid_units is also set and is not (0,0,0).
+
       NOTE on "crystal_symmetry" objects
       There are two objects that are "crystal_symmetry" objects:
       A.  unit_cell_crystal_symmetry():  This is the symmetry of the
@@ -251,6 +264,8 @@ class map_manager(map_reader, write_ccp4_map):
     if origin_shift_grid_units is not None:
       origin_shift_grid_units = tuple(origin_shift_grid_units)
       assert len(origin_shift_grid_units) ==3
+    else:
+      origin_shift_grid_units = (0, 0, 0)
 
     # Initialize log filestream
     self.set_log(log)
@@ -270,6 +285,9 @@ class map_manager(map_reader, write_ccp4_map):
 
     # Initialize that this is not a dummy map_manager
     self._is_dummy_map_manager = False
+
+    # Initialize that there is no output_external_origin
+    self.output_external_origin = None
 
     # Initialize program_name, limitations, labels
     self.file_name = file_name # input file (source of this manager)
@@ -327,6 +345,7 @@ class map_manager(map_reader, write_ccp4_map):
       self.unit_cell_grid = unit_cell_grid
       self._unit_cell_crystal_symmetry = unit_cell_crystal_symmetry
       self._wrapping = wrapping
+      self.external_origin = (0, 0, 0)
 
       # Calculate values for self._crystal_symmetry
       # Must always run this method after changing
@@ -334,8 +353,6 @@ class map_manager(map_reader, write_ccp4_map):
       self.set_crystal_symmetry_of_partial_map()
 
       # Optional initialization information
-      if origin_shift_grid_units is None:
-        origin_shift_grid_units = (0, 0, 0)
       self.origin_shift_grid_units = origin_shift_grid_units
 
     # Initialization steps always done:
@@ -366,7 +383,7 @@ class map_manager(map_reader, write_ccp4_map):
 
   def __setstate__(self, pickle_dict):
     self.__dict__ = pickle_dict
-    if self.log is None:
+    if not hasattr(self, 'log') or self.log is None:
       self.log = sys.stdout
 
   def __repr__(self):
@@ -414,12 +431,17 @@ class map_manager(map_reader, write_ccp4_map):
     '''
       Specify the dimensions and space group of unit cell.  This also changes
       the crystal_symmetry of the part that is present and the grid spacing.
+      Also resets crystal_symmetry of ncs object
 
       Purpose is to redefine the dimensions of the map without changing values
       of the map.  Normally used to correct the dimensions of a map
       where something was defined incorrectly.
 
-      Does not change self.unit_cell_grid
+      Does not change self.unit_cell_grid or self.origin_shift_grid_units
+
+      Does change the result of self.shift_cart(), which is based on
+        self.origin_shift_grid_units and self.unit_cell_grid
+        and self.crystal_symmetry
 
        Fundamental parameters set:
         self._unit_cell_crystal_symmetry: dimensions of full unit cell
@@ -432,6 +454,14 @@ class map_manager(map_reader, write_ccp4_map):
 
     # Always follow a set of _unit_cell_crystal_symmetry with this:
     self.set_crystal_symmetry_of_partial_map()
+
+    # Now apply crystal symmetry and new shift cart to ncs object if any
+    if self._ncs_object:
+      self._ncs_object = self.shift_ncs_object_to_match_map_and_return_new_ncs_object(self._ncs_object)
+
+  def set_output_external_origin(self, value):
+    assert isinstance(value, tuple) or isinstance(value,list)
+    self.output_external_origin = tuple(value)
 
   def set_original_origin_and_gridding(self,
       original_origin = None,
@@ -539,10 +569,13 @@ class map_manager(map_reader, write_ccp4_map):
     else:
       return False
 
-  def shift_origin(self, desired_origin = (0, 0, 0)):
+  def shift_origin(self, desired_origin = (0, 0, 0),
+     apply_external_origin_if_present = True,):
+
     '''
     Shift the origin of the map to desired_origin
-        (normally desired_origin = (0, 0, 0) and update origin_shift_grid_units
+      (normally desired_origin is (0, 0, 0), so just update
+      origin_shift_grid_units
 
     Origin is the value of self.map_data().origin()
     origin_shift_grid_units is the shift to apply to self.map_data() to
@@ -563,16 +596,26 @@ class map_manager(map_reader, write_ccp4_map):
 
     the new origin of map_data will be (d, e, f)
 
-    '''
+     Note on external origin: If input map had ORIGIN specified,
+       so that the value of self.external_origin is not (0,0,0) and not None,
+       and apply_external_origin_if_present is set, then:
+       determine if self.external_origin is on a grid point and if so, convert
+        and use negative of it as origin. Then set self.external_origin to zero.
+       Does not apply if origin is already not (0,0,0).
 
+    '''
     if(self.map_data() is None): return
 
     # Figure out what the shifts are (in grid units)
-    shift_info = self._get_shift_info(desired_origin = desired_origin)
+    shift_info = self._get_shift_info(desired_origin = desired_origin,
+      apply_external_origin_if_present = apply_external_origin_if_present)
 
     # Update the value of origin_shift_grid_units
     #  This is position of the origin of the new map in the full unit cell grid
     self.origin_shift_grid_units = shift_info.new_origin_shift_grid_units
+
+    # Set external_origin to zero as it has now been used
+    self.external_origin = (0, 0, 0)
 
     # Shift map_data if necessary
     if shift_info.shift_to_apply !=  (0, 0, 0):
@@ -597,7 +640,8 @@ class map_manager(map_reader, write_ccp4_map):
       self._ncs_object=self._ncs_object.coordinate_offset(
         shift_info.shift_to_apply_cart)
 
-  def _get_shift_info(self, desired_origin = None):
+  def _get_shift_info(self, desired_origin = None,
+    apply_external_origin_if_present = True):
     '''
       Utility to calculate the shift necessary (grid units)
       map to place the origin of the current map
@@ -614,6 +658,34 @@ class map_manager(map_reader, write_ccp4_map):
 
     # Current origin and shift to apply
     current_origin = self.map_data().origin()
+
+    self._warning_message = ""
+    if apply_external_origin_if_present and \
+         tuple(self.external_origin) != (0,0,0): # check for external origin
+      if self.external_origin_is_compatible_with_gridding():
+         external_origin_as_grid_units = self.external_origin_as_grid_units()
+      else:
+        external_origin_as_grid_units = (0,0,0)
+        self._warning_message="External origin is not on a grid point" +\
+         "...ignoring external origin" +\
+         "\n***Please contact the Phenix "+\
+          "developers if you need Phenix to use this external_origin***\n"
+    else:
+      external_origin_as_grid_units = (0,0,0)
+
+    if self.external_origin_as_grid_units and \
+        (external_origin_as_grid_units != (0,0,0)):
+      if current_origin and \
+          (current_origin != (0,0,0)):
+        self._warning_message="Map has external origin as well as existing " +\
+         "origin shift...ignoring external origin" +\
+         "\n***Please contact the Phenix "+\
+          "developers if you need Phenix to use this external_origin***\n"
+      else:  # take it
+        self._warning_message="Map has external origin " +\
+         "...using external origin as origin shift after "+\
+         "conversion to grid units"
+        current_origin = external_origin_as_grid_units
 
     # Original location of first element of map
     map_corner_original_location = add_tuples_int(current_origin,
@@ -644,6 +716,38 @@ class map_manager(map_reader, write_ccp4_map):
        )
     return shift_info
 
+  def external_origin_is_compatible_with_gridding(self):
+    value = self.external_origin_as_grid_units()
+    if value is not None:
+      return True
+    else:
+      return False
+
+  def external_origin_as_grid_units(self, as_inverse = False):
+    unit_cell = self.unit_cell_crystal_symmetry().unit_cell()
+    unit_cell_grid = self.unit_cell_grid
+    spacings = [(a/n) for a,n in zip(unit_cell.parameters()[:3],
+        unit_cell_grid)]
+    if self.external_origin:
+      external_origin = flex.double(self.external_origin)
+    else:
+      external_origin = flex.double((0.,0.,0.))
+    if flex.sum(flex.abs(external_origin)) > 0:
+      import math
+      origin_shift = tuple([round(o/s) for o,s in zip(external_origin, spacings)])
+      origin_check = [(g*s) for g,s in zip(origin_shift, spacings)]
+      origin_distance_to_grid = math.sqrt(flex.sum(
+            flex.pow2(flex.double(external_origin)-flex.double(origin_check))))
+      if origin_distance_to_grid > 0.001:
+        return None # not compatible with grid
+      else:
+        if as_inverse:
+          return tuple([-a for a in origin_shift])
+        else: # as-is:
+          return origin_shift
+    else: # no shift
+      return (0,0,0)
+
   def shift_origin_to_match_original(self):
     '''
      Shift origin by self.origin_shift_grid_units to place origin in its
@@ -664,7 +768,7 @@ class map_manager(map_reader, write_ccp4_map):
       return # Nothing to do
     assert isinstance(ncs_object, mmtbx.ncs.ncs.ncs)
     if (not self.is_compatible_ncs_object(ncs_object)):
-      self.shift_ncs_object_to_match_map(ncs_object)
+      ncs_object = self.shift_ncs_object_to_match_map_and_return_new_ncs_object(ncs_object)
     self._ncs_object = deepcopy(ncs_object)
 
   def set_program_name(self, program_name = None):
@@ -722,6 +826,9 @@ class map_manager(map_reader, write_ccp4_map):
       Output labels are generated from existing self.labels,
       self.program_name, and self.limitations
 
+      If self.output_external_origin is specified, write that value to file
+
+
     '''
 
     # Make sure we have map_data
@@ -762,8 +869,11 @@ class map_manager(map_reader, write_ccp4_map):
         crystal_symmetry = crystal_symmetry, # unit cell and space group
         map_data    = map_data,
         unit_cell_grid = unit_cell_grid,  # optional gridding of full unit cell
-        origin_shift_grid_units = origin_shift_grid_units, # optional origin shift
+        origin_shift_grid_units = origin_shift_grid_units, # origin shift
         labels      = labels,
+        external_origin = self.output_external_origin,
+
+
         out = f)
       self._print(f.getvalue())
     else: # map_data has not been shifted to (0, 0, 0).  Shift it and then write
@@ -930,6 +1040,43 @@ class map_manager(map_reader, write_ccp4_map):
     from iotbx.map_model_manager import map_model_manager
     return map_model_manager(map_manager = self)
 
+  def invert_hand(self):
+    ''' Invert the hand of this map by swapping the order of all sections
+        in Z'''
+
+    map_data = self.map_data()
+    # Swap all sections in Z, one pair at a time, in place
+    nx,ny,nz = [ne - ns  for ne,ns in zip(map_data.all(), map_data.origin())]
+    assert nx*ny*nz == map_data.size()
+    nxstart,nystart,nzstart= map_data.origin()
+    for k in range (int(nz//2)):
+      i = k + nzstart
+      ii = nzstart + nz -i -1  # sections to swap are i, ii
+      data_i = maptbx.copy(map_data,
+         (nxstart,nystart,i),
+         (nxstart+nx-1, nystart+ny-1,i)).deep_copy()
+      assert data_i.size() == nx * ny
+      data_ii = maptbx.copy(map_data,
+         (nxstart,nystart,ii),
+         (nxstart+nx-1, nystart+ny-1,ii)).deep_copy()
+      assert data_i.size() == nx * ny
+      assert data_ii.size() == data_i.size()
+      acc = flex.grid(data_i.all())
+      data_i.reshape(acc)
+      data_ii.reshape(acc)
+
+      maptbx.set_box(
+        map_data_from = data_ii,
+        map_data_to   = map_data,
+        start         = (nxstart,nystart,i),
+        end           = (nxstart+nx, nystart+ny, i+1))
+
+      maptbx.set_box(
+        map_data_from = data_i,
+        map_data_to   = map_data,
+        start         = (nxstart,nystart,ii),
+        end           = (nxstart+nx, nystart+ny, ii+1))
+
   def as_full_size_map(self):
     '''
       Create a full-size map with the current map inside it, padded by zero
@@ -979,7 +1126,8 @@ class map_manager(map_reader, write_ccp4_map):
        lower_bounds = lower_bounds,
        upper_bounds = upper_bounds,
        log = self.log)
-    box.map_manager().set_original_origin_and_gridding(original_origin = (0, 0, 0))
+    box.map_manager().set_original_origin_and_gridding(
+       original_origin = (0, 0, 0))
 
     box.map_manager().add_label(
        "Restored full size from box %s - %s, pad with zero" %(
@@ -1282,18 +1430,38 @@ class map_manager(map_reader, write_ccp4_map):
 
     # Deepcopy this object and then set map_data and origin_shift_grid_units
 
-    mm = deepcopy(self)
 
+    mm = map_manager(
+     file_name = None,
+     map_data = map_data,
+     unit_cell_grid = self.unit_cell_grid,
+     unit_cell_crystal_symmetry = self._unit_cell_crystal_symmetry,
+     origin_shift_grid_units = origin_shift_grid_units,
+     ncs_object = self._ncs_object.deep_copy() if self._ncs_object else None,
+     wrapping = False,
+     experiment_type = self._experiment_type,
+     scattering_table = self._scattering_table,
+     resolution = self._resolution,
+     log = self.log,)
+
+    mm._is_mask = self._is_mask
+    mm._is_dummy_map_manager = self._is_dummy_map_manager
     # Set things that are not necessarily the same as in self:
-    mm.log=self.log
-    mm.origin_shift_grid_units = origin_shift_grid_units  # specified above
-    mm.data = map_data  # using self.data or a deepcopy (specified above)
     mm._created_mask = created_mask  # using self._created_mask or a
-                                     #deepcopy (specified above)
-    if wrapping is not None:
-      mm.set_wrapping(wrapping)
+    mm.file_name = self.file_name
+    mm.program_name = self.program_name
+    mm.limitations = self.limitations
+    mm.labels = self.labels
 
-    if not mm.is_full_size():
+
+    if wrapping is not None:
+      desired_wrapping = wrapping
+    else:
+      desired_wrapping = self._wrapping
+
+    if mm.is_full_size():
+      mm.set_wrapping(desired_wrapping)
+    else: #
       mm.set_wrapping(False)
 
     # Set up _crystal_symmetry for the new object
@@ -1598,9 +1766,10 @@ class map_manager(map_reader, write_ccp4_map):
     return tuple(
        [-x for x in self.grid_units_to_cart(self.origin_shift_grid_units)])
 
-  def shift_ncs_object_to_match_map(self,ncs_object):
+  def shift_ncs_object_to_match_map_and_return_new_ncs_object(self,ncs_object):
     '''
-      Move the ncs_object to match this map
+      Move the ncs_object to match this map. Also sets ncs_object shift_cart
+      Returns new copy of ncs_obect and does not affect the original
 
       Note difference from set_ncs_object_shift_cart_to_match_map which
         sets the shift_cart but does not move the object
@@ -1612,10 +1781,11 @@ class map_manager(map_reader, write_ccp4_map):
 
     else:
       ncs_object = ncs_object.coordinate_offset(self.shift_cart())
+    return ncs_object
 
   def shift_model_to_match_map(self, model):
     '''
-      Move the model to match this map
+      Move the model to match this map.
       Note difference from set_model_symmetries_and_shift_cart_to_match_map
        which sets model symmetry and shift_cart but does not move the model
     '''
@@ -1631,10 +1801,15 @@ class map_manager(map_reader, write_ccp4_map):
       Set the ncs_object shift_cart to match map
 
       Overwrites any information in ncs_object on shift_cart
-      Modifies ncs_object in place
+      Modifies ncs_object in place. Does not return anything
 
       Do not use this to try to shift the ncs object. That is done in
-      the ncs object itself with ncs_object.coordinate_offset(shift_cart)
+      the ncs object itself with ncs_object.coordinate_offset(shift_cart),
+      which returns a new ncs object
+
+      You can use ncs_object =
+       self.shift_ncs_object_to_match_map_and_return_new_ncs_object(ncs_object)
+         to shift the ncs object and set its shift_cart and get a new copy.
     '''
 
     # Set shift_cart (shift since readin) to match shift_cart for
@@ -2118,7 +2293,7 @@ class map_manager(map_reader, write_ccp4_map):
 
     assert n_real or target_grid_spacing
 
-    if self.origin_shift_grid_units != (0,0,0):
+    if tuple(self.origin_shift_grid_units) != (0,0,0):
       return self._resample_on_different_grid_and_rebox(n_real = n_real,
        target_grid_spacing = target_grid_spacing)
 
@@ -2657,11 +2832,26 @@ def get_sites_cart_from_index(
       sites_frac.append(site_frac)
     sites_cart = crystal_symmetry.unit_cell().orthogonalize(sites_frac)
     return sites_cart
-def subtract_tuples_int(t1, t2):
-  return tuple(flex.int(t1)-flex.int(t2))
+
+def _round_tuple_int(t):
+  new_t = []
+  for x in t:
+    new_t.append(int(round(x)))
+  return new_t
 
 def add_tuples_int(t1, t2):
-  return tuple(flex.int(t1)+flex.int(t2))
+  try:
+    return tuple(flex.int(t1)+flex.int(t2))
+  except Exception as e: # not integers
+    return tuple(
+       flex.int(_round_tuple_int(t1)) + flex.int(_round_tuple_int(t2)))
+
+def subtract_tuples_int(t1, t2):
+  try:
+    return tuple(flex.int(t1)-flex.int(t2))
+  except Exception as e: # not integers
+    return tuple(
+       flex.int(_round_tuple_int(t1)) - flex.int(_round_tuple_int(t2)))
 
 def remove_site_with_most_neighbors(sites_cart):
   useful_norms_list = []

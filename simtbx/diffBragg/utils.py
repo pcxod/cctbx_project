@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, print_function
 import os
+import socket
 import sys
 import re
 from io import StringIO
@@ -24,13 +25,50 @@ from dxtbx.model.experiment_list import ExperimentListFactory
 import libtbx
 from libtbx.phil import parse
 from dials.array_family import flex as dials_flex
-from iotbx import file_reader
-import mmtbx.command_line.fmodel
+import mmtbx.programs.fmodel
 import mmtbx.utils
 from cctbx.eltbx import henke
+from simtbx.diffBragg import psf
+from dials.algorithms.shoebox import MaskCode
+from xfel.merging.application.utils.memory_usage import get_memory_usage
+
 
 import logging
 MAIN_LOGGER = logging.getLogger("diffBragg.main")
+
+
+def strong_spot_mask(refl_tbl, detector, as_composite=True):
+    """
+    Form an image of the strong spot masks (True indicates strong spot)
+    :param refl_tbl: dials reflection table with shoeboxes
+    :param detector: dxtbx detecto model
+    :param as_composite: return a single mask same shape as detector, else return shoebox masks as a lst
+    """
+    Nrefl = len( refl_tbl)
+    masks = [ refl_tbl[i]['shoebox'].mask.as_numpy_array()
+              for i in range(Nrefl)]
+    pids = refl_tbl['panel']
+    nfast, nslow = detector[0].get_image_size()
+    npan = len(detector)
+    code = MaskCode.Foreground.real
+
+    x1, x2, y1, y2, z1, z2 = zip(*[refl_tbl[i]['shoebox'].bbox
+                                   for i in range(Nrefl)])
+    if not as_composite:
+        spot_masks = []
+    spot_mask = np.zeros((npan, nslow, nfast), bool)
+    for i_ref, (i1, i2, j1, j2, M) in enumerate(zip(x1, x2, y1, y2, masks)):
+
+        slcX = slice(i1, i2, 1)
+        slcY = slice(j1, j2, 1)
+        spot_mask[pids[i_ref],slcY, slcX] = M & code == code
+        if not as_composite:
+            spot_masks.append(spot_mask.copy())
+            spot_mask *= False
+    if as_composite:
+        return spot_mask
+    else:
+        return spot_masks
 
 
 def label_background_pixels(roi_img, thresh=3.5, iterations=1, only_high=True):
@@ -46,14 +84,22 @@ def label_background_pixels(roi_img, thresh=3.5, iterations=1, only_high=True):
     while iterations > 0:
         if background_pixels is None:
             outliers = is_outlier(img1, thresh)
-            m = np.median(img1[~outliers])
+            inlier_vals = img1[~outliers]
+            if inlier_vals.size:
+                m = np.median(inlier_vals)
+            else:
+                m = np.nan
             if only_high:
                 outliers = np.logical_and(outliers, img1 > m)
             background_pixels = ~outliers
         else:
             where_bg = np.where(background_pixels)[0]
             outliers = is_outlier(img1[background_pixels], thresh)
-            m = np.median(img1[background_pixels][~outliers])
+            inlier_vals = img1[background_pixels][~outliers]
+            if inlier_vals.size:
+                m = np.median(inlier_vals)
+            else:
+                m = np.nan
             if only_high:
                 outliers = np.logical_and(outliers, img1[background_pixels] > m)
             background_pixels[where_bg[outliers]] = False
@@ -66,10 +112,18 @@ def is_outlier(points, thresh=3.5):
     """http://stackoverflow.com/a/22357811/2077270"""
     if len(points.shape) == 1:
         points = points[:, None]
-    median = np.median(points, axis=0)
+    if points.size:
+        median = np.median(points, axis=0)
+    else:
+        median = np.nan
     diff = np.sum((points - median) ** 2, axis=-1)
     diff = np.sqrt(diff)
-    med_abs_deviation = np.median(diff)
+    if diff.size:
+        med_abs_deviation = np.median(diff)
+    else:
+        med_abs_deviation = np.nan
+    if med_abs_deviation == 0:
+        return np.zeros(points.shape[0], bool)
 
     modified_z_score = 0.6745 * diff / med_abs_deviation
 
@@ -147,6 +201,8 @@ def get_diffBragg_instance():
     braggC.miller_array = Fhkl
     idx = braggC.miller_array.indices()
     amps = braggC.miller_array.data()
+    D.Bmatrix = crystal.get_B()
+    D.Umatrix = crystal.get_U()
     D.Fhkl_tuple = idx, amps, None
     D.Bmatrix = crystal.get_B()
     D.Umatrix = crystal.get_U()
@@ -245,8 +301,8 @@ ATOM      5  O   HOH A   5      46.896  37.790  41.629  1.00 20.00           O
 ATOM      6 SED  MSE A   6       1.000   2.000   3.000  1.00 20.00          SE
 END
 """
-    from iotbx import pdb
-    pdb_inp = pdb.input(source_info=None, lines=pdb_lines)
+    import iotbx.pdb
+    pdb_inp = iotbx.pdb.input(source_info=None, lines=pdb_lines)
     xray_structure = pdb_inp.xray_structure_simple()
     if ucell is not None:
         assert symbol is not None
@@ -413,14 +469,15 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
     selection_flags = []
     num_roi_negative_bg = 0
     num_roi_nan_bg = 0
-    background = np.ones(imgs.shape)*-1
+    background = np.full_like(imgs, -1, dtype=float)
     i_roi = 0
     while i_roi < len(rois):
         roi = rois[i_roi]
         i1, i2, j1, j2 = roi
         is_selected = True
+        refl_bbox_str = "Reflection %d bounded by x1=%d,x2=%d,y1=%d,y2=%d" % (i_roi, i1,i2,j1,j2)
         if is_on_edge[i_roi] and reject_edge_reflections:
-            MAIN_LOGGER.debug("Reflection %d bounded by x1=%d,x2=%d,y1=%d,y2=%d is on edge" % (i_roi, i1,i1,j2,j2))
+            MAIN_LOGGER.debug("Reflection %d is on edge" % i_roi)
             is_selected = False
         pid = refls[i_roi]['panel']
 
@@ -433,6 +490,14 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
             if num_hotpix > min_trusted_pix_per_roi:
                 MAIN_LOGGER.debug("reflection %d has too many (%d) hot pixels (%d allowed)!" % (i_roi, num_hotpix, min_trusted_pix_per_roi))
                 is_selected = False
+
+        # Before padding and fitting, test for overlaps and shrink if needed
+        is_overlapping = not np.all(background[pid, j1:j2, i1:i2] == -1)
+        if not allow_overlaps and is_overlapping:
+            MAIN_LOGGER.debug("region of interest already accounted for roi size= %d %d" % (i2-i1, j2-j1))
+            rois[i_roi] = (i1 + 1, i2, j1 + 1, j2) if (i1 + i2) % 2 \
+                else (i1, i2 - 1, j1, j2 - 1)  # shrink alternately from corners
+            continue
 
         dimY, dimX = imgs[pid].shape
         j1_nopad = j1
@@ -447,6 +512,10 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
 
         shoebox = imgs[pid, j1:j2, i1:i2]
 
+        if shoebox.size < 4:
+            MAIN_LOGGER.debug("reflection %d has negative background" % i_roi)
+            is_selected = False
+
         if not isinstance(sigma_rdout, float) and not isinstance(sigma_rdout, int):
             shoebox_sigma_readout = sigma_rdout[pid, j1:j2, i1:i2]
         else:
@@ -455,19 +524,27 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         if background_mask is not None:
             is_background = background_mask[pid, j1:j2, i1:i2]
         else:
-            is_background = label_background_pixels(shoebox,thresh=bg_thresh, iterations=2, only_high=only_high)
+            if shoebox.shape== (0,0):
+                is_background = shoebox.copy().astype(bool)
+            else:
+                is_background = label_background_pixels(shoebox,thresh=bg_thresh, iterations=2, only_high=only_high)
 
         Ycoords, Xcoords = np.indices((j2-j1, i2-i1))
 
         if use_robust_estimation:
             bg_pixels = shoebox[is_background]
-            bg_signal = np.median(bg_pixels)
+            if not bg_pixels.size:
+                bg_signal = np.nan
+            else:
+                bg_signal = np.median(bg_pixels)
             if bg_signal < 0:
                 num_roi_negative_bg += 1
                 if set_negative_bg_to_zero:
                     bg_signal = 0
                 elif skip_roi_with_negative_bg:
                     MAIN_LOGGER.debug("reflection %d has negative background" % i_roi)
+                    is_selected = False
+                elif np.isnan(bg_signal):
                     is_selected = False
             tilt_a, tilt_b, tilt_c = 0, 0, bg_signal
             covariance = None
@@ -484,6 +561,7 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
                 MAIN_LOGGER.debug("tilt fit failed for reflection %d, probably too few pixels" % i_roi)
                 tilt_plane = np.zeros_like(Xcoords)
             else:
+                #MAIN_LOGGER.debug("successfully fit tilt plane")
                 (tilt_a, tilt_b, tilt_c), covariance = fit_results
                 tilt_plane = tilt_a * Xcoords + tilt_b * Ycoords + tilt_c
                 if np.any(np.isnan(tilt_plane)) and is_selected:
@@ -494,13 +572,6 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
                     num_roi_negative_bg += 1
                     MAIN_LOGGER.debug("reflection %d has tilt plane that dips below 0" % i_roi)
                     is_selected = False
-
-        is_overlapping = not np.all(background[pid, j1_nopad:j2_nopad, i1_nopad:i2_nopad] == -1)
-        if not allow_overlaps and is_overlapping:
-            # NOTE : move away from this option, it potentially moves the pixel centroid outside of the ROI (in very rare instances)
-            MAIN_LOGGER.debug("region of interest already accounted for roi size= %d %d" % (i2_nopad-i1_nopad, j2_nopad-j1_nopad))
-            rois[i_roi] = i1_nopad+1,i2_nopad,j1_nopad+1,j2_nopad
-            continue
 
         # unpadded ROI dimension
         roi_dimY = j2_nopad-j1_nopad
@@ -519,10 +590,13 @@ def get_roi_background_and_selection_flags(refls, imgs, shoebox_sz=10, reject_ed
         kept_rois.append(roi)
         panel_ids.append(pid)
         selection_flags.append(is_selected)
+        if not is_selected:
+            MAIN_LOGGER.debug("--> %s was not selected for above reasons" % refl_bbox_str)
         i_roi += 1
 
     MAIN_LOGGER.debug("Number of skipped ROI with negative BGs: %d / %d" % (num_roi_negative_bg, len(rois)))
     MAIN_LOGGER.debug("Number of skipped ROI with NAN in BGs: %d / %d" % (num_roi_nan_bg, len(rois)))
+    MAIN_LOGGER.info("Number of ROIS that will proceed to refinement: %d/%d" % (np.sum(selection_flags), len(rois)))
     if ret_cov:
         return kept_rois, panel_ids, tilt_abc, selection_flags, background, all_cov
     else:
@@ -598,7 +672,7 @@ def fit_plane_equation_to_background_pixels(shoebox_img, fit_sel, sigma_rdout=3,
     try:
         AWA_inv = np.linalg.inv(AWA)
     except np.linalg.LinAlgError:
-        MAIN_LOGGER.warning("WARNING: Fit did not work.. investigate reflection, number of pixels used in fit=%d" % len(fast))
+        MAIN_LOGGER.debug("WARNING: Fit did not work.. investigate reflection, number of pixels used in fit=%d" % len(fast))
         return None
     AtW = np.dot(A.T, W)
     t1, t2, t3 = np.dot(np.dot(AWA_inv, AtW), rho_bg)
@@ -607,7 +681,8 @@ def fit_plane_equation_to_background_pixels(shoebox_img, fit_sel, sigma_rdout=3,
     # vector of residuals
     r = rho_bg - np.dot(A, (t1, t2, t3))
     Nbg = len(rho_bg)
-    r_fact = np.dot(r.T, np.dot(W, r)) / (Nbg - 3)  # 3 parameters fit
+    with np.errstate(divide='ignore', invalid='ignore'):
+        r_fact = np.dot(r.T, np.dot(W, r)) / (Nbg - 3)  # 3 parameters fit
     var_covar = AWA_inv * r_fact  # TODO: check for correlations in the off diagonal elems
 
     return (t1, t2, t3), var_covar
@@ -661,6 +736,7 @@ def image_data_from_expt(expt, as_double=True):
         raise ValueError("imageset should have only 1 shot. This expt has imageset with %d shots" % len(iset))
     try:
         flex_data = iset.get_raw_data(0)
+
     except Exception as err:
         assert str(type(err)) == "<class 'Boost.Python.ArgumentError'>", "something weird going on with imageset data"
         flex_data = iset.get_raw_data()
@@ -685,6 +761,41 @@ def simulator_from_expt(expt, oversample=0, device_id=0, init_scale=1, total_flu
     #return simulator_from_expt_and_params(expt, params)
 
 
+def simulator_for_refinement(expt, params):
+    # TODO: choose a phil param and remove support for the other: crystal.anositropic_mosaicity, or init.eta_abc
+    MAIN_LOGGER.info(
+        "Setting initial mosaicity from params.init.eta_abc: %f %f %f" % tuple(params.init.eta_abc))
+    if params.simulator.crystal.has_isotropic_mosaicity:
+        params.simulator.crystal.anisotropic_mosaicity = None
+        params.simulator.crystal.mosaicity = params.init.eta_abc[0]
+    else:
+        params.simulator.crystal.anisotropic_mosaicity = params.init.eta_abc
+    MAIN_LOGGER.info("Number of mosaic domains from params: %d" % params.simulator.crystal.num_mosaicity_samples)
+
+    #  GET SIMULATOR #
+    SIM = simulator_from_expt_and_params(expt, params)
+
+    if SIM.D.mosaic_domains > 1:
+        MAIN_LOGGER.info("Will use mosaic models: %d domains" % SIM.D.mosaic_domains)
+    else:
+        MAIN_LOGGER.info("Will not use mosaic models, as simulator.crystal.num_mosaicity_samples=1")
+
+    if not params.fix.eta_abc:
+        assert SIM.D.mosaic_domains > 1
+
+    if not params.fix.diffuse_gamma or not params.fix.diffuse_sigma:
+        assert params.use_diffuse_models
+    SIM.D.use_diffuse = params.use_diffuse_models
+    SIM.D.gamma_miller_units = params.gamma_miller_units
+    SIM.isotropic_diffuse_gamma = params.isotropic.diffuse_gamma
+    SIM.isotropic_diffuse_sigma = params.isotropic.diffuse_sigma
+
+    SIM.D.no_Nabc_scale = params.no_Nabc_scale  # TODO check gradients for this setting
+    SIM.D.update_oversample_during_refinement = False
+
+    return SIM
+
+
 def simulator_from_expt_and_params(expt, params=None):
     """
     :param expt:  dxtbx experiment
@@ -703,17 +814,11 @@ def simulator_from_expt_and_params(expt, params=None):
     mosaicity = params.simulator.crystal.mosaicity
     num_mosaicity_samples = params.simulator.crystal.num_mosaicity_samples
 
-    mtz_name = params.simulator.structure_factors.mtz_name
-    mtz_column = params.simulator.structure_factors.mtz_column
     default_F = params.simulator.structure_factors.default_F
-    dmin = params.simulator.structure_factors.dmin
-    dmax = params.simulator.structure_factors.dmax
 
     spectra_file = params.simulator.spectrum.filename
     spectra_stride = params.simulator.spectrum.stride
     aniso_mos_spread = params.simulator.crystal.anisotropic_mosaicity
-
-    pdb_name = params.simulator.structure_factors.from_pdb.name
 
     if has_isotropic_ncells:
         if len(set(ncells_abc)) != 1 :
@@ -747,31 +852,9 @@ def simulator_from_expt_and_params(expt, params=None):
     crystal.anisotropic_mos_spread_deg = aniso_mos_spread
     crystal.n_mos_domains = num_mosaicity_samples
     crystal.mos_spread_deg = mosaicity
-    #crystal.mos_angles_per_axis = params.simulator.crystal.mos_angles_per_axis
-    #crystal.num_mos_axes = params.simulator.crystal.num_mos_axes
 
     # load the structure factors
-    if mtz_name is None:
-        if pdb_name is not None:
-            wavelength=None
-            if params.simulator.structure_factors.from_pdb.add_anom:
-                wavelength = expt.beam.get_wavelength()
-            miller_data = get_complex_fcalc_from_pdb(pdb_name,
-                dmin=params.simulator.structure_factors.dmin,
-                dmax=params.simulator.structure_factors.dmax,
-                wavelength=wavelength,
-                k_sol=params.simulator.structure_factors.from_pdb.k_sol,
-                b_sol=params.simulator.structure_factors.from_pdb.b_sol)
-            miller_data = miller_data.as_amplitude_array()
-
-        else:
-            miller_data = make_miller_array(
-                symbol=expt.crystal.get_space_group().info().type().lookup_symbol(),
-                unit_cell=expt.crystal.get_unit_cell(), d_min=dmin, d_max=dmax,
-                defaultF=default_F)
-    else:
-        miller_data = open_mtz(mtz_name, mtz_column)
-
+    miller_data = load_Fhkl_model_from_params_and_expt(params, expt)
     crystal.miller_array = miller_data
     if params.refiner.force_symbol is not None:
         crystal.symbol = params.refiner.force_symbol
@@ -793,7 +876,7 @@ def simulator_from_expt_and_params(expt, params=None):
 
     # create the diffbragg object, which is the D attribute of SIM
     SIM.panel_id = 0
-    SIM.instantiate_diffBragg(oversample=oversample, device_Id=device_id, default_F=default_F)
+    SIM.instantiate_diffBragg(oversample=oversample, device_Id=device_id, default_F=default_F, verbose=params.refiner.verbose)
     if init_scale is not None:
         #TODO phase this parameter out since its redundant?
         SIM.update_nanoBragg_instance("spot_scale", init_scale)
@@ -805,7 +888,39 @@ def simulator_from_expt_and_params(expt, params=None):
     MAIN_LOGGER.debug("Detector thicksteps = %d" % SIM.D.detector_thicksteps )
     MAIN_LOGGER.debug("Detector thick = %f mm" % SIM.D.detector_thick_mm )
     MAIN_LOGGER.debug("Detector atten len = %f mm" % SIM.D.detector_attenuation_length_mm )
+    if params.simulator.psf.use:
+        SIM.use_psf = True
+        SIM.psf_args = {'pixel_size': SIM.detector[0].get_pixel_size()[0]*1e3,
+                'fwhm': params.simulator.psf.fwhm,
+                'psf_radius': params.simulator.psf.radius}
+        fwhm_pix = SIM.psf_args["fwhm"] / SIM.psf_args["pixel_size"]
+        kern_size = SIM.psf_args["psf_radius"]*2 + 1
+        SIM.PSF = psf.makeMoffat_integPSF(fwhm_pix, kern_size, kern_size)
+
+    update_SIM_with_gonio(SIM, params)
+
     return SIM
+
+
+def update_SIM_with_gonio(SIM, params=None, delta_phi=None, num_phi_steps=5):
+    """
+
+    :param SIM: sim_data instance
+    :param params: diffBragg phil parameters instance
+    :param delta_phi: how much to rotate gonio during model
+    :param num_phi_steps: number of phi steps
+    :return:
+    """
+    if not hasattr(SIM, "D"):
+        raise AttributeError("Need to instantiate diffBragg first")
+    if params is not None:
+        delta_phi = params.simulator.gonio.delta_phi
+        num_phi_steps = params.simulator.gonio.phi_steps
+
+    if delta_phi is not None:
+        SIM.D.phi_deg = 0
+        SIM.D.osc_deg = delta_phi
+        SIM.D.phisteps = num_phi_steps
 
 
 def get_complex_fcalc_from_pdb(
@@ -815,13 +930,12 @@ def get_complex_fcalc_from_pdb(
         dmax=None,
         k_sol=0.435, b_sol=46, show_pdb_summary=False):
     """
-    produce a structure factor from PDB coords, see mmtbx/command_line/fmodel.py for formulation
+    produce a structure factor from PDB coords, see mmtbx/programs/fmodel.py for formulation
     k_sol, b_sol form the solvent component of the Fcalc: Fprotein + k_sol*exp(-b_sol*s^2/4) (I think)
     """
-
-    pdb_in = file_reader.any_file(pdb_file, force_type="pdb")
-    pdb_in.assert_file_type("pdb")
-    xray_structure = pdb_in.file_object.xray_structure_simple()
+    import iotbx.pdb
+    pdb_in = iotbx.pdb.input(pdb_file)
+    xray_structure = pdb_in.xray_structure_simple()
     if show_pdb_summary:
         xray_structure.show_summary()
     for sc in xray_structure.scatterers():
@@ -829,7 +943,7 @@ def get_complex_fcalc_from_pdb(
             expected_henke = henke.table(sc.element_symbol()).at_angstrom(wavelength)
             sc.fp = expected_henke.fp()
             sc.fdp = expected_henke.fdp()
-    phil2 = mmtbx.command_line.fmodel.fmodel_from_xray_structure_master_params
+    phil2 = mmtbx.programs.fmodel.master_phil
     params2 = phil2.extract()
     params2.high_resolution = dmin
     params2.low_resolution = dmax
@@ -871,7 +985,8 @@ def open_mtz(mtzfname, mtzlabel=None, verbose=False):
             break
 
     assert foundlabel, "MTZ Label not found... \npossible choices: %s" % (" ".join(possible_labels))
-    ma = ma.as_amplitude_array()
+    if not ma.is_xray_amplitude_array():
+        ma = ma.as_amplitude_array()
     return ma
 
 
@@ -1305,15 +1420,20 @@ def refls_to_hkl(refls, detector, beam, crystal,
         return np.vstack(HKL).T, np.vstack(HKLi).T
 
 
-def get_panels_fasts_slows(expt, pids, rois):
+def get_panels_fasts_slows(expt, pids, rois, img_sh=None):
     """
     :param expt: dxtbx experiment
     :param pids: panel ids
     :param rois: regions of interest
+    :param img_sh: 3-tuple Npan, Nslow, Nfast
     :return:
     """
-    npan = len(expt.detector)
-    nfast, nslow = expt.detector[0].get_image_size()
+    if expt is not None:
+        npan = len(expt.detector)
+        nfast, nslow = expt.detector[0].get_image_size()
+    else:
+        assert img_sh is not None
+        npan, nslow, nfast = img_sh
     MASK = np.zeros((npan, nslow, nfast), bool)
     ROI_ID = np.zeros((npan, nslow, nfast), 'uint16')
     #ROI_ID = NP_ONES((npan, nslow, nfast), 'uint16') * mx
@@ -1551,3 +1671,148 @@ def get_laue_group_number(sg_symbol=None):
                   'P6/mmm', 'Pm-3', 'Pm-3m']
     lgs = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
     return lgs[hm_symbols.index(laue_sym)]
+
+
+def track_fhkl(Modeler):
+    try:
+        from stream_redirect import Redirect
+    except ImportError:
+        print("Cannot use track_fhkl unless module stream_redirect is installed: pip install stream-redirect")
+        return
+    SIM = Modeler.SIM
+    SIM.D.track_Fhkl = True
+    npix = int( len(Modeler.pan_fast_slow)/ 3)
+    PFS = np.reshape(Modeler.pan_fast_slow, (npix, 3))
+    uroi = set(Modeler.roi_id)
+    all_good_count_stats = []
+    all_bad_count_stats = []
+    all_count_stats = {}
+    for ii, i_roi in enumerate(uroi):
+        output = Redirect(stdout=True)
+        i_roi_sel = Modeler.roi_id == i_roi
+        with output:
+            sel = np.logical_and(i_roi_sel, Modeler.all_trusted)
+            pfs_roi = PFS[sel]
+            pfs_roi = np.ascontiguousarray(pfs_roi.ravel())
+            pfs_roi = flex.size_t(pfs_roi)
+            SIM.D.add_diffBragg_spots(pfs_roi)
+        #i_fcell = Modeler.all_fcell_global_idx[i_roi_sel][0]
+        #shoebox_hkl = SIM.asu_from_i_fcell[i_fcell]
+        lines = output.stdout.split("\n")
+        count_stats = {}
+        for l in lines:
+            if l.startswith("Pixel"):
+                hkl = l.split()[5]
+                hkl = tuple(map(int, hkl.split(",")))
+                hkl = map_hkl_list([hkl], True, SIM.crystal.space_group_info.type().lookup_symbol())[0]
+                count = int(l.split()[8])
+                if hkl in count_stats:
+                    count_stats[hkl] += count
+                else:
+                    count_stats[hkl] = count
+        ntot = sum(count_stats.values())
+        #assert shoebox_hkl in count_stats
+        #print("Shoebox hkl", shoebox_hkl)
+        for hkl in count_stats:
+            frac = 0 if ntot ==0 else count_stats[hkl] / float(ntot)
+            h, k, l = hkl
+            print("\tstep hkl %d,%d,%d : frac=%.1f%%" % (h, k, l, frac * 100))
+            count_stats[hkl] = frac
+
+        all_count_stats[i_roi] = count_stats
+    return all_count_stats
+
+
+def load_Fhkl_model_from_params_and_expt(params, expt):
+    """
+
+    :param params:  diffBragg params instance (diffBragg/phil.py)
+    :param expt: dxtbx experiment with crystal
+    :return:
+    """
+    sf = params.simulator.structure_factors
+    if sf.mtz_name is None:
+        if sf.from_pdb.name is not None:
+            wavelength=None
+            if sf.from_pdb.add_anom:
+                wavelength = expt.beam.get_wavelength()
+            miller_data = get_complex_fcalc_from_pdb(sf.from_pdb.name,
+                dmin=params.simulator.structure_factors.dmin,
+                dmax=params.simulator.structure_factors.dmax,
+                wavelength=wavelength,
+                k_sol=params.simulator.structure_factors.from_pdb.k_sol,
+                b_sol=params.simulator.structure_factors.from_pdb.b_sol)
+            miller_data = miller_data.as_amplitude_array()
+
+        else:
+            miller_data = make_miller_array(
+                symbol=expt.crystal.get_space_group().info().type().lookup_symbol(),
+                unit_cell=expt.crystal.get_unit_cell(), d_min=sf.dmin,
+                d_max=sf.dmax,
+                defaultF=sf.default_F)
+    else:
+        miller_data = open_mtz(sf.mtz_name, sf.mtz_column)
+
+    return miller_data
+
+
+def find_diffBragg_instances(globe_objs):
+    """find any instances of diffbragg in globals
+        globe_objs is a return value of globals() (dict)
+    """
+    inst_names = []
+    for name,obj in globe_objs.items():
+        if "simtbx.nanoBragg.sim_data.SimData" in str(obj):
+            inst_names.append(name)
+        if "simtbx_diffBragg_ext.diffBragg" in str(obj):
+            inst_names.append(name)
+    return inst_names
+
+
+def memory_report(prefix='Memory usage'):
+    """Return a string documenting memory usage; to be used with LOGGER.info"""
+    memory_usage_in_gb = get_memory_usage() / 1024.
+    host = socket.gethostname()
+    return "%s: %f GB on node %s" % (prefix, memory_usage_in_gb, host)
+
+
+def smooth(x, beta=10.0, window_size=11):
+    """
+    https://glowingpython.blogspot.com/2012/02/convolution-with-numpy.html
+
+    Apply a Kaiser window smoothing convolution.
+
+    Parameters
+    ----------
+    x : ndarray, float
+        The array to smooth.
+
+    Optional Parameters
+    -------------------
+    beta : float
+        Parameter controlling the strength of the smoothing -- bigger beta
+        results in a smoother function.
+    window_size : int
+        The size of the Kaiser window to apply, i.e. the number of neighboring
+        points used in the smoothing.
+
+    Returns
+    -------
+    smoothed : ndarray, float
+        A smoothed version of `x`.
+    """
+
+    # make sure the window size is odd
+    if window_size % 2 == 0:
+        window_size += 1
+
+    # apply the smoothing function
+    s = np.r_[x[window_size - 1:0:-1], x, x[-1:-window_size:-1]]
+    w = np.kaiser(window_size, beta)
+    y = np.convolve(w / w.sum(), s, mode='valid')
+
+    # remove the extra array length convolve adds
+    b = int((window_size - 1) / 2)
+    smoothed = y[b:len(y) - b]
+
+    return smoothed

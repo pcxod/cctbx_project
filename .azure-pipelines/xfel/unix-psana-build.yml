@@ -46,11 +46,14 @@ steps:
   displayName: Install miniforge
 
 - script: |
+    set -xe
     source $(Pipeline.Workspace)/miniforge/etc/profile.d/conda.sh
-    conda env create -f $(Pipeline.Workspace)/modules/cctbx_project/xfel/conda_envs/psana_environment.yml
-    conda install -y -c conda-forge --no-deps -n psana_env junit-xml
-    conda install -y -c conda-forge cmake pandas distro -n psana_env
+    conda install -y -c conda-forge mamba
+    mamba env create -f $(Pipeline.Workspace)/modules/cctbx_project/xfel/conda_envs/psana_environment.yml
+    mamba install -y -c conda-forge --no-deps -n psana_env junit-xml
+    mamba install -y -c conda-forge cmake pandas distro -n psana_env
   displayName: Create conda environment
+  retryCountOnTaskFailure: 3
 
 # build
 - script: |
@@ -58,7 +61,7 @@ steps:
     conda activate psana_env
     cd $(Pipeline.Workspace)
     rm -rf modules/boost
-    python bootstrap.py --builder=xfel --use-conda $CONDA_PREFIX --nproc=4 --config-flags="--compiler=conda" --config-flags="--use_environment_flags" --config-flags="--enable_cxx11" --config-flags="--no_bin_python" --no-boost-src build
+    python bootstrap.py --builder=xfel --use-conda $CONDA_PREFIX --nproc=4 --config-flags="--compiler=conda" --config-flags="--use_environment_flags" --config-flags="--no_bin_python" --no-boost-src build
   displayName: Configure and Build
 
 # test
@@ -72,6 +75,7 @@ steps:
     libtbx.configure xfel_regression
     chmod +x $(Pipeline.Workspace)/modules/xfel_regression/merging_test_data/xfel_merge.sh
     chmod +x $(Pipeline.Workspace)/modules/xfel_regression/merging_test_data/merge_thermo.csh
+    export SIT_ROOT=/reg/g/psdm
     libtbx.run_tests_parallel module=xfel_regression nproc=4
   failOnStderr: false
   displayName: Test

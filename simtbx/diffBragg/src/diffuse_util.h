@@ -3,18 +3,25 @@
 
 #include <simtbx/diffBragg/src/util.h>
 
-#define CUDA_COMPILE (defined(DIFFBRAGG_HAVE_CUDA) && defined(__CUDACC__))
+#if defined(DIFFBRAGG_HAVE_CUDA) && defined(__CUDACC__)
+#define CUDA_COMPILE
+#endif
 
 #define REAL double
 
-#if CUDA_COMPILE
+#ifdef CUDA_COMPILE
 __device__ __host__
 #endif
-#if CUDA_COMPILE || not defined(DIFFBRAGG_HAVE_CUDA)
-int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
-  if ( laue_group_num < 1 or laue_group_num > 14) {
-    return 0;
-  }
+
+#if defined(CUDA_COMPILE) || not defined(DIFFBRAGG_HAVE_CUDA)
+int gen_laue_mats(int laue_group_num, MAT3 *lmats, MAT3 rpa) {
+  assert(laue_group_num>0);
+  assert(laue_group_num<15);
+
+  int num_mats = 0;
+
+  const double one_over_root2 = 1./sqrt(2.);
+
   if ( laue_group_num == 1 ) {
   // P -1
 
@@ -23,7 +30,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0, 1, 0,
                  0, 0, 1;
 
-    return 1;
+    num_mats = 1;
   }
   if ( laue_group_num == 2 ) {
   // P 1 1 2/m
@@ -38,7 +45,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0,-1, 0,
                  0, 0, 1;
 
-    return 2;
+    num_mats = 2;
   }
   if ( laue_group_num == 3 ) {
   // P 1 2/m 1
@@ -53,7 +60,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0, 1, 0,
                  0, 0,-1;
 
-    return 2;
+    num_mats = 2;
   }
   if ( laue_group_num == 4 ) {
   // P 2/m 1 1
@@ -68,7 +75,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0,-1, 0,
                  0, 0,-1;
 
-    return 2;
+    num_mats = 2;
   }
   if ( laue_group_num == 5 ) {
   // P m m m
@@ -93,7 +100,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0,-1, 0,
                  0, 0, 1;
 
-    return 4;
+    num_mats = 4;
   }
   if ( laue_group_num == 6 ) {
   // P 4/m
@@ -118,7 +125,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0,-1, 0,
                  0, 0, 1;
 
-    return 4;
+    num_mats = 4;
   }
   if ( laue_group_num == 7 ) {
   // P 4/m m m
@@ -163,7 +170,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                 -1, 0, 0,
                  0, 0,-1;
 
-    return 8;
+    num_mats = 8;
   }
   if ( laue_group_num == 8 ) {
   // P -3
@@ -175,15 +182,15 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
 
               // -y,x-y,z
     lmats[1] <<  0,-1, 0,
-                 1,-1, 0,
+                 one_over_root2,-one_over_root2, 0,
                  0, 0, 1;
 
               // -x+y,-x,z
-    lmats[2] << -1, 1, 0,
+    lmats[2] << -one_over_root2, one_over_root2, 0,
                 -1, 0, 0,
                  0, 0, 1;
 
-    return 3;
+    num_mats = 3;
   }
   if ( laue_group_num == 9 ) {
   // P -3 m 1
@@ -195,22 +202,22 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
 
               // -y,x-y,z
     lmats[1] <<  0,-1, 0,
-                 1,-1, 0,
+                 one_over_root2,-one_over_root2, 0,
                  0, 0, 1;
 
               // -x+y,-x,z
-    lmats[2] << -1, 1, 0,
+    lmats[2] << -one_over_root2, one_over_root2, 0,
                 -1, 0, 0,
                  0, 0, 1;
 
               // x-y,-y,-z
-    lmats[3] <<  1,-1, 0,
+    lmats[3] <<  one_over_root2,-one_over_root2, 0,
                  0,-1, 0,
                  0, 0,-1;
 
               // -x,-x+y,-z
     lmats[4] << -1, 0, 0,
-                -1, 1, 0,
+                -one_over_root2, one_over_root2, 0,
                  0, 0,-1;
 
               // y,x,-z
@@ -218,7 +225,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  1, 0, 0,
                  0, 0,-1;
 
-    return 6;
+    num_mats = 6;
   }
   if ( laue_group_num == 10 ) {
   // P -3 1 m
@@ -230,11 +237,11 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
 
               // -y,x-y,z
     lmats[1] <<  0,-1, 0,
-                 1,-1, 0,
+                 one_over_root2,-one_over_root2, 0,
                  0, 0, 1;
 
               // -x+y,-x,z
-    lmats[2] << -1, 1, 0,
+    lmats[2] << -one_over_root2, one_over_root2, 0,
                 -1, 0, 0,
                  0, 0, 1;
 
@@ -244,16 +251,16 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0, 0,-1;
 
               // -x+y,y,-z
-    lmats[4] << -1, 1, 0,
+    lmats[4] << -one_over_root2, one_over_root2, 0,
                  0, 1, 0,
                  0, 0,-1;
 
               // x,x-y,-z
     lmats[5] <<  1, 0, 0,
-                 1,-1, 0,
+                 one_over_root2,-one_over_root2, 0,
                  0, 0,-1;
 
-    return 6;
+    num_mats = 6;
   }
   if ( laue_group_num == 11 ) {
   // P 6/m
@@ -264,22 +271,22 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0, 0, 1;
 
               // x-y,x,z
-    lmats[1] <<  1,-1, 0,
+    lmats[1] <<  one_over_root2,-one_over_root2, 0,
                  1, 0, 0,
                  0, 0, 1;
 
               // y,-x+y,z
     lmats[2] <<  0, 1, 0,
-                -1, 1, 0,
+                -one_over_root2, one_over_root2, 0,
                  0, 0, 1;
 
               // -y,x-y,z
     lmats[3] <<  0,-1, 0,
-                 1,-1, 0,
+                 one_over_root2,-one_over_root2, 0,
                  0, 0, 1;
 
               // -x+y,-x,z
-    lmats[4] << -1, 1, 0,
+    lmats[4] << -one_over_root2, one_over_root2, 0,
                 -1, 0, 0,
                  0, 0, 1;
 
@@ -288,7 +295,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0,-1, 0,
                  0, 0, 1;
 
-    return 6;
+    num_mats = 6;
   }
   if ( laue_group_num == 12 ) {
   // P 6/m m m
@@ -299,33 +306,33 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0, 0, 1;
 
               // x-y,x,z
-    lmats[1] <<  1,-1, 0,
+    lmats[1] <<  one_over_root2,-one_over_root2, 0,
                  1, 0, 0,
                  0, 0, 1;
 
               // y,-x+y,z
     lmats[2] <<  0, 1, 0,
-                -1, 1, 0,
+                -one_over_root2, one_over_root2, 0,
                  0, 0, 1;
 
               // -y,x-y,z
     lmats[3] <<  0,-1, 0,
-                 1,-1, 0,
+                 one_over_root2,-one_over_root2, 0,
                  0, 0, 1;
 
               // -x+y,-x,z
-    lmats[4] << -1, 1, 0,
+    lmats[4] << -one_over_root2, one_over_root2, 0,
                 -1, 0, 0,
                  0, 0, 1;
 
               // x-y,-y,-z
-    lmats[5] <<  1,-1, 0,
+    lmats[5] <<  one_over_root2,-one_over_root2, 0,
                  0,-1, 0,
                  0, 0,-1;
 
               // -x,-x+y,-z
     lmats[6] << -1, 0, 0,
-                -1, 1, 0,
+                -one_over_root2, one_over_root2, 0,
                  0, 0,-1;
 
               // -x,-y,z
@@ -344,16 +351,16 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                  0, 0,-1;
 
               // -x+y,y,-z
-    lmats[10] << -1, 1, 0,
+    lmats[10] << -one_over_root2, one_over_root2, 0,
                   0, 1, 0,
                   0, 0,-1;
 
               // x,x-y,-z
     lmats[11] <<  1, 0, 0,
-                  1,-1, 0,
+                  one_over_root2,-one_over_root2, 0,
                   0, 0,-1;
 
-    return 12;
+    num_mats = 12;
   }
   if ( laue_group_num == 13 ) {
   // P m -3
@@ -418,7 +425,7 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                   0,-1, 0,
                   0, 0, 1;
 
-    return 12;
+    num_mats = 12;
   }
   if ( laue_group_num == 14 ) {
   // P m -3 m
@@ -543,25 +550,26 @@ int gen_laue_mats(int laue_group_num, MAT3 *lmats) {
                   0, 0,-1,
                   0,-1, 0;
 
-    return 24;
+    num_mats = 24;
   }
-  else {
-    return 0;
+  for (int i_mat=0; i_mat < num_mats; i_mat ++){
+    lmats[i_mat] = lmats[i_mat] * rpa;
   }
-  return 0;
+  return num_mats;
 };
 
 #else
-int gen_laue_mats(int laue_group_num, MAT3 *lmats);
+int gen_laue_mats(int laue_group_num, MAT3 *lmats, MAT3 rpa);
 #endif
 
-#if CUDA_COMPILE
+#ifdef CUDA_COMPILE
 __device__ __host__
 #endif
-#if CUDA_COMPILE || not defined(DIFFBRAGG_HAVE_CUDA)
+#if defined(CUDA_COMPILE) || not defined(DIFFBRAGG_HAVE_CUDA)
 void calc_diffuse_at_hkl(VEC3 H_vec, VEC3 H0, VEC3 dHH, VEC3 Hmin, VEC3 Hmax, VEC3 Hrange, MAT3 Ainv, const REAL *FhklLinear, int num_laue_mats, MAT3 *laue_mats, MAT3 anisoG_local, MAT3 anisoU_local, MAT3 *dG_dgam, bool refine_diffuse, REAL *I0, REAL *step_diffuse_param){
   REAL four_mpi_sq = 4.*M_PI*M_PI;
   // loop over laue matrices
+  int num_stencil_points = (2*dHH[0] + 1) * (2*dHH[1] + 1) * (2*dHH[2] + 1);
   bool h_bounded= (H0[0]+dHH[0]<=Hmax[0]) && (H0[0]-dHH[0]>=Hmin[0]) ;
   bool k_bounded= (H0[1]+dHH[1]<=Hmax[1]) && (H0[1]-dHH[1]>=Hmin[1]) ;
   bool l_bounded= (H0[2]+dHH[2]<=Hmax[2]) && (H0[2]-dHH[2]>=Hmin[2]) ;
@@ -585,12 +593,10 @@ void calc_diffuse_at_hkl(VEC3 H_vec, VEC3 H0, VEC3 dHH, VEC3 Hmin, VEC3 Hmax, VE
           else
             _this_diffuse_scale = 1.0;
 
-          _this_diffuse_scale *= _this_diffuse_scale/(REAL)num_laue_mats;
-          /* TODO: Apply discrete transformations to H0 and delta_H_offset
-             like the following to reorient G and recover calmodulin diffuse
-          MAT3 xform;
-          xform << 0.70710678,  -0.70710678,  0., 0.70710678,  0.70710678,  0., 0.,  0., 1.;
-          */
+          _this_diffuse_scale *= _this_diffuse_scale/(REAL)num_laue_mats/(REAL)num_stencil_points;
+          // Use (a-b, a+b, c) as the principal axes of the diffuse model
+          // TODO: Add an option to select (a, b, c) as the principal axes
+
           for ( int iL = 0; iL < num_laue_mats; iL++ ){
             VEC3 Q0 =Ainv*laue_mats[iL]*H0;
             REAL exparg = four_mpi_sq*Q0.dot(anisoU_local*Q0);

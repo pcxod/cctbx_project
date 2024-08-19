@@ -128,14 +128,15 @@ def exercise_combine_symmetry():
   """
   from mmtbx.regression import model_1yjp
   import mmtbx.command_line
-  import iotbx.pdb.hierarchy
+  import iotbx.pdb
   from cctbx import sgtbx
   from cctbx import uctbx
   # 1yjp, as usual
-  pdb_in = iotbx.pdb.hierarchy.input(pdb_string=model_1yjp)
-  xrs = pdb_in.input.xray_structure_simple()
+  pdb_in = iotbx.pdb.input(source_info=None, lines=model_1yjp)
+  hierarchy = pdb_in.construct_hierarchy()
+  xrs = pdb_in.xray_structure_simple()
   f = open("tst_combine_symmetry.pdb", "w")
-  f.write(pdb_in.hierarchy.as_pdb_string(crystal_symmetry=xrs))
+  f.write(hierarchy.as_pdb_string(crystal_symmetry=xrs))
   f.close()
   f_calc = abs(xrs.structure_factors(d_min=1.5).f_calc())
   # Make up slightly more exact unit cell, but set SG to P2
@@ -156,7 +157,7 @@ def exercise_combine_symmetry():
     out=null_out())
   symm = cmdline.xray_structure.crystal_symmetry()
   assert (approx_equal(symm.unit_cell().parameters(),
-          (21.9371, 4.8659, 23.4774, 90.0, 107.08, 90.0), eps=0.001))
+          (21.9371, 4.8659, 23.4774, 90.0, 107.083, 90.0), eps=0.001))
   assert (str(symm.space_group_info()) == "P 1 21 1")
   # Part 2: incompatible space groups
   f_calc_2 = f_calc.customized_copy(
@@ -251,7 +252,7 @@ def exercise_load_unmerged():
   flex.set_random_seed(123456)
   random.seed(123456)
   base = "tst_load_unmerged"
-  pdb_in = iotbx.pdb.hierarchy.input(pdb_string=model_1yjp)
+  pdb_in = iotbx.pdb.input(source_info=None, lines=model_1yjp)
   xrs = pdb_in.xray_structure_simple()
   xrs.set_inelastic_form_factors(
     photon=1.54,

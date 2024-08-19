@@ -27,7 +27,7 @@ class origins(list):
 
 starting_id = 0
 for link_info in [
-    ['covalent geometry', [0,1,2,3,4,5]],
+    ['covalent geometry', [0,1,2,3,4,5]], # 0
     ['SS BOND', # short desc.
      # complete desc.
      'Disulphide bond for CYS-like sulphur atoms within 3A (default) using '
@@ -55,8 +55,8 @@ for link_info in [
     ['edits',
      '',
      'www.phenix-online.org/documentation/reference/refinement.html#definition-of-custom-bonds-and-angles',
-     ['User supplied']*4+[None, 'User supplied'],
-     [0,1,2,3,5],
+     ['User supplied']*6,
+     [0,1,2,3,4,5],
     ],
     # ['glycosidic',
     #  'Standard glycosidic CIF link blocks such as link_??? and ???',
@@ -100,13 +100,13 @@ for link_info in [
      '',
      ['Misc.']*5,
      [0,1,2,3,4]
-    ],
+    ], # 9
     ['User supplied cif_link',
      'Internal coordinates supplied by the user in cif_link format',
      '',
      ['User cif_link']*5,
      [0,1,2,3,4]
-    ],
+    ], # 10
     ]:
   for oi in origin_ids:
     assert starting_id not in oi

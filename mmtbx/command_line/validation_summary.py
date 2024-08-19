@@ -5,7 +5,7 @@ Convenience tool for collecting validation statistics with minimal overhead.
 
 from __future__ import absolute_import, division, print_function
 from mmtbx.validation import molprobity
-from iotbx import file_reader
+import iotbx.pdb
 from libtbx import slots_getstate_setstate, Auto
 from libtbx.utils import Sorry, Usage
 from libtbx import str_utils
@@ -21,25 +21,22 @@ def summary(pdb_file=None,
   header_info = None
   if (pdb_hierarchy is None):
     assert (pdb_file is not None)
-    pdb_in = file_reader.any_file(pdb_file, force_type="pdb")
-    pdb_in.assert_file_type("pdb")
-    pdb_hierarchy = pdb_in.file_object.hierarchy
+    pdb_in = iotbx.pdb.input(pdb_file)
+    pdb_hierarchy = pdb_in.construct_hierarchy()
     pdb_hierarchy.atoms().reset_i_seq()
     header_info = molprobity.pdb_header_info(
       pdb_file=pdb_file)
-    crystal_symmetry=pdb_in.file_object.crystal_symmetry()
+    crystal_symmetry=pdb_in.crystal_symmetry()
   else :
     assert (pdb_file is None)
   #
+  assert crystal_symmetry is not None
+
   cache = pdb_hierarchy.atom_selection_cache()
   sel = cache.selection('protein')
   pdb_hierarchy = pdb_hierarchy.select(sel)
   #
-  model = mmtbx.model.manager(model_input = pdb_hierarchy.as_pdb_input())
-  if crystal_symmetry and model.crystal_symmetry() is None:
-    model.set_crystal_symmetry(crystal_symmetry) # Somehow pdb_hiearchy lacks cs
-  if not model.crystal_symmetry():
-    aaa=bbb
+  model = pdb_hierarchy.as_model_manager(crystal_symmetry = crystal_symmetry)
   return molprobity.molprobity(
     model=model,
     keep_hydrogens=False,
@@ -144,11 +141,10 @@ run phenix.model_vs_data or the validation GUI.)
   pdb_file = args[0]
   if (not os.path.isfile(pdb_file)):
     raise Sorry("Not a file: %s" % pdb_file)
-  from iotbx.file_reader import any_file
-  pdb_in = any_file(pdb_file, force_type="pdb").check_file_type("pdb")
-  hierarchy = pdb_in.file_object.hierarchy
-  xrs = pdb_in.file_object.input.xray_structures_simple()
-  crystal_symmetry=pdb_in.file_object.crystal_symmetry()
+  pdb_in = iotbx.pdb.input(pdb_file)
+  hierarchy = pdb_in.construct_hierarchy()
+  xrs = pdb_in.xray_structures_simple()
+  crystal_symmetry=pdb_in.crystal_symmetry()
   if not crystal_symmetry:
     raise Sorry("Need crystal_symmetry in input PDB file")
   s = None

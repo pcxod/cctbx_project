@@ -1,3 +1,5 @@
+// HKLviewer driver file leveraging NGL.js accessed from python via a websocket 
+
 'use strict';
 
 // Microsoft Edge users follow instructions on
@@ -34,8 +36,8 @@ var stage = new NGL.Stage('viewport', {  backgroundColor: "rgb(128, 128, 128)",
 var shapeComp = null;
 var vectorshape = null;
 var repr = null;
-var AA = String.fromCharCode(197); // short for angstrom
-var DGR = String.fromCharCode(176); // short for degree symbol
+const AA = String.fromCharCode(197); // short for angstrom
+const DGR = String.fromCharCode(176); // short for degree symbol
 var current_ttip = "";
 var ttips = [];
 var filename = ""
@@ -53,6 +55,7 @@ var shapebufs = [];
 var expansion_shapebufs = [];
 var nrots = 0;
 var fontsize = 9;
+var vectorwidth = 2
 var postrotmxflag = false;
 var cvorient = new NGL.Matrix4();
 var oldmsg = "";
@@ -78,6 +81,7 @@ var pmleft = null;
 var pmbottom = null;
 var btnwidth = null;
 var StopAnimateBtn = null;
+var maxReflInFrustum = 0;
 var hklequationmsg = "";
 var animatheta = 0.0;
 var animaaxis = new NGL.Vector3();
@@ -86,7 +90,7 @@ var componentaxis = new NGL.Vector3();
 var sockwaitcount = 0;
 var ready_for_closing = false;
 var columnSelect = null;
-var animationspeed = -1.0;
+var animationspeed = 0.0;
 var XYZaxes = null;
 var Helm = null;
 var Kelm = null;
@@ -108,6 +112,17 @@ var rotationdisabled = false;
 var div_annotation_opacity = 0.7;
 var camtype = "orthographic";
 var canvaspos = null;
+var requestedby = "";
+var isAutoviewing = false;
+var zoomanis = null;
+
+
+const simulate_click_evt = new MouseEvent("simulate_click", {
+  view: window,
+  bubbles: true,
+  cancelable: true,
+  clientX: 20,
+});
 
 
 function sleep(ms) {
@@ -220,8 +235,8 @@ function createDivElement(label, rgb)
 {
   let elm = createElement("div", { innerText: label },
     {
-      color: "rgba(" + rgb[0] + ", " + rgb[1] + ", " + rgb[2] + ", 1.0)",
-      backgroundColor: "rgba(255, 255, 255, " + div_annotation_opacity + ")",
+      color: "rgba(255, 255, 255, 255, 1.0)",    
+      backgroundColor: "rgba(" + rgb[0] + ", " + rgb[1] + ", " + rgb[2] + ", " + div_annotation_opacity + ")",
       padding: "4px"
     }, fontsize
   );
@@ -244,28 +259,20 @@ function createDivElement(label, rgb)
 }
 
 
-
-
 function CreateWebSocket()
 {
   try
   {
-    mysocket = new WebSocket('ws://localhost:' + websocket_portnumber);
-    //mysocket = new WebSocket('wss://localhost:' + websocket_portnumber);
+    mysocket = new WebSocket('ws://localhost:' + websocket_portnumber + '/');
     mysocket.binaryType = "arraybuffer"; // "blob";
-    //if (mysocket.readyState !== mysocket.OPEN)
-    //  alert('Cannot connect to websocket server! \nAre the firewall permissions or browser security too strict?');
-    //  socket_intentionally_closed = false;
     mysocket.onerror = function(e) { onError(e)  };
     mysocket.onopen = function(e) { onOpen(e)  };
     mysocket.onclose = function(e) { onClose(e)  };
     mysocket.onmessage = function(e) { onMessage(e)  };
-
   }
   catch(err)
   {
     alert('JavaScriptError: ' + err.stack );
-    //addDivBox("Error!", window.innerHeight - 50, 20, 40, 20, "rgba(100, 100, 100, 0.0)");
   }
 }
 
@@ -376,12 +383,12 @@ Object.assign(debugmessage.style, {
 });
 
 
-function ReturnClipPlaneDistances(onrequest = false)
+function ReturnClipPlaneDistances(calledby = "")
 { // If onrequest=true then jsview.py will increase the semaphore 
   // count by calling clipplane_msg_sem.release().
   // Only do this in response to a explicit message like "GetClipPlaneDistances"
   // from where the sempahore has been acquired
-  let cameradist;
+  let cameradist = stage.viewer.camera.position.z;
   if (stage.viewer.parameters.clipScale == 'relative')
     cameradist = stage.viewer.cDist;
   if (stage.viewer.parameters.clipScale == 'absolute')
@@ -395,11 +402,9 @@ function ReturnClipPlaneDistances(onrequest = false)
       cameradist = stage.viewer.camera.position.z;
     else if (stage.viewer.camera.position.z == -stage.viewer.cDist)
       cameradist = stage.viewer.cDist;
-    else
-      return;
 
   let msg = String([stage.viewer.parameters.clipNear, stage.viewer.parameters.clipFar,
-    cameradist, stage.viewer.camera.zoom, Number(onrequest)]);
+    cameradist, stage.viewer.camera.zoom, calledby]);
   WebsockSendMsg('ReturnClipPlaneDistances:\n' + msg );
 }
 
@@ -441,22 +446,6 @@ function RemovePrimitives(reprname)
 }
 
 
-function SetDefaultOrientation() {
-  let m4 = new NGL.Matrix4();
-  let axis = new NGL.Vector3();
-  axis.x = 0.0;
-  axis.y = 1.0;
-  axis.z = 0.0;
-  // Default in WebGL is for x-axis to point left and z-axis to point into the screen.
-  // But we want x-axis pointing right and z-axis pointing out of the screen. 
-  // Rotate coordinate system to that effect
-  m4.makeRotationAxis(axis, Math.PI);
-  SetAutoview(shapeComp, 500);
-  if (!rotationdisabled)
-    stage.viewerControls.orient(m4);
-}
-
-
 function CameraZoom(t, deltaX, deltaY) {
   let dx = 0;
   if (Number.isInteger(deltaX))
@@ -469,7 +458,7 @@ function CameraZoom(t, deltaX, deltaY) {
   if (z > 0.0) {// use positive zoom values to avoid mirroring the stage
     stage.viewer.camera.zoom = z;
     stage.viewer.requestRender();
-    ReturnClipPlaneDistances();
+    ReturnClipPlaneDistances("CameraZoom");
   }
   let msg = "dx: " + dx.toString() + ", dy: " + dy.toString()
     + ", zoom:" + stage.viewer.camera.zoom.toString();
@@ -488,7 +477,7 @@ function AnimateRotation(axis, animatheta) {
     const deltaTime = now - then;
     then = now;
 
-    if (animationspeed > 0)
+    if (animationspeed > 0.0)
       animatheta = (animatheta + deltaTime * animationspeed) % 360;
     if (shapeComp == null)
       return;
@@ -496,16 +485,18 @@ function AnimateRotation(axis, animatheta) {
     RotateAxisComponents(axis, animatheta);
     stage.viewer.requestRender();
 
-    if (animationspeed > 0)
+    if (animationspeed > 0.0)
       requestAnimationFrame(render);
   }
-  if (animationspeed > 0)
+  if (animationspeed > 0.0)
     requestAnimationFrame(render);
 }
 
 
 function RotateAxisComponents(axis, theta)
 {
+  if (shapeComp == null)
+    return;
   let m4 = new NGL.Matrix4();
   m4.makeRotationAxis(axis, theta);
 
@@ -519,43 +510,172 @@ function RotateAxisComponents(axis, theta)
 
 async function RenderRequest(note = "")
 {
-  await sleep(100);
-  if (note != "")
-    WebsockSendMsg(note + '_BeforeRendering');
-  stage.viewer.requestRender();
-  if (note != "") {
-    GetReflectionsInFrustum();
-    WebsockSendMsg(note + '_AfterRendering');
-  }
+  requestedby = note;
+  if (requestedby != "")
+    WebsockSendMsg(requestedby + '_BeforeRendering');
+    // requestedby + '_AfterRendering' message is then sent by stage.viewer.signals.rendered
+    // triggered by stage.viewer.requestRender
+  await sleep(100).then(()=> { 
+    stage.viewer.requestRender();
+  });
   if (isdebug)
-    WebsockSendMsg('RenderRequest ' + pagename);
+    WebsockSendMsg('RenderRequest ');
 };
 
 
-async function SetAutoview(mycomponent, t)
+function getRotatedZoutMatrix()
 {
-  if (mycomponent == null)
+  // Default in WebGL is for x-axis to point left and z-axis to point into the screen.
+  // But we want x-axis pointing right and z-axis pointing out of the screen. 
+  // Rotate coordinate system to that effect
+  let m4 = new NGL.Matrix4();
+  // GL matrices are the transpose of conventional rotation matrices
+  m4.set(-1.0,  0.0,  0.0,  0.0,
+          0.0,  1.0,  0.0,  0.0,
+          0.0,  0.0, -1.0,  0.0,
+          0.0,  0.0,  0.0,  1.0
+  );
+  return m4;
+}
+
+
+function SetDefaultOrientation(release_python_semaphore=true) {
+  if (!rotationdisabled && animationspeed == 0.0)
+    stage.viewerControls.orient(getRotatedZoutMatrix());
+  SetAutoviewTimeout(shapeComp, 500, release_python_semaphore);
+}
+
+
+function SetAutoviewNoAnim(mycomponent)
+{
+// position component explicitly with SetAutoviewNoAnim() if autoview animation in 
+// ResolveAutoview() is stalling which could happen on VMs in regression tests
+  if (mycomponent == null || isAutoviewing==false)
     return;
+  if (zoomanis != null)
+  {
+    mycomponent.stage.animationControls.pause();
+    mycomponent.stage.animationControls.remove(zoomanis[0]);
+    mycomponent.stage.animationControls.remove(zoomanis[1]);
+    zoomanis = null;
+  }
+  let zaim = mycomponent.getZoom();
+  let m = getRotatedZoutMatrix();
+  m.multiplyScalar(-zaim);
+  stage.viewerControls.orient(m);
+  // ensure next call to ReturnClipPlaneDistances posts correct values to python
+  // so python computes correct clipplane values
+  stage.viewer.cDist = -stage.viewer.camera.position.z; 
+  isAutoviewing = false;
+  stage.viewer.requestRender();
+  WebsockSendMsg('SetAutoView camera.z = ' + stage.viewer.camera.position.z.toString()); 
+  WebsockSendMsg('FinishedSetAutoViewNoAnim forced (zaim= ' + zaim.toString() + ')'); // equivalent of the signal function
+  return true;
+};
 
-  WebsockSendMsg('StartSetAutoView ' + pagename);
-  mycomponent.autoView(t); 
 
-  while (true) {
-    // A workaround for lack of a signal function fired when autoView() has finished. autoView() runs 
-    // asynchroneously in the background. Its completion time is at least t milliseconds and depends on the 
-    // data size of mycomponent. It will have completed once the condition 
-    // stage.viewer.camera.position.z == mycomponent.getZoom() is true. So fire our own signal 
-    // at that point in time
-    if (stage.viewer.camera.position.z == mycomponent.getZoom()) {
-      WebsockSendMsg('FinishedSetAutoView ' + pagename); // equivalent of the signal function
-      return;
+async function ResolveAutoview(mycomponent, t)
+{
+  try {
+    let zaim = mycomponent.getZoom();
+    //zoomanis = mycomponent.stage.animationControls.zoomMove(mycomponent.getCenter(), zaim, t);
+    let center = new NGL.Vector3();
+    center.x=0;
+    center.y=0;
+    center.z=0;
+    //if (camz===null || camz === -1)
+    zaim = zaim*1.5;
+    //else zaim = camz;
+    // with HKL axes now part of vectorshape and not shape getCenter no longer returns (0,0,0)
+    // and zaim often is too small. Work around this with explicit center at 0,0,0 and doubling zaim
+    zoomanis = mycomponent.stage.animationControls.zoomMove(center, zaim, t);
+    let dt = 50;
+    let sumt = 0;
+    while (isAutoviewing) 
+    {
+      // A workaround for lack of a signal function fired when autoView() has finished. autoView() runs 
+      // asynchroneously in the background. Its completion time is at least t milliseconds and depends on the 
+      // data size of mycomponent. It will have completed once the condition 
+      // stage.viewer.camera.position.z == mycomponent.getZoom() is true. So fire our own signal 
+      // at that point in time
+      if (stage.viewer.camera.position.z == zaim && sumt > 0) 
+      {
+        if (isAutoviewing==true) 
+        {
+          let m = stage.viewerControls.getOrientation();
+          let det = Math.pow(m.determinant(), 1/3);
+          m.multiplyScalar(-zaim/det);
+          stage.viewerControls.orient(m);
+          WebsockSendMsg('FinishedSetAutoView');
+          isAutoviewing = false;   
+          return true;
+        }
+        else // set by SetAutoviewNoAnim()
+          return;
+      }
+      await sleep(dt).then(()=> { 
+        sumt += dt; 
+        WebsockSendMsg('SetAutoView camera.z = ' + stage.viewer.camera.position.z.toString()); 
+      } );   
     }
-    await sleep(200);
+  }
+  catch(err)
+  {
+    WebsockSendMsg('JavaScriptError: ' + err.stack );
   }
 };
+
+
+async function AutoViewPromiseRace(mycomponent, t)
+{
+  function onTimeoutResolveDefaultThreshold() 
+  {// position component explicitly with SetAutoviewNoAnim() if autoview animation in 
+   // ResolveAutoview() is stalling which could happen on VMs in regression tests
+    return new Promise(async (resolve) => {
+      setTimeout(() => {
+        resolve(SetAutoviewNoAnim(mycomponent));
+      }, t * 10) // start if 10 times t ms has lapsed
+    });
+  }
+  return await Promise.race([ResolveAutoview(mycomponent, t),
+                  onTimeoutResolveDefaultThreshold() ]);
+}
+
+
+async function SetAutoviewTimeout(mycomponent, t, release_python_semaphore)
+{
+  WebsockSendMsg('StartSetAutoView ');
+  WebsockSendMsg('SetAutoView camera.z = ' + stage.viewer.camera.position.z.toString()); 
+  isAutoviewing = true;
+
+  let currentmode = stage.viewer.parameters.clipMode;
+  let currentscale = stage.viewer.parameters.clipScale
+  let currentnear = stage.viewer.parameters.clipNear;
+  let currentfar = stage.viewer.parameters.clipFar;
+  let currentcameraZ = stage.viewer.camera.position.z;
+
+  AutoViewPromiseRace(mycomponent, t).then(()=>{
+    requestedby = ""
+    if (release_python_semaphore==true)
+      requestedby = "AutoViewFinished"; // posts AutoViewFinished_AfterRendering in stage.viewer.signals.rendered.add()
+
+    if (rotationdisabled || animationspeed > 0.0)
+    {
+      stage.viewer.parameters.clipMode = currentmode; 
+      stage.viewer.parameters.clipScale = currentscale;
+      stage.viewer.parameters.clipNear = currentnear; 
+      stage.viewer.parameters.clipFar = currentfar;
+      stage.viewer.camera.position.z = currentcameraZ;
+    }
+    stage.viewer.requestRender();
+    ReturnClipPlaneDistances(); // updates zoom value in python */
+  });
+}
 
 
 async function SendComponentRotationMatrixMsg() {
+  if (shapeComp === null)
+    return;
   await sleep(100);
   try {
     let msg = String(shapeComp.matrix.elements);
@@ -566,11 +686,11 @@ async function SendComponentRotationMatrixMsg() {
   }
 };
 
-async function SendOrientationMsg() {
-  await sleep(100);
+//async 
+function SendOrientationMsg(funcname) {
   try {
     let msg = getOrientMsg();
-    WebsockSendMsg('CurrentViewOrientation:\n' + msg);
+    WebsockSendMsg(funcname + '_Orientation:\n' + msg);
   }
   catch (err) {
     WebsockSendMsg('JavaScriptError: ' + err.stack);
@@ -607,6 +727,7 @@ var coordarray; // global for the binary data that are sent after receiving the 
 var colourarray;// global for the binary data that are sent after receiving the AddHKLColours message
 var radiiarray; // global for the binary data that are sent after receiving the AddHKLRadii message
 var ttipids; // global for the binary data that are sent after receiving the AddHKLTTipIds message
+var iswireframe = false;
 
 function onMessage(e)
 {
@@ -623,14 +744,12 @@ function onMessage(e)
       let showdata = e.data;
       if (showdata.length > 400)
         showdata = e.data.slice(0, 200) + '\n...\n' + e.data.slice(e.data.length - 200, -1);
-      if (isdebug)
-        WebsockSendMsg('Browser: Got ' + showdata); // tell server what it sent us
 
       datval = e.data.split(":\n");
       msgtype = datval[0];
       if (datval.length == 1 && typeof msgtype === 'string') {// if message is empty we expect the next message to be an ArrayBuffer, i.e. a byte array sent from python
         binmsgtype = msgtype; // store the msgtype of the next message
-        WebsockSendMsg('Waiting for ArrayBuffer for ' + binmsgtype + ' ' + pagename);
+        WebsockSendMsg('Waiting for ArrayBuffer for ' + binmsgtype);
         return;
       }
       else
@@ -647,6 +766,8 @@ function onMessage(e)
       // previous message which is the message type so it can be processed
       msgtype = binmsgtype;
     }
+    if (isdebug)
+      WebsockSendMsg('Browser.JavaScript Got: ' + msgtype); // tell server what it sent us
 
     if (msgtype === "Reload")
     {
@@ -656,11 +777,11 @@ function onMessage(e)
         let msg = getOrientMsg();
         WebsockSendMsg('OrientationBeforeReload:\n' + msg );
       }
-      WebsockSendMsg( 'Refreshing ' + pagename );
+      WebsockSendMsg( 'Refreshing ');
 
       sleep(200).then(()=> {
           socket_intentionally_closed = true;
-          mysocket.close(4242, 'Refreshing ' + pagename);
+          mysocket.close(4242, 'Refreshing ');
           ready_for_closing = true;
           window.location.reload(true);
         }
@@ -740,13 +861,16 @@ function onMessage(e)
 
     if (msgtype === "Redraw")
     {
-      RenderRequest();
-      WebsockSendMsg( 'Redrawing ' + pagename );
+      RenderRequest("notify_cctbx").then(()=> {
+          SendOrientationMsg("Redraw");
+          WebsockSendMsg( 'Redrawn ');
+        }
+      );
     }
 
     if (msgtype === "ReOrient")
     {
-      WebsockSendMsg( 'Reorienting ' + pagename );
+      WebsockSendMsg( 'Reorienting ');
       let sm = new Float32Array(16);
       for (let j=0; j<16; j++)
       {
@@ -758,10 +882,10 @@ function onMessage(e)
       let m = new NGL.Matrix4();
       m.fromArray(sm);
       stage.viewerControls.orient(m);
-      //stage.viewer.renderer.setClearColor( 0xffffff, 0.01);
-      //stage.viewer.requestRender();
-      RenderRequest();
-      SendOrientationMsg();
+      RenderRequest().then(()=> {
+          SendOrientationMsg("ReOrient");
+        }
+      );
     }
 
     if (msgtype.includes("Expand") && shapeComp != null)
@@ -905,7 +1029,7 @@ function onMessage(e)
               radius: expansion_radii[bin],
 // rotmxidx works as the id of the rotation of applied symmetry operator when creating tooltip for an hkl
               picking: expansion_ttips[bin][rotmxidx],
-              } );
+              }, { disableImpostor: iswireframe } );
           shape.addBuffer(expansion_shapebufs[bin][rotmxidx]);
           WebsockSendMsg('Expanded rotation operator ' + rotmxidx.toString());
         }
@@ -920,27 +1044,27 @@ function onMessage(e)
       }
       shapeComp = stage.addComponentFromObject(shape);
       MakeHKL_Axis();
-      repr = shapeComp.addRepresentation('buffer');
+      repr = shapeComp.addRepresentation('buffer', { wireframe: iswireframe });
 
       for (let bin=0; bin<nbins; bin++)
-      {
         for (let rotmxidx=0; rotmxidx < nrots; rotmxidx++ )
-        {
-          expansion_shapebufs[bin][rotmxidx].setParameters({opacity: alphas[bin]});
-        }
-      }
+          expansion_shapebufs[bin][rotmxidx].setParameters( { opacity: alphas[bin] } ); 
+
       RotateAxisComponents(componentaxis, componenttheta); // apply any component rotation if specified on the GUI
-      RenderRequest();
-      WebsockSendMsg( 'Done ' + msgtype );
-    }
+      requestedby = "ExpandedInBrowser";
+      stage.viewer.requestRender();
+      //RenderRequest("ExpandedInBrowser"); //.then(()=> {
+      WebsockSendMsg('Done ExpandedInBrowser ' + msgtype ); // "ExpandedInBrowser checked for in python
+     // });
+     }
     
     if (msgtype === "DisableZoomDrag") {
-      WebsockSendMsg('using camerazoom' + pagename);
+      WebsockSendMsg('using camerazoom');
 
       stage.mouseControls.remove("drag-shift-right");
       stage.mouseControls.remove("drag-shift-left");
-	  stage.mouseControls.remove("drag-middle");
-	  stage.mouseControls.add("drag-middle", CameraZoom);
+	    stage.mouseControls.remove("drag-middle");
+	    stage.mouseControls.add("drag-middle", CameraZoom);
       stage.mouseControls.add("drag-shift-right", CameraZoom);
       stage.mouseControls.add("drag-shift-left", CameraZoom);
       stage.mouseControls.add("scroll", CameraZoom);
@@ -948,36 +1072,34 @@ function onMessage(e)
     }
 
     if (msgtype === "EnableZoomDrag") {
-      WebsockSendMsg('using mouse zoomdrag ' + pagename);
+      WebsockSendMsg('using mouse zoomdrag ');
 
       stage.mouseControls.remove("drag-shift-right");
       stage.mouseControls.remove("drag-shift-left");
-	  stage.mouseControls.remove("drag-middle");
-	  stage.mouseControls.add("drag-middle", NGL.MouseActions.zoomDrag);
+	    stage.mouseControls.remove("drag-middle");
+	    stage.mouseControls.add("drag-middle", NGL.MouseActions.zoomDrag);
       stage.mouseControls.add("drag-shift-right", NGL.MouseActions.zoomDrag);
       stage.mouseControls.add("drag-shift-left", NGL.MouseActions.zoomDrag);
       rotationdisabled = false;
     }
 
     if (msgtype === "DisableMouseRotation") {
-      WebsockSendMsg('Fix mouse rotation' + pagename);
+      WebsockSendMsg('Fix mouse rotation');
 
       stage.mouseControls.remove("drag-left");
       stage.mouseControls.remove("scroll");
       stage.mouseControls.remove("scroll-ctrl");
       stage.mouseControls.remove("scroll-shift");
-
       stage.mouseControls.remove("drag-shift-right");
       stage.mouseControls.remove("drag-shift-left");
       rotationdisabled = true;
     }
 
     if (msgtype === "EnableMouseRotation") {
-      WebsockSendMsg('Can mouse rotate ' + pagename);
+      WebsockSendMsg('Can mouse rotate ');
       stage.mouseControls.add("drag-left", NGL.MouseActions.rotateDrag);
       stage.mouseControls.add("scroll-ctrl", NGL.MouseActions.scrollCtrl);
       stage.mouseControls.add("scroll-shift", NGL.MouseActions.scrollShift);
-
       stage.mouseControls.remove("drag-shift-right");
       stage.mouseControls.remove("drag-shift-left");
       rotationdisabled = false;
@@ -985,7 +1107,12 @@ function onMessage(e)
 
     if (msgtype === "RotateStage")
     { // rotate stage and its components
-      WebsockSendMsg('Rotating stage ' + pagename);
+      while (isAutoviewing)
+      {
+        sleep(100);
+      }
+
+      WebsockSendMsg('Rotating stage ');
 
       let sm = new Float32Array(9);
       let m4 = new NGL.Matrix4();
@@ -1000,16 +1127,20 @@ function onMessage(e)
         0.0, 0.0, 0.0, 1.0
       );
       stage.viewerControls.orient(m4);
-      if (val[9] == "verbose")
+      stage.viewer.camera.zoom = parseFloat(val[9]);
+      if (val[10] == "verbose")
         postrotmxflag = true;
-      ReturnClipPlaneDistances();
-      RenderRequest();
-      SendOrientationMsg();
+      RenderRequest().then(()=> {
+          ReturnClipPlaneDistances("RotateStage");
+          SendOrientationMsg("RotateStage");
+          WebsockSendMsg('Done RotateStage');
+        }
+      );
     }
 
     if (msgtype === "RotateAxisStage")
     { // rotate stage and its components
-      WebsockSendMsg('Rotating stage around axis' + pagename);
+      WebsockSendMsg('Rotating stage around axis');
 
       let sm = new Float32Array(9);
       let m4 = new NGL.Matrix4();
@@ -1022,14 +1153,16 @@ function onMessage(e)
       stage.viewerControls.applyMatrix(m4);
       if (val[4] == "verbose")
         postrotmxflag = true;
-      ReturnClipPlaneDistances();
-      RenderRequest();
-      SendOrientationMsg();
+      RenderRequest().then(()=> {
+          ReturnClipPlaneDistances("RotateAxisStage");
+          SendOrientationMsg("RotateAxisStage");
+        }
+      );
     }
 
     if (msgtype === "RotateComponents" && shapeComp != null)
     {
-      WebsockSendMsg('Rotating components ' + pagename);
+      WebsockSendMsg('Rotating components ');
 
       let sm = new Float32Array(9);
       let m4 = new NGL.Matrix4();
@@ -1042,19 +1175,20 @@ function onMessage(e)
       m4.set(sm[0], sm[3], sm[6], stm4[3],
         sm[1], sm[4], sm[7], stm4[7],
         sm[2], sm[5], sm[8], stm4[11],
-
         stm4[12], stm4[13], stm4[14], stm4[15]
       );
       shapeComp.setTransform(m4);
       if (val[9] == "verbose")
         postrotmxflag = true;
-      RenderRequest();
-      SendComponentRotationMatrixMsg();
+      RenderRequest().then(()=> {
+          SendComponentRotationMatrixMsg();
+        }
+      );      
     }
 
     if (msgtype === "RotateAxisComponents" && shapeComp != null)
     { // rotating components from "Rotate around Vector" GUI control. Stage remains still
-      WebsockSendMsg('Rotating components around axis ' + pagename);
+      WebsockSendMsg('Rotating components around axis ');
       let sm = new Float32Array(9);
       let m4 = new NGL.Matrix4();
       componenttheta = parseFloat(val[3]);
@@ -1065,16 +1199,23 @@ function onMessage(e)
 
       if (val[4] == "verbose")
         postrotmxflag = true;
-      RenderRequest();
-      SendComponentRotationMatrixMsg();
+      RenderRequest().then(()=> {
+          SendComponentRotationMatrixMsg();
+        }
+      );      
     }
 
     if (msgtype === "AnimateRotateAxisComponents" && shapeComp != null) {
-      WebsockSendMsg('Animate rotating components around axis ' + pagename);
+      WebsockSendMsg('Animate rotating components around axis ');
       animationspeed = parseFloat(val[3])*0.05;
       animaaxis.x = parseFloat(val[0]);
       animaaxis.y = parseFloat(val[1]);
       animaaxis.z = parseFloat(val[2]);
+
+      if (animationspeed == 0.0)
+        StopAnimateBtn.style.display = "None";
+      else
+        StopAnimateBtn.style.display = "Block";
 
       AnimateRotation(animaaxis, animatheta);
 
@@ -1083,15 +1224,17 @@ function onMessage(e)
 
     if (msgtype === "TranslateHKLpoints" && shapeComp != null)
     {
-      WebsockSendMsg( 'Translating HKLs ' + pagename );
+      WebsockSendMsg( 'Translating HKLs ' );
       let strs = datval[1].split("\n");
       let sm = new Float32Array(3);
       let elmstrs = strs[0].split(",");
       for (let j=0; j<3; j++)
         sm[j] = parseFloat(elmstrs[j]);
       shapeComp.setPosition([ sm[0], sm[1], sm[2] ]);
-      RenderRequest();
-      SendOrientationMsg();
+      RenderRequest().then(()=> {
+          SendOrientationMsg("TranslateHKLpoints");
+        }
+      );
     }
 
     if (msgtype === "DrawSphere") {
@@ -1155,56 +1298,12 @@ function onMessage(e)
         r2[j] = parseFloat(val2[j+3]);
         rgb[j]= parseFloat(val2[j+6]);
       }
-      let radius = parseFloat(val2[11]);
-
-      if (vectorshape == null)
-        vectorshape = new NGL.Shape('vectorshape');
-
-      vectorshape.addArrow(r1, r2, [rgb[0], rgb[1], rgb[2]], radius);
+      let labelpos = parseFloat(val2[12]);
       let label = val2[9].trim();
-      if (label !== "")
-      {
-        let labelpos = parseFloat(val2[12]);
-        let pos = new NGL.Vector3()
-        let txtR = [
-          r1[0] * (1.0 - labelpos) + r2[0] * labelpos,
-          r1[1] * (1.0 - labelpos) + r2[1] * labelpos,
-          r1[2] * (1.0 - labelpos) + r2[2] * labelpos
-        ];
-        pos.x = txtR[0];
-        pos.y = txtR[1];
-        pos.z = txtR[2];
-
-        let elm = createDivElement(label, rgb)
-        annodivs.push([elm, pos]);  // store until we get a representation name
-      }
-      // if reprname is supplied with a vector then make a representation named reprname
-      // of this and all pending vectors stored in vectorshape and render them.
-      // Otherwise just accummulate the new vector
+      let radius = parseFloat(val2[11])* vectorwidth;
       let reprname = val2[10].trim();
       let autozoom = val2[13];
-      if (reprname != "")
-      {
-        let wasremoved = DeletePrimitives(reprname); // delete any existing vectors with the same name
-        let cmp = stage.addComponentFromObject(vectorshape);
-        for (let i = 0; i < annodivs.length; i++)
-        {
-          let elm = annodivs[i][0];
-          let pos = annodivs[i][1];
-          cmp.addAnnotation(pos, elm);
-        }
-        vectorshapeComps.push(cmp);
-        annodivs = [];
-        vectorreprs.push(
-          vectorshapeComps[vectorshapeComps.length-1].addRepresentation('vecbuf',
-                                                                      { name: reprname} )
-        );
-        if (autozoom == "True" && !wasremoved) // don't animate if adding a vector that was just removed above
-          vectorshapeComps[vectorshapeComps.length - 1].autoView(500) // half a second animation
-
-        vectorshape = null;
-        RenderRequest();
-      }
+      DrawVector(r1, r2, rgb, radius, label, labelpos, reprname, autozoom);
     }
 
     if (msgtype === "RemovePrimitives")
@@ -1235,8 +1334,20 @@ function onMessage(e)
       MakeColourChart();
       MakeButtons();
       MakePlusMinusButtons();
+    }
+
+    if (msgtype === "SetVectorWidth")
+    {
+      vectorwidth = parseFloat(val[0]);
       MakeHKL_Axis();
-      MakeXYZ_Axis();
+      RenderRequest();
+    }
+
+    if (msgtype === "GetReflectionsInFrustum")
+    {
+      RenderRequest();
+      maxReflInFrustum = parseInt(val[0]); 
+      GetReflectionsInFrustum();
     }
 
     if (msgtype === "SetMouseSpeed")
@@ -1263,7 +1374,7 @@ function onMessage(e)
       let far = parseFloat(val[1]);
       let origcameraZpos = parseFloat(val[2]);
       let zoom = parseFloat(val[3]);
-      stage.viewer.parameters.clipMode =  'camera';
+      stage.viewer.parameters.clipMode = 'camera';
       // clipScale = 'absolute' means clip planes are using scene dimensions
       stage.viewer.parameters.clipScale = 'absolute';
       clipFixToCamPosZ = true;
@@ -1287,11 +1398,16 @@ function onMessage(e)
       if (Number.isNaN(zoom) == false)
         stage.viewer.camera.zoom = zoom;
 // provide a string so async RenderRequest() to call GetReflectionsInFrustum() after rendering
-      RenderRequest("getfrustum");
+      RenderRequest("getfrustum").then(()=> {
+          WebsockSendMsg('ClipPlaneDistancesSet'); // releases clipplane_msg_sem semaphore in jsview_3d.py
+          SendOrientationMsg("getfrustum");
+          GetReflectionsInFrustum();
+        }
+      );
     }
 
     if (msgtype === "GetClipPlaneDistances")
-      ReturnClipPlaneDistances(true);
+      ReturnClipPlaneDistances("GetClipPlaneDistances");
 
     if (msgtype ==="JavaScriptCleanUp")
     {
@@ -1309,7 +1425,7 @@ function onMessage(e)
     if (msgtype === "PrintInformation") {
       hklequationmsg = datval[1];
       let infofsize = fontsize + 1; // slightly bigger font of infobanner to make it more prominent
-      let wp = getTextWidth(hklequationmsg, infofsize);
+      let wp = getTextWidth(hklequationmsg, infofsize)+3;
       if (infobanner != null) {
         infobanner.remove(); // delete previous infobanner if any
         infobanner = null;
@@ -1318,12 +1434,20 @@ function onMessage(e)
       MakePlusMinusButtons();
       if (hklequationmsg == "")
         return;
-      infobanner = addBottomDivBox(hklequationmsg, pmbottom, 65, wp + 2, 3 + infofsize, 
+      infobanner = addBottomDivBox(hklequationmsg, pmbottom+3, 65, wp + 2, 5 + infofsize, 
                                     "rgba(255, 255, 255, 1.0)", infofsize);
     }
 
     if (msgtype === "SetBrowserDebug") {
       isdebug = (val[0] === "true");
+    }
+
+    if (msgtype === "SimulateClick") {
+      document.dispatchEvent(simulate_click_evt);
+    }
+
+    if (msgtype === "UseWireFrame") {
+      iswireframe = (val[0] === "true");
     }
 
     if (msgtype === "BackgroundColour") {
@@ -1350,7 +1474,7 @@ function onMessage(e)
     if (msgtype === "AddHKLTTipIds") {
       ttipids = Array.from(new Float32Array(e.data)); // convert to plain javascript array so we can concatenate additional elements
       // assuming the above arrays have been initialised create the shape buffer
-      AddSpheresBin2ShapeBuffer(coordarray, colourarray, radiiarray, ttipids);
+      AddSpheresBin2ShapeBuffer(coordarray, colourarray, radiiarray, ttipids, iswireframe);
     }
 
     if (msgtype === "MakeColourChart")
@@ -1365,26 +1489,26 @@ function onMessage(e)
 
     if (msgtype ==="RenderStageObjects")
     {
-      if (shape != null) {
+      if (shape != null) 
+      {
         shapeComp = stage.addComponentFromObject(shape);
         MakeHKL_Axis();
         MakeXYZ_Axis();
-        repr = shapeComp.addRepresentation('buffer');
-        RenderRequest("notify_cctbx");
-        WebsockSendMsg('RenderStageObjects');
+        repr = shapeComp.addRepresentation('buffer', { wireframe: iswireframe } );
+        WebsockSendMsg('RenderStageObjects'); // tell python it may release hkls_drawn_sem semaphore
       }
     }
 
     if (msgtype == "SetDefaultOrientation")
     {
       SetDefaultOrientation();
-      WebsockSendMsg('DefaultOrientSet ' + pagename); 
+      WebsockSendMsg('DefaultOrientSet '); 
     }
 
     if (msgtype === "SetAutoView")
     {
       SetAutoview(shapeComp, 500);
-      WebsockSendMsg('AutoViewSet ' + pagename);
+      WebsockSendMsg('AutoViewSet ');
     }
 
     if (msgtype === "MakeImage") {
@@ -1405,7 +1529,7 @@ function onMessage(e)
           WebsockSendMsg(blob);
         }
 
-        WebsockSendMsg('ImageWritten ' + pagename);
+        WebsockSendMsg('ImageWritten ');
       });
     }
 
@@ -1413,6 +1537,7 @@ function onMessage(e)
       filename = val[0];
       //CHROME ONLY
       // html2canvas retains div legends when creaing an image blob
+      let oldbtnstyle = StopAnimateBtn.style.display;
       ResetViewBtn.style.display = "None"; // hide buttons and other GUL controls on this webpage
       StopAnimateBtn.style.display = "None";
       html2canvas(document.getElementById("viewport")).then(function (canvas) {
@@ -1432,8 +1557,8 @@ function onMessage(e)
         }
       });
       ResetViewBtn.style.display = "Block";
-      StopAnimateBtn.style.display = "Block";
-      WebsockSendMsg('ImageWritten ' + pagename);
+      StopAnimateBtn.style.display = oldbtnstyle;
+      WebsockSendMsg('ImageWritten ');
     }
 
     if (msgtype === "MakeBrowserDataColumnComboBox")
@@ -1479,11 +1604,9 @@ function onMessage(e)
       /*
       */
     }
+
     if (isdebug)
-    {
-      WebsockSendMsg('Received message: ' + msgtype);
-      debugmessage.innerText = dbgmsg;
-    }
+      WebsockSendMsg('Browser.JavaScript Done: ' + msgtype); // tell server We are done
   }
 
   catch(err)
@@ -1544,6 +1667,65 @@ Object.assign(tooltip.style, {
 });
 
 
+function DrawVector(r1, r2, rgb, radius, label, labelpos, reprname, autozoom)
+{
+  if (vectorshape == null)
+    vectorshape = new NGL.Shape('vectorshape');
+
+  let rad = radius*0.05;
+  vectorshape.addArrow(r1, r2, [rgb[0], rgb[1], rgb[2]], rad);
+  if (label !== "")
+  {
+    let pos = new NGL.Vector3()
+    let txtR = [
+      r1[0] * (1.0 - labelpos) + r2[0] * labelpos,
+      r1[1] * (1.0 - labelpos) + r2[1] * labelpos,
+      r1[2] * (1.0 - labelpos) + r2[2] * labelpos
+    ];
+    pos.x = txtR[0];
+    pos.y = txtR[1];
+    pos.z = txtR[2];
+
+    let r = parseInt(255*rgb[0]).toString();
+    let g = parseInt(255*rgb[1]).toString();
+    let b = parseInt(255*rgb[2]).toString();
+
+    let elm = createDivElement(label, [r,g,b]);
+    elm.style.color = "white";
+    elm.style.fontSize = fontsize.toString() + "pt";
+    elm.style.padding = "4px"
+
+    annodivs.push([elm, pos]);  // store until we get a representation name
+  }
+  // if reprname is supplied with a vector then make a representation named reprname
+  // of this and all pending vectors stored in vectorshape and render them.
+  // Otherwise just accummulate the new vector
+  if (reprname != "")
+  {
+    let wasremoved = DeletePrimitives(reprname); // delete any existing vectors with the same name
+    let cmp = stage.addComponentFromObject(vectorshape);
+    for (let i = 0; i < annodivs.length; i++)
+    {
+      let elm = annodivs[i][0];
+      let pos = annodivs[i][1];
+      cmp.addAnnotation(pos, elm);
+    }
+    vectorshapeComps.push(cmp);
+    annodivs = [];
+    vectorreprs.push(
+      vectorshapeComps[vectorshapeComps.length-1].addRepresentation('vecbuf',
+                                                                  { name: reprname} )
+    );
+    if (autozoom == "True" && !wasremoved) // don't animate if adding a vector that was just removed above
+      vectorshapeComps[vectorshapeComps.length - 1].autoView(500) // half a second animation
+      //SetAutoviewTimeout(vectorshapeComps[vectorshapeComps.length - 1], 500);
+    vectorshape = null;
+    RenderRequest();
+  }
+
+}
+
+
 function DefineHKL_Axes(hstart, hend, kstart, kend, 
                  lstart, lend, hlabelpos, klabelpos, llabelpos)
 {
@@ -1575,45 +1757,11 @@ function MakeHKL_Axis()
     || Lstarstart == null || Lstarend == null)
     return;
   //blue-x
-  shape.addArrow( Hstarstart, Hstarend , [ 0, 0, 1 ], 0.1);
+  DrawVector(Hstarstart, Hstarend , [ 0, 0, 1 ], vectorwidth, "h", 1.05, "Haxis", false);
   //green-y
-  shape.addArrow( Kstarstart, Kstarend, [ 0, 1, 0 ], 0.1);
+  DrawVector(Kstarstart, Kstarend, [ 0, 1, 0 ], vectorwidth, "k", 1.05, "Kaxis", false);
   //red-z
-  shape.addArrow( Lstarstart, Lstarend, [ 1, 0, 0 ], 0.1);
-
-  if (Helm != null) {
-    stage.compList[0].removeAnnotation(Helm);
-    stage.compList[0].removeAnnotation(Kelm);
-    stage.compList[0].removeAnnotation(Lelm);
-    Helm.remove();
-    Kelm.remove();
-    Lelm.remove();
-  }
-
-  Helm = document.createElement("div");
-  Helm.innerText = "h";
-  Helm.style.color = "white";
-  Helm.style.backgroundColor = "rgba(0, 0, 255, " + div_annotation_opacity + ")";
-  Helm.style.fontSize = fontsize.toString() + "pt";
-  Helm.style.padding = "4px"
-
-  Kelm = document.createElement("div");
-  Kelm.innerText = "k";
-  Kelm.style.color = "white";
-  Kelm.style.backgroundColor = "rgba(0, 255, 0, " + div_annotation_opacity + ")";
-  Kelm.style.fontSize = fontsize.toString() + "pt";
-  Kelm.style.padding = "4px"
-
-  Lelm = document.createElement("div");
-  Lelm.innerText = "l";
-  Lelm.style.color = "white";
-  Lelm.style.backgroundColor = "rgba(255, 0, 0, " + div_annotation_opacity + ")";
-  Lelm.style.fontSize = fontsize.toString() + "pt";
-  Lelm.style.padding = "4px"
-  
-  stage.compList[0].addAnnotation(Hlabelvec, Helm);
-  stage.compList[0].addAnnotation(Klabelvec, Kelm);
-  stage.compList[0].addAnnotation(Llabelvec, Lelm);
+  DrawVector( Lstarstart, Lstarend, [ 1, 0, 0 ], vectorwidth, "l", 1.05, "Laxis", false);
 };
 
 
@@ -1648,10 +1796,10 @@ function getOrientMsg()
 }
 
 // Distinguish between click and hover mouse events.
-function HoverPickingProxyfunc(pickingProxy) {  PickingProxyfunc(pickingProxy, 'hover'); }
+function HoverPickingProxyfunc(pickingProxy) { PickingProxyfunc(pickingProxy, 'hover'); }
 function ClickPickingProxyfunc(pickingProxy) { PickingProxyfunc(pickingProxy, 'click'); }
 
-// listen to hover or click signal to show a tooltip at an hkl or to post hkl id for matching  entry in 
+// listen to hover or click signal to show a tooltip at an hkl or to post hkl id for matching entry in 
 // millerarraytable in GUI or for visualising symmetry mates of the hkl for a given rotation operator
 function PickingProxyfunc(pickingProxy, eventstr) {
   // adapted from http://nglviewer.org/ngl/api/manual/interaction-controls.html#clicked
@@ -1974,7 +2122,7 @@ function AddSpheresBin2ShapeBuffer(coordarray, colourarray, radiiarray, ttipids)
     color: colours[curridx], // 1dim array [R0, G0, B0, R1, G1, B1,...] for all reflections
     radius: radii[curridx], // 1dim array [r0, r1, r3,...]for all reflections
     picking: ttips[curridx],
-  })
+  }, { disableImpostor: iswireframe })
   );
 
   if (shape == null)
@@ -1986,6 +2134,21 @@ function AddSpheresBin2ShapeBuffer(coordarray, colourarray, radiiarray, ttipids)
 }
 
 
+function webgl2CanvasPosition(x,y,z) 
+{
+  let r = new NGL.Vector3();
+  r.x = x;
+  r.y = y;
+  r.z = z;
+  r.add(stage.viewer.translationGroup.position);
+  r.applyMatrix4(stage.viewer.rotationGroup.matrix);
+  r.applyMatrix4(stage.viewer.camera.projectionMatrix);
+  let canvasX = (1 - r.x)*0.5 * stage.viewer.width;
+  let canvasY = (1 + r.y)*0.5 * stage.viewer.height;
+  return [canvasX, canvasY];
+}
+
+
 function GetReflectionsInFrustumFromBuffer(buffer) {
   // For the simple case where clip planes are parallel with the screen as in clipFar, clipNear.
   // Use cartesian coordinates of reflections stored in shapebufs[0].picking.cartpos
@@ -1994,24 +2157,38 @@ function GetReflectionsInFrustumFromBuffer(buffer) {
   if (buffer.parameters.opacity < 0.3) // use the same threshold as when tooltips won't show
     return [hkls_infrustums, rotid_infrustum];
 
+  let nrefl = 0;
   for (let i = 0; i < buffer.picking.cartpos.length; i++)
   {
-    let radius = buffer.geometry.attributes.radius.array[i];
+    let radius = 0.05* Math.abs(stage.viewer.parameters.clipFar -stage.viewer.parameters.clipNear)
+    // possibly needs a better default value in case of using wireframe
+    if (iswireframe == false) // no radius array available if using wireframe
+      radius = buffer.geometry.attributes.radius.array[i];
+    //radius=0.0;
     let x = buffer.picking.cartpos[i][0];
     let y = buffer.picking.cartpos[i][1];
     let z = buffer.picking.cartpos[i][2];
+
     let hklpos = new NGL.Vector3(x, y, z);
     let m = stage.viewer.modelGroup.children[0].matrixWorld;
     let currenthklpos = hklpos.applyMatrix4(m);
     let childZ = currenthklpos.z - stage.viewer.camera.position.z;
-    let infrustum = false;
-    if ((childZ + radius) <stage.viewer.parameters.clipFar && (childZ - radius) > stage.viewer.parameters.clipNear)
+    // do rough exclusion of reflections from frustum with clipplanes for the sake of speed
+    if ((childZ - radius) <stage.viewer.parameters.clipFar && (childZ + radius) > stage.viewer.parameters.clipNear)
     {
-      infrustum = true;
-      let hklid = buffer.picking.ids[i + 1];
-      let rotid = buffer.picking.ids[0];
-      hkls_infrustums.push(hklid);
-      rotid_infrustum.push(rotid);
+      if (nrefl >= maxReflInFrustum) // limit to avoid calling stage.viewer.pick() excessively
+        return [hkls_infrustums, rotid_infrustum];
+      let cv = webgl2CanvasPosition(x,y,z); 
+      // stage.viewer.pick() calling readRenderTargetPixels() evaluates points in frustum
+      let ret = stage.viewer.pick(cv[0], cv[1]); 
+      if (ret.pid !== 0)
+      {
+        nrefl++;
+        let hklid = buffer.picking.ids[i + 1];
+        let rotid = buffer.picking.ids[0];
+        hkls_infrustums.push(hklid);
+        rotid_infrustum.push(rotid);
+      }
     }
   }
   return [hkls_infrustums, rotid_infrustum];
@@ -2034,7 +2211,7 @@ function GetReflectionsInFrustum() {
         rotid_infrustum = rotid_infrustum.concat(arr[1]);
       }
   }
-  WebsockSendMsg('InFrustum:' + hkls_infrustums + ':' + rotid_infrustum);
+  WebsockSendMsg('InFrustum:[' + hkls_infrustums + ']:[' + rotid_infrustum + ']');
 }
 
 
@@ -2091,9 +2268,11 @@ function MakeButtons() {
     value: "Reset view",
     type: "button",
     onclick: function () {
-      SetDefaultOrientation();
-      RenderRequest();
-      SendOrientationMsg();
+      SetDefaultOrientation(false); // don't release python semaphore when SetDefaultOrientation isn't' called from python
+      RenderRequest().then(()=> {
+          SendOrientationMsg("MakeButtons");
+        }
+      );
     },
   }, { bottom: "10px", left: "10px", width: btnwidth.toString + "px", position: "absolute" }, fontsize);
   addElement(ResetViewBtn);
@@ -2107,12 +2286,13 @@ function MakeButtons() {
     type: "button",
     onclick: function () {
       animationspeed = -animationspeed;
-      if (animationspeed > 0 && animaaxis.length() > 0.0)
+      if (animationspeed > 0.0 && animaaxis.length() > 0.0)
         AnimateRotation(animaaxis, animatheta);
       WebsockSendMsg('ToggleAnimation');
     },
   }, { bottom: "10px", left: leftoffset.toString() + "px", width: btnwidth.toString + "px", position: "absolute" }, fontsize);
   addElement(StopAnimateBtn);
+  StopAnimateBtn.style.display = "None";
 }
 
 
@@ -2126,85 +2306,83 @@ function HKLscene()
   stage.viewer.container.appendChild(tooltip);
   // Always listen to click event as to display any symmetry hkls
   stage.signals.clicked.add(ClickPickingProxyfunc);
-
-  SetDefaultOrientation();
-
+  
   stage.mouseObserver.signals.dragged.add(
     function ( deltaX, deltaY)
     {
-      let msg = getOrientMsg();
+      //let msg = getOrientMsg();
       rightnow = timefunc();
       if (rightnow - timenow > 250)
       { // only post every 250 milli second as not to overwhelm python
         postrotmxflag = true;
-        ReturnClipPlaneDistances();
-        WebsockSendMsg('CurrentViewOrientation:\n' + msg);
+        ReturnClipPlaneDistances("mouseObserver.signals.dragged");
+        SendOrientationMsg("MouseDragged");
         timenow = timefunc();
       }
       tooltip.style.display = "none";
     }
   );
-
 
   stage.mouseObserver.signals.clicked.add(
     function (x, y)
     {
-      let msg = getOrientMsg();
-      WebsockSendMsg('CurrentViewOrientation:\n' + msg );
+      SendOrientationMsg("MouseClicked");
     }
   );
-
 
   stage.mouseObserver.signals.scrolled.add(
     function (delta)
     {
-      let msg = getOrientMsg();
+      //let msg = getOrientMsg();
       rightnow = timefunc();
       if (rightnow - timenow > 250)
       { // only post every 250 milli second as not to overwhelm python
         postrotmxflag = true;
-        ReturnClipPlaneDistances();
-        WebsockSendMsg('CurrentViewOrientation:\n' + msg );
+        SendOrientationMsg("MouseScrolled");
+        ReturnClipPlaneDistances("mouseObserver.signals.scrolled");
         timenow = timefunc();
       }
       tooltip.style.display = "none";
     }
   );
 
-
   stage.viewer.signals.rendered.add(
     function ()
     {
-      if (postrotmxflag === true) {
-        let msg = getOrientMsg();
-        WebsockSendMsg('CurrentViewOrientation:\n' + msg);
+      if (postrotmxflag === true) 
+      {
+        SendOrientationMsg("ViewerRendered");
         postrotmxflag = false;
+      }
+      if (requestedby != "")
+      {
+        WebsockSendMsg(requestedby + '_AfterRendering');
+        requestedby = "";
       }
     }
     
   );
 
-
   stage.viewerControls.signals.changed.add(
     function()
     {
-      let msg = getOrientMsg();
       rightnow = timefunc();
-      if (rightnow - timenow > 250)
+      let t = 500;
+      if (rightnow - timenow > t)
       { // only post every 250 milli second as not to overwhelm python
-        WebsockSendMsg('CurrentViewOrientation:\n' + msg );
         //ReturnClipPlaneDistances();
-        sleep(250).then(()=> {
-            ReturnClipPlaneDistances();
+        sleep(t).then(()=> {
+            if (isAutoviewing)
+              return;
+            //SendOrientationMsg("CurrentView");
+            //ReturnClipPlaneDistances("viewerControls.signals.changed");
           }
         );
         timenow = timefunc();
       }
     }
   );
-
-
-  //stage.tasks.onZeroOnce(GetReflectionsInFrustum);
+ 
 
   if (isdebug)
     stage.viewer.container.appendChild(debugmessage);
@@ -2215,7 +2393,7 @@ function HKLscene()
   stage.mouseControls.remove("drag-middle");
   stage.mouseControls.add("drag-middle", NGL.MouseActions.zoomDrag);
   stage.mouseControls.remove('clickPick-left'); // avoid undefined move-pick when clicking on a sphere
-
+ 
   //stage.mouseControls.remove("scroll");
   //stage.mouseControls.remove("scroll-ctrl");
   //stage.mouseControls.remove("scroll-shift");
@@ -2232,8 +2410,7 @@ function HKLscene()
 
 function OnUpdateOrientation()
 {
-  let msg = getOrientMsg();
-  WebsockSendMsg('MouseMovedOrientation:\n' + msg );
+  SendOrientationMsg('MouseMoved');
 }
 
 
@@ -2241,8 +2418,18 @@ function PageLoad()
 {
   try
   {
+    let ret = MyWebGL_Detect(); // defined in webgl_check.js
+    let msg = String(ret[1]);
+    if (ret[0] == false) {
+      let errmsg = "Critical WebGL problem! " + msg; 
+      WebsockSendMsg(errmsg);
+      throw new Error(errmsg, {cause: msg});
+    }
+    WebsockSendMsg(msg);
     //alert('In PageLoad');
-    document.addEventListener('DOMContentLoaded', function () { HKLscene(); }, false );
+    document.addEventListener('DOMContentLoaded', function () { 
+      HKLscene(); 
+    }, false );
     document.addEventListener('mouseup', function () {
       OnUpdateOrientation();
       GetReflectionsInFrustum();
@@ -2251,6 +2438,8 @@ function PageLoad()
     document.addEventListener('scroll', function (e) { OnUpdateOrientation(); }, false );
     // mitigate flickering on some PCs when resizing
     document.addEventListener('resize', function () { RenderRequest(); }, false);
+
+    document.addEventListener('simulate_click', function () { stage.viewer.requestRender(); }, false);
   }
   catch(err)
   {

@@ -2,6 +2,13 @@
 #include <simtbx/diffBragg/src/diffBragg.h>
 #include <assert.h>
 #include <stdbool.h>
+#include <cctbx/sgtbx/space_group.h>
+#include <cctbx/miller/asu.h>
+#include<unordered_map>
+#include <cctbx/sgtbx/reciprocal_space_asu.h>
+#include <boost/python/numpy.hpp>
+
+namespace np=boost::python::numpy;
 
 #pragma omp declare reduction(vec_double_plus : std::vector<double> : \
                               std::transform(omp_out.begin(), omp_out.end(), omp_in.begin(), omp_out.begin(), std::plus<double>())) \
@@ -375,6 +382,10 @@ diffBragg::diffBragg(const dxtbx::model::Detector& detector, const dxtbx::model:
                        0,.16,0,
                        0,0,.16;
 
+    db_cryst.rotate_principal_axes << 0.70710678,-0.70710678,0.,
+                                      0.70710678, 0.70710678,0.,
+                                      0.,0.,1.;
+
     lambda_managers[0]->value = 0;
     lambda_managers[1]->value = 1;
     use_lambda_coefficients = false;
@@ -403,7 +414,7 @@ diffBragg::diffBragg(const dxtbx::model::Detector& detector, const dxtbx::model:
 
     set_close_distances();
 
-    linearize_Fhkl();
+    linearize_Fhkl(false);
     //sanity_check_linear_Fhkl();
     //
     last_kernel_on_GPU=boost::python::object(); // object() returns  None
@@ -526,6 +537,7 @@ void diffBragg::update_dxtbx_geoms(
     double panel_rot_angS, double panel_offsetX, double panel_offsetY, double panel_offsetZ,
     bool force){
 
+    db_cu_flags.update_detector = true;
     int old_verbose = verbose;
     verbose = 0;
 
@@ -703,12 +715,18 @@ void diffBragg::update_dxtbx_geoms(
     SCITBX_ASSERT(close_distance > 0);
     verbose = old_verbose;
     set_close_distances();
+    db_cu_flags.update_panel_deriv_vecs=true;
+    db_cu_flags.update_detector=true;
     }
 
 void diffBragg::shift_originZ(const dxtbx::model::Detector& detector, double shiftZ){
-    for (int pid=0; pid< detector.size(); pid++)
-        db_det.pix0_vectors[pid*3 + 2] = detector[pid].get_origin()[2]/1000.0 + shiftZ;
-    set_close_distances();
+    if (shiftZ != prev_shiftZ){
+        for (int pid=0; pid< detector.size(); pid++)
+            db_det.pix0_vectors[pid*3 + 2] = detector[pid].get_origin()[2]/1000.0 + shiftZ;
+        set_close_distances();
+        db_cu_flags.update_detector=true;
+        prev_shiftZ = shiftZ;
+    }
 }
 
 void diffBragg::init_raw_pixels_roi(){
@@ -738,7 +756,7 @@ void diffBragg::initialize_managers(){
         pan_orig = boost::dynamic_pointer_cast<panel_manager>(panels[1+i_pan_orig]);
         if (pan_orig->refine_me){
             pan_orig->initialize(Npix_total, compute_curvatures);
-            update_detector_on_device=true;
+            db_cu_flags.update_detector=true;
         }
     }
 
@@ -746,7 +764,8 @@ void diffBragg::initialize_managers(){
         fcell_managers[0]->initialize(Npix_total, compute_curvatures);
         //fcell_managers[1]->initialize(Npix_total, compute_curvatures);
         //fcell_managers[2]->initialize(Npix_total, compute_curvatures);
-        update_Fhkl_on_device = true;
+        db_cu_flags.update_Fhkl = true;
+        db_cu_flags.update_Fhkl_scales = true;
         }
 
     for (int i_eta=0; i_eta<3; i_eta++){
@@ -774,7 +793,7 @@ void diffBragg::initialize_managers(){
         pan_rot = boost::dynamic_pointer_cast<panel_manager>(panels[manager_idx]);
         if (pan_rot->refine_me){
             update_panel_deriv_vecs_on_device=true;
-            update_detector_on_device=true;
+            db_cu_flags.update_detector=true;
             pan_rot->initialize(Npix_total, compute_curvatures);
         }
     }
@@ -785,6 +804,20 @@ void diffBragg::initialize_managers(){
 
 
 }
+
+af::shared<mat3>
+diffBragg::get_mosaic_blocks_prime() {
+    af::shared<mat3> result;
+    int num_blocks = mosaic_domains;
+    // TODO if refining aniso eta, then num_blocks for the primes is 3*mosaic_domains, address this case
+    for(mos_tic=0;mos_tic<num_blocks;++mos_tic) {
+        result.push_back(mat3( mosaic_umats_prime[9*mos_tic+0], mosaic_umats_prime[9*mos_tic+1], mosaic_umats_prime[9*mos_tic+2],
+                               mosaic_umats_prime[9*mos_tic+3], mosaic_umats_prime[9*mos_tic+4], mosaic_umats_prime[9*mos_tic+5],
+                               mosaic_umats_prime[9*mos_tic+6], mosaic_umats_prime[9*mos_tic+7], mosaic_umats_prime[9*mos_tic+8]));
+    }
+    return result;
+}
+
 
 void diffBragg::vectorize_umats(){
     /* vector store two copies of Umats, one unperturbed for reference */
@@ -989,12 +1022,13 @@ void diffBragg::refine(int refine_id){
         boost::shared_ptr<panel_manager> pan_orig = boost::dynamic_pointer_cast<panel_manager>(panels[1]);
         pan_orig->refine_me=true;
         pan_orig->initialize(Npix_total, compute_curvatures);
-        update_detector_on_device=true;
+        db_cu_flags.update_detector=true;
     }
     else if(refine_id==11){
         fcell_managers[0]->refine_me=true;
         fcell_managers[0]->initialize(Npix_total, compute_curvatures);
-        update_Fhkl_on_device = true;
+        db_cu_flags.update_Fhkl = true;
+        db_cu_flags.update_Fhkl_scales = true;
     }
 
     else if (refine_id==12 || refine_id==13){
@@ -1009,7 +1043,7 @@ void diffBragg::refine(int refine_id){
         pan_rot->refine_me=true;
         rotate_fs_ss_vecs_3D(0,0,0);
         pan_rot->initialize(Npix_total, compute_curvatures);
-        update_detector_on_device = true;
+        db_cu_flags.update_detector = true;
         update_panel_deriv_vecs_on_device = true;
     }
 
@@ -1017,21 +1051,21 @@ void diffBragg::refine(int refine_id){
         boost::shared_ptr<panel_manager> pan_orig = boost::dynamic_pointer_cast<panel_manager>(panels[2]);
         pan_orig->refine_me=true;
         pan_orig->initialize(Npix_total, compute_curvatures);
-        update_detector_on_device = true;
+        db_cu_flags.update_detector = true;
     }
 
     else if (refine_id==16){
         boost::shared_ptr<panel_manager> pan_orig = boost::dynamic_pointer_cast<panel_manager>(panels[3]);
         pan_orig->refine_me=true;
         pan_orig->initialize(Npix_total, compute_curvatures);
-        update_detector_on_device = true;
+        db_cu_flags.update_detector = true;
     }
     else if (refine_id==17){
         boost::shared_ptr<panel_manager> pan_rot = boost::dynamic_pointer_cast<panel_manager>(panels[4]);
         pan_rot->refine_me=true;
         rotate_fs_ss_vecs_3D(0,0,0);
         pan_rot->initialize(Npix_total, compute_curvatures);
-        update_detector_on_device = true;
+        db_cu_flags.update_detector = true;
         update_panel_deriv_vecs_on_device = true;
     }
     else if (refine_id==18){
@@ -1039,7 +1073,7 @@ void diffBragg::refine(int refine_id){
         pan_rot->refine_me=true;
         rotate_fs_ss_vecs_3D(0,0,0);
         pan_rot->initialize(Npix_total, compute_curvatures);
-        update_detector_on_device = true;
+        db_cu_flags.update_detector = true;
         update_panel_deriv_vecs_on_device = true;
     }
     else if (refine_id==19){
@@ -1110,6 +1144,27 @@ void diffBragg::print_if_refining(){
       printf("refining fdp slope\n");
 }
 
+void diffBragg::update_Fhkl_channels(np::ndarray& channels){
+    SCITBX_ASSERT (channels.shape(0)==sources);
+    db_beam.Fhkl_channels.clear();
+    int* channels_ptr = reinterpret_cast<int*>(channels.get_data());
+    for (int i=0; i < sources; i++){
+        int channel_id = *(channels_ptr+i);
+        db_beam.Fhkl_channels.push_back(channel_id);
+        if (verbose)
+            printf("source=%d channel_id=%d\n", i, channel_id);
+    }
+    db_cu_flags.update_Fhkl_channels=true;
+}
+
+boost::python::list diffBragg::get_Fhkl_channels(){
+    boost::python::list channels;
+    for (int i=0; i < db_beam.Fhkl_channels.size(); i++){
+        int channel_id = db_beam.Fhkl_channels [i];
+        channels.append(channel_id);
+    }
+    return channels;
+}
 
 void diffBragg::update_xray_beams(scitbx::af::versa<dxtbx::model::Beam, scitbx::af::flex_grid<> > const& value) {
     pythony_beams = value;
@@ -1167,6 +1222,7 @@ void diffBragg::quick_Fcell_update(boost::python::tuple const& value){
     }
     //update_linear_Fhkl();
     if(verbose) printf("done with quick update of Fhkl:\n");
+    db_cu_flags.update_Fhkl=true;
 }
 
 
@@ -1685,6 +1741,102 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     add_diffBragg_spots(panels_fasts_slows);
 }
 
+np::ndarray diffBragg::add_Fhkl_gradients(const af::shared<size_t>& panels_fasts_slows,
+    np::ndarray& residual, np::ndarray& variance, np::ndarray& trusted, np::ndarray& freq,
+    int num_Fhkl_channels, double Gscale, bool track, bool errors){
+
+    db_flags.track_Fhkl_indices = track;
+    db_flags.Fhkl_errors_mode = errors;
+
+    Npix_to_model = panels_fasts_slows.size()/3;
+
+    double* resid_ptr = reinterpret_cast<double*>(residual.get_data());
+    double* var_ptr = reinterpret_cast<double*>(variance.get_data());
+    bool* trust_ptr = reinterpret_cast<bool*>(trusted.get_data());
+    int* freq_ptr = reinterpret_cast<int*>(freq.get_data());
+
+    int n_data_alloc = first_deriv_imgs.residual.size();
+    while (n_data_alloc < Npix_to_model){
+        first_deriv_imgs.residual.push_back(0);
+        first_deriv_imgs.variance.push_back(0);
+        first_deriv_imgs.trusted.push_back(0);
+        first_deriv_imgs.freq.push_back(0);
+        n_data_alloc ++;
+    }
+
+    for (int i=0; i < Npix_to_model; i++){
+        double resid = *(resid_ptr+i);
+        double var = *(var_ptr+i);
+        bool trust = *(trust_ptr+i);
+        int fr = *(freq_ptr+i);
+        first_deriv_imgs.residual[i] = resid;
+        first_deriv_imgs.variance[i] = var;
+        first_deriv_imgs.trusted[i] = trust;
+        first_deriv_imgs.freq[i] = fr;
+    }
+
+    db_flags.Fhkl_gradient_mode = true;
+    db_flags.using_trusted_mask = true;
+    bool is_empty  = first_deriv_imgs.Fhkl_scale_deriv.empty();
+    for (int i=0; i < db_cryst.Num_ASU*num_Fhkl_channels; i ++){
+        if (is_empty)
+            first_deriv_imgs.Fhkl_scale_deriv.push_back(0);
+        else
+            first_deriv_imgs.Fhkl_scale_deriv[i] = 0;
+    }
+    if (db_flags.Fhkl_errors_mode){
+        first_deriv_imgs.Fhkl_hessian.clear();
+        for (int i=0; i < db_cryst.Num_ASU*num_Fhkl_channels; i++)
+            first_deriv_imgs.Fhkl_hessian.push_back(0);
+    }
+
+    // we need to supply the spot scale parameter
+    SCITBX_ASSERT(spot_scale==1);
+    spot_scale=Gscale;
+    add_diffBragg_spots(panels_fasts_slows);
+    spot_scale=1;
+
+    db_flags.using_trusted_mask = false;
+    db_flags.Fhkl_gradient_mode = false;
+    db_flags.track_Fhkl_indices = false;
+    db_flags.Fhkl_errors_mode = false;
+
+    //printf("3rd sanity check: Fhkl_scale_deriv[16128]=%10.7g\n", first_deriv_imgs.Fhkl_scale_deriv[16128]);
+    boost::python::tuple shape = boost::python::make_tuple(db_cryst.Num_ASU*num_Fhkl_channels);
+    boost::python::tuple stride = boost::python::make_tuple(sizeof(double));
+    np::dtype dt = np::dtype::get_builtin<double>();
+    np::ndarray output = np::empty(shape,dt);
+
+    if (errors) {
+        output = np::from_data(&first_deriv_imgs.Fhkl_hessian[0], dt, shape, stride, boost::python::object());
+    }
+    else {
+        output = np::from_data(&first_deriv_imgs.Fhkl_scale_deriv[0], dt, shape, stride, boost::python::object());
+    }
+    return output.copy();
+}
+
+void diffBragg::update_Fhkl_scale_factors(np::ndarray& scale_factors, int num_Fhkl_channels){
+    unsigned int Nscale = scale_factors.shape(0);
+    SCITBX_ASSERT(Nscale==db_cryst.Num_ASU * num_Fhkl_channels);
+    bool init_scales=first_deriv_imgs.Fhkl_scale.empty();
+    db_flags.Fhkl_have_scale_factors = true;
+    db_cryst.num_Fhkl_channels=num_Fhkl_channels;
+    db_cu_flags.update_Fhkl_scales=true;
+
+    double* scale_ptr = reinterpret_cast<double*>(scale_factors.get_data());
+    for(int i_chan=0; i_chan< num_Fhkl_channels; i_chan++){
+        for (int i_hkl=0; i_hkl< db_cryst.Num_ASU;i_hkl++){
+            int i = i_hkl + db_cryst.Num_ASU*i_chan;
+            double scale =  *(scale_ptr+i);
+            if (init_scales)
+                first_deriv_imgs.Fhkl_scale.push_back(scale);
+            else
+                first_deriv_imgs.Fhkl_scale[i] = scale;
+        }
+    }
+}
+
 // BEGIN diffBragg_add_spots
 void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows){
 
@@ -1717,41 +1869,55 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     int pan_rot_ids[3] = {0,4,5};
     int pan_orig_ids[3] = {1,2,3};
 
-    db_flags.refine_panel_rot.resize(3, false);
-    db_flags.refine_panel_origin.resize(3,false);
-    db_flags.refine_lambda.resize(2,false);
-    db_flags.refine_Bmat.resize(6,false);
-    db_flags.refine_Umat.resize(3,false);
-    db_flags.refine_Ncells.resize(3,false);
+    if (db_flags.refine_panel_rot.empty()){ // if one is empty, they're all empty
+        db_flags.refine_panel_rot.resize(3, false);
+        db_flags.refine_panel_origin.resize(3,false);
+        db_flags.refine_lambda.resize(2,false);
+        db_flags.refine_Bmat.resize(6,false);
+        db_flags.refine_Umat.resize(3,false);
+        db_flags.refine_Ncells.resize(3,false);
+        db_cu_flags.update_refine_flags=true;
+    }
 
     for(int i_pan=0;i_pan < 3; i_pan++){
         int i_pan_rot = pan_rot_ids[i_pan];
         int i_pan_orig = pan_orig_ids[i_pan];
-        if (panels[i_pan_rot]->refine_me)
-            db_flags.refine_panel_rot[i_pan] = true;
-        if (panels[i_pan_orig]-> refine_me)
-            db_flags.refine_panel_origin[i_pan] = true;
+        if (panels[i_pan_rot]->refine_me != db_flags.refine_panel_rot[i_pan]){
+            db_flags.refine_panel_rot[i_pan] = panels[i_pan_rot]->refine_me;
+            db_cu_flags.update_refine_flags=true;
+        }
+        if (panels[i_pan_orig]-> refine_me != db_flags.refine_panel_origin[i_pan_orig]){
+            db_flags.refine_panel_origin[i_pan] = panels[i_pan_orig]->refine_me;
+            db_cu_flags.update_refine_flags=true;
+        }
     }
     for (int i_uc = 0; i_uc < 6; i_uc++){
-        if (ucell_managers[i_uc]->refine_me)
-            db_flags.refine_Bmat[i_uc] = true;
+        if (ucell_managers[i_uc]->refine_me != db_flags.refine_Bmat[i_uc]){
+            db_flags.refine_Bmat[i_uc] = ucell_managers[i_uc]->refine_me;
+            db_cu_flags.update_refine_flags=true;
+        }
     }
 
     for (int i_rot =0; i_rot< 3; i_rot ++){
-        if (rot_managers[i_rot]->refine_me)
-            db_flags.refine_Umat[i_rot] = true;
+        if (rot_managers[i_rot]->refine_me != db_flags.refine_Umat[i_rot]){
+            db_flags.refine_Umat[i_rot] = rot_managers[i_rot]->refine_me;
+            db_cu_flags.update_refine_flags=true;
+        }
     }
 
     for (int i_lam=0; i_lam< 2; i_lam++){
-        if (lambda_managers[i_lam]->refine_me)
-            db_flags.refine_lambda[i_lam] = true;
+        if (lambda_managers[i_lam]->refine_me != db_flags.refine_lambda[i_lam]){
+            db_flags.refine_lambda[i_lam] = lambda_managers[i_lam]->refine_me;
+            db_cu_flags.update_refine_flags=true;
+        }
     }
 
-    if (Ncells_managers[0]->refine_me){
-        db_flags.refine_Ncells[0] = true;
-        if (! isotropic_ncells){
-            db_flags.refine_Ncells[1] = true;
-            db_flags.refine_Ncells[2] = true;
+    for (int i_nc=0; i_nc<3; i_nc++){
+        if (isotropic_ncells && i_nc >0)
+            continue;
+        if (Ncells_managers[i_nc]->refine_me != db_flags.refine_Ncells[i_nc]){
+            db_flags.refine_Ncells[i_nc] = Ncells_managers[i_nc]->refine_me;
+            db_cu_flags.update_refine_flags=true;
         }
     }
 
@@ -1840,7 +2006,7 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     image_type image(Npix_to_model,0.0);
     if(db_flags.wavelength_img){
         // TODO: `wavelength` is not a first derivative image, change membership in the future
-        first_deriv_imgs.wavelength.resize(Npix_to_model,0);
+        first_deriv_imgs.wavelength.resize(4*Npix_to_model,0); // store average wavelength and h,k,l
     }
     if (std::count(db_flags.refine_Umat.begin(), db_flags.refine_Umat.end(), true) > 0){
         first_deriv_imgs.Umat.resize(Npix_to_model*3, 0);
@@ -1900,7 +2066,7 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
 
     //fudge = 1.1013986013; // from manuscript computation
     gettimeofday(&t1,0 );
-    if (! use_cuda && getenv("DIFFBRAGG_USE_CUDA")==NULL){
+    if ((! use_gpu && getenv("DIFFBRAGG_USE_CUDA")==NULL && getenv("DIFFBRAGG_USE_KOKKOS")==NULL ) || force_cpu){
         diffBragg_sum_over_steps(
             Npix_to_model, panels_fasts_slows_vec,
             image,
@@ -1913,22 +2079,52 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
             db_flags);
         last_kernel_on_GPU=false;
         }
-    else { // we are using cuda
-#ifdef NANOBRAGG_HAVE_CUDA
+    else { // we are using cuda or kokkos
+#if defined DIFFBRAGG_HAVE_CUDA || defined DIFFBRAGG_HAVE_KOKKOS
         db_cu_flags.device_Id = device_Id;
         db_cu_flags.update_step_positions = update_step_positions_on_device;
         db_cu_flags.update_panels_fasts_slows = update_panels_fasts_slows_on_device;
-        db_cu_flags.update_sources = update_sources_on_device;
         db_cu_flags.update_umats = update_umats_on_device;
         db_cu_flags.update_dB_mats = update_dB_matrices_on_device;
         db_cu_flags.update_rotmats = update_rotmats_on_device;
-        db_cu_flags.update_Fhkl = update_Fhkl_on_device;
-        db_cu_flags.update_detector = update_detector_on_device;
-        db_cu_flags.update_refine_flags = update_refine_flags_on_device;
+        //db_cu_flags.update_Fhkl = update_Fhkl_on_device;
         db_cu_flags.update_panel_deriv_vecs = update_panel_deriv_vecs_on_device;
         db_cu_flags.Npix_to_allocate = Npix_to_allocate;
 
+      bool use_cuda = false;
+#ifdef DIFFBRAGG_HAVE_CUDA
+      use_cuda = use_gpu;
+#endif
+
+      if (use_cuda || getenv("DIFFBRAGG_USE_CUDA")!=NULL){
+#ifdef DIFFBRAGG_HAVE_CUDA
         diffBragg_sum_over_steps_cuda(
+             Npix_to_model, panels_fasts_slows_vec,
+             image,
+             first_deriv_imgs,
+             second_deriv_imgs,
+             db_steps,
+             db_det,
+             db_beam,
+             db_cryst,
+             db_flags,
+             db_cu_flags,
+             device_pointers,
+             TIMERS);
+        if(verbose)
+           printf("Ran the CUDA kernel\n");
+#else
+        bool DIFFBRAGG_USE_CUDA_flag_unsupported=false;
+        SCITBX_ASSERT(DIFFBRAGG_USE_CUDA_flag_unsupported);
+#endif
+      }
+      else if (use_gpu || getenv("DIFFBRAGG_USE_KOKKOS")!=NULL){
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+        if (!diffBragg_runner) {
+          diffBragg_runner = std::make_shared<diffBraggKOKKOS>();
+        }
+
+        diffBragg_runner->diffBragg_sum_over_steps_kokkos(
             Npix_to_model, panels_fasts_slows_vec,
             image,
             first_deriv_imgs,
@@ -1939,12 +2135,18 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
             db_cryst,
             db_flags,
             db_cu_flags,
-            device_pointers,
             TIMERS);
-        last_kernel_on_GPU=true;
-
+        if (verbose)
+            printf("Ran the Kokkos kernel\n");
 #else
-       // no statement
+        bool DIFFBRAGG_USE_KOKKOS_flag_unsupported=false;
+        SCITBX_ASSERT(DIFFBRAGG_USE_KOKKOS_flag_unsupported);
+#endif
+        }
+    last_kernel_on_GPU=true;
+#else
+    bool DIFFBRAGG_USE_KOKKOS_and_DIFFBRAGG_USE_CUDA_flags_unsupported=false;
+    SCITBX_ASSERT(DIFFBRAGG_USE_KOKKOS_and_DIFFBRAGG_USE_CUDA_flags_unsupported);
 #endif
     }
     gettimeofday(&t2, 0);
@@ -1956,7 +2158,7 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
         printf("Nsteps=%d\noversample=%d\ndet_thick_steps=%d\nsources=%d\nphisteps=%d\nmosaic_domains=%d\n",
                 db_steps.Nsteps,oversample,detector_thicksteps,sources,phisteps,mosaic_domains);
         printf("DIFFBRAGG isotropic Ncells=%d\n", isotropic_ncells);
-        if(use_cuda || getenv("DIFFBRAGG_USE_CUDA")!= NULL)
+        if(use_gpu || getenv("DIFFBRAGG_USE_CUDA")!= NULL || getenv("DIFFBRAGG_USE_KOKKOS")!= NULL)
             printf("TIME TO RUN DIFFBRAGG -GPU- (%llu iterations):  %3.10f ms \n",n_total_iter, time);
         else
             printf("TIME TO RUN DIFFBRAGG -CPU- (%llu iterations):  %3.10f ms \n",n_total_iter, time);
@@ -2059,7 +2261,6 @@ void diffBragg::add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows
     if(verbose) printf("done with pixel loop\n");
 } // END  of add_diffBragg_spots
 
-
 void diffBragg::diffBragg_rot_mats(){
     for (int i_rot=0; i_rot < 3; i_rot++){
         //if (rot_managers[i_rot]->refine_me){
@@ -2133,18 +2334,89 @@ void diffBragg::update_linear_Fhkl(){
         }
 }
 
-void diffBragg::linearize_Fhkl(){
+std::string get_hkl_key(int h, int k , int l){
+    std::string hkl_s ;
+    hkl_s = std::to_string(h) + ","+ std::to_string(k) + "," + std::to_string(l);
+    return hkl_s;
+}
+
+void diffBragg::linearize_Fhkl(bool compute_dists){
+//      TODO assert eig_O and hall_symbol are properly set before proceeding
+        cctbx::sgtbx::space_group sg = cctbx::sgtbx::space_group(db_cryst.hall_symbol);
+        Eigen::Matrix3d O_inv = db_cryst.eig_O.inverse();
+        if (verbose>1){
+            printf("Hall symbol %s\n", db_cryst.hall_symbol.c_str());
+            printf("O_inv:\n%.1f %.1f %.1f\n%.1f %.1f %.1f\n%.1f %.1f %.1f\n",
+                O_inv(0,0), O_inv(0,1), O_inv(0,2),
+                O_inv(1,0), O_inv(1,1), O_inv(1,2),
+                O_inv(2,0), O_inv(2,1), O_inv(2,2));
+        }
+
+        cctbx::sgtbx::reciprocal_space::asu asu(sg.type());
+
+        cctbx::uctbx::unit_cell ucell;
+        if (compute_dists){
+            double uc_a = a[0]*1e10;
+            double uc_b = b[0]*1e10;
+            double uc_c = c[0]*1e10;
+            double uc_alpha = alpha*RTD;
+            double uc_beta = beta*RTD;
+            double uc_gamma =gamma*RTD;
+            scitbx::af::double6 uc_par(uc_a, uc_b, uc_c,uc_alpha, uc_beta, uc_gamma);
+            ucell = cctbx::uctbx::unit_cell(uc_par);
+        }
+
+        db_cryst.ASUid_map.clear();
+        db_cryst.FhklLinear_ASUid.clear();
         db_cryst.FhklLinear.clear();
         db_cryst.Fhkl2Linear.clear();
+        db_cryst.ASU_dspace.clear();
+        db_cryst.ASU_Fcell.clear();
+
+        int asu_count = 0;
         for (int h = 0; h < h_range; h++) {
                 for (int k = 0; k < k_range; k++) {
                         for (int l = 0; l < l_range; l++) {
-                                db_cryst.FhklLinear.push_back(Fhkl[h][k][l]);
+                                double fhkl_val = Fhkl[h][k][l];
+
+                                int h0 = h+ h_min;
+                                int k0 = k+ k_min;
+                                int l0 = l+ l_min;
+
+                                Eigen::Vector3d HKL((double)h0, (double)k0, (double)l0);
+                                HKL = O_inv*HKL;
+                                h0 = (int)HKL[0];
+                                k0 = (int)HKL[1];
+                                l0 = (int)HKL[2];
+
+                                cctbx::miller::index<int> hkl0(h0,k0,l0);
+                                cctbx::miller::asym_index ai(sg, asu, hkl0);
+                                cctbx::miller::index_table_layout_adaptor ila = ai.one_column(true);
+                                cctbx::miller::index<int> hkl0_asu = ila.h();
+
+                                int h_asu = hkl0_asu[0];
+                                int k_asu = hkl0_asu[1];
+                                int l_asu = hkl0_asu[2];
+                                std::string key = get_hkl_key(h_asu, k_asu, l_asu);
+                                if (db_cryst.ASUid_map.count(key) == 0){
+                                    db_cryst.ASUid_map[key] = asu_count;
+                                    asu_count +=1;
+                                    if(compute_dists){
+                                        double d_spacing = ucell.d(hkl0);
+                                        db_cryst.ASU_dspace.push_back(d_spacing);
+                                        db_cryst.ASU_Fcell.push_back(fhkl_val);
+                                    }
+                                }
+                                int asu_id = db_cryst.ASUid_map[key];
+                                db_cryst.FhklLinear_ASUid.push_back(asu_id);
+
+                                db_cryst.FhklLinear.push_back(fhkl_val);
                                 if (complex_miller)
-                    db_cryst.Fhkl2Linear.push_back(Fhkl2[h][k][l]);
+                                    db_cryst.Fhkl2Linear.push_back(Fhkl2[h][k][l]);
                         }
                 }
         }
+        db_cryst.Num_ASU = asu_count;
 }
 
 void diffBragg::show_timing_stats(int MPI_RANK){ //}, boost_adaptbx::python::streambuf & output){
@@ -2153,10 +2425,24 @@ void diffBragg::show_timing_stats(int MPI_RANK){ //}, boost_adaptbx::python::str
         printf("RANK%d TIMINGS: add_diffBragg_spots pre kernel wrapper: %10.3f\n", MPI_RANK, TIMERS.add_spots_pre );
         printf("RANK%d TIMINGS: add_diffBragg_spots post kernel wrapper: %10.3f\n", MPI_RANK , TIMERS.add_spots_post);
         printf("RANK%d TIMINGS: add_diffBragg_spots kernel wrapper: %10.3f\n", MPI_RANK, TIMERS.add_spots_kernel_wrapper );
-        printf("RANK%d TIMINGS: add_diffBragg_spots CUDA alloc: %10.3f\n", MPI_RANK, TIMERS.cuda_alloc );
-        printf("RANK%d TIMINGS: add_diffBragg_spots CUDA copy host to dev: %10.3f\n", MPI_RANK, TIMERS.cuda_copy_to_dev );
-        printf("RANK%d TIMINGS: add_diffBragg_spots CUDA copy dev to host: %10.3f\n", MPI_RANK, TIMERS.cuda_copy_from_dev );
-        printf("RANK%d TIMINGS: add_diffBragg_spots CUDA kernel: %10.3f\n", MPI_RANK, TIMERS.cuda_kernel );
+        printf("RANK%d TIMINGS: add_diffBragg_spots device alloc: %10.3f\n", MPI_RANK, TIMERS.cuda_alloc );
+        printf("RANK%d TIMINGS: add_diffBragg_spots copy host-to-dev: %10.3f\n", MPI_RANK, TIMERS.cuda_copy_to_dev );
+
+        printf("RANK%d TIMINGS: host-to-dev Fhkl scales: %10.3f\n", MPI_RANK, TIMERS.copy_Fhkl_scale );
+        printf("RANK%d TIMINGS: host-to-dev sources: %10.3f\n", MPI_RANK, TIMERS.copy_sources );
+        printf("RANK%d TIMINGS: host-to-dev umats: %10.3f\n", MPI_RANK, TIMERS.copy_umats );
+        printf("RANK%d TIMINGS: host-to-dev amats: %10.3f\n", MPI_RANK, TIMERS.copy_amats );
+        printf("RANK%d TIMINGS: host-to-dev bmats: %10.3f\n", MPI_RANK, TIMERS.copy_bmats );
+        printf("RANK%d TIMINGS: host-to-dev rotmats: %10.3f\n", MPI_RANK, TIMERS.copy_rotmats );
+        printf("RANK%d TIMINGS: host-to-dev det: %10.3f\n", MPI_RANK, TIMERS.copy_det );
+        printf("RANK%d TIMINGS: host-to-dev nomhkl: %10.3f\n", MPI_RANK, TIMERS.copy_nomhkl );
+        printf("RANK%d TIMINGS: host-to-dev flags: %10.3f\n", MPI_RANK, TIMERS.copy_flags );
+        printf("RANK%d TIMINGS: host-to-dev fhkl: %10.3f\n", MPI_RANK, TIMERS.copy_fhkl );
+        printf("RANK%d TIMINGS: host-to-dev detderiv: %10.3f\n", MPI_RANK, TIMERS.copy_detderiv );
+        printf("RANK%d TIMINGS: host-to-dev pfs: %10.3f\n", MPI_RANK, TIMERS.copy_pfs );
+
+        printf("RANK%d TIMINGS: add_diffBragg_spots copy dev-to-host: %10.3f\n", MPI_RANK, TIMERS.cuda_copy_from_dev );
+        printf("RANK%d TIMINGS: add_diffBragg_spots device kernel: %10.3f\n", MPI_RANK, TIMERS.cuda_kernel );
         printf("RANK%d TIMINGS: Total kernel calls=%d\n", MPI_RANK, TIMERS.timings );
     }
     else printf("RANK%d No timing has occured since instantiation of diffBragg\n", MPI_RANK);
@@ -2165,13 +2451,92 @@ void diffBragg::show_timing_stats(int MPI_RANK){ //}, boost_adaptbx::python::str
 }
 
 af::flex_double diffBragg::ave_wavelength_img(){
-  int Npix = first_deriv_imgs.wavelength.size();
+  int Npix = first_deriv_imgs.wavelength.size()/4;
   af::flex_double wavelen_pixels = af::flex_double(Npix);
   for (int i=0; i <Npix; i++)
-    wavelen_pixels[i] = first_deriv_imgs.wavelength[i];
+    wavelen_pixels[i] = first_deriv_imgs.wavelength[i*4];
   return wavelen_pixels;
 }
 
+boost::python::tuple diffBragg::ave_hkl_img(){
+  int Npix = first_deriv_imgs.wavelength.size()/4;
+  af::flex_double miller_h_pixels = af::flex_double(Npix);
+  af::flex_double miller_k_pixels = af::flex_double(Npix);
+  af::flex_double miller_l_pixels = af::flex_double(Npix);
+  for (int i=0; i <Npix; i++){
+    miller_h_pixels[i] = first_deriv_imgs.wavelength[i*4+1];
+    miller_k_pixels[i] = first_deriv_imgs.wavelength[i*4+2];
+    miller_l_pixels[i] = first_deriv_imgs.wavelength[i*4+3];
+  }
+
+  boost::python::tuple result = boost::python::make_tuple(miller_h_pixels, miller_k_pixels, miller_l_pixels);
+  return result;
+}
+
+
+boost::python::tuple diffBragg::get_ave_I_cell(bool use_Fhkl_scale, int i_channel, bool use_geometric_mean){
+    SCITBX_ASSERT(db_cryst.ASU_dspace.size() > 0 );
+    SCITBX_ASSERT(db_cryst.dspace_bins.size()>0);
+    db_cryst.use_geometric_mean = use_geometric_mean;
+    std::vector<double> ave = I_cell_ave(db_cryst, use_Fhkl_scale, i_channel, first_deriv_imgs.Fhkl_scale);
+    boost::python::list ave_out;
+    boost::python::list counts_out;
+    for (int i=1; i< ave.size()/2; i++) {// skip the first bin, its for out-of-bounds inserts
+        ave_out.append(ave[i]);
+        counts_out.append(ave[i + ave.size()/2] );
+    }
+    boost::python::tuple out = boost::python::make_tuple(ave_out, counts_out);
+    return out ;
+}
+
+
+np::ndarray diffBragg::Fhkl_restraint_data(
+        int i_channel, double Fhkl_beta,
+        bool use_geometric_mean, int flag){
+    if (flag==0){
+        db_cryst.Fhkl_beta = Fhkl_beta;
+        db_cryst.use_geometric_mean = use_geometric_mean;
+    }
+    else if (flag==1){
+        db_cryst.Friedel_beta = Fhkl_beta;
+    }
+    else{
+        db_cryst.use_geometric_mean = false;
+        db_cryst.Finit_beta = Fhkl_beta;
+    }
+
+    std::vector<double> restraint_data;
+    for (int i=0; i < db_cryst.Num_ASU+1; i++)
+        restraint_data.push_back(0);
+    if (flag==0)
+        Ih_grad_terms(db_cryst, i_channel, first_deriv_imgs.Fhkl_scale, restraint_data);
+    else if (flag==1)
+        Friedel_grad_terms(db_cryst, i_channel, first_deriv_imgs.Fhkl_scale, restraint_data);
+    else
+        Finit_grad_terms(db_cryst, i_channel, first_deriv_imgs.Fhkl_scale, restraint_data);
+
+    boost::python::tuple shape = boost::python::make_tuple(restraint_data.size());
+    boost::python::tuple stride = boost::python::make_tuple(sizeof(double));
+    np::dtype dt = np::dtype::get_builtin<double>();
+    np::ndarray output = np::empty(shape,dt);
+
+    output = np::from_data(&restraint_data[0], dt, shape, stride, boost::python::object());
+    return output.copy();
+}
+
+
+void diffBragg::set_Friedel_mate_inds(boost::python::list pos_inds, boost::python::list neg_inds){
+    int N = boost::python::len(pos_inds);
+    SCITBX_ASSERT(boost::python::len(neg_inds) == N);
+    db_cryst.pos_inds.clear();
+    db_cryst.neg_inds.clear();
+    for (int i=0; i<N; i++){
+        int pos = boost::python::extract<int>(pos_inds[i]);
+        int neg = boost::python::extract<int>(neg_inds[i]);
+        db_cryst.pos_inds.push_back(pos);
+        db_cryst.neg_inds.push_back(neg);
+    }
+}
 
 } // end of namespace nanoBragg
 } // end of namespace simtbx

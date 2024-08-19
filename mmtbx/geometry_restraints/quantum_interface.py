@@ -2,6 +2,8 @@ from __future__ import absolute_import,division, print_function
 import os
 from libtbx import Auto
 
+from mmtbx.geometry_restraints import mopac_manager
+
 def env_exists_exists(env, var, check=True):
   if check:
     orca_env = env.get(var, False)
@@ -17,10 +19,13 @@ def is_orca_installed(env, var):
   return env_exists_exists(env, var)
 
 def is_mopac_installed(env, var):
-  return env_exists_exists(env, var)
+  if mopac_manager.get_exe():
+    return True
+  else:
+    return env_exists_exists(env, var)
 
 def is_qm_test_installed(env, var):
-  return env_exists_exists(env, var, check=False)
+  return True #env_exists_exists(env, var, check=False)
 
 program_options = {
   'orca' : (is_orca_installed, 'PHENIX_ORCA'),
@@ -63,48 +68,102 @@ qm_restraints
     .type = atom_selection
     .help = selection for core of atoms to calculate new restraints via a QM \
             geometry minimisation
+  run_in_macro_cycles = *first_only first_and_last all last_only test
+    .type = choice
+    .help = the steps of the refinement that the restraints generation is run
   buffer = 3.5
     .type = float
     .help = distance to include entire residues into the enviroment of the core
-  calculate_starting_energy = False
+  specific_atom_charges
+    .optional = True
+    .multiple = True
+    .short_caption = Specify the charge for a specific atom (mostly metal ions)
+    .style = auto_align
+  {
+    atom_selection = None
+      .type = atom_selection
+      .input_size = 400
+    charge = None
+      .type = float
+  }
+
+  calculate = *in_situ_opt starting_energy final_energy \
+starting_strain final_strain starting_bound final_bound \
+starting_binding final_binding \
+starting_higher_single_point final_higher_single_point
+    .type = choice(multi=True)
+    .help = Choose QM calculations to run
+    .caption = in_situ_optimisation_of_selection \
+      starting_energy_of_isolated_ligand final_energy_of_isolated_ligand \
+      strain_energy_of_starting_ligand_geometry \
+      strain_energy_of_final_ligand_geometry \
+      starting_energy_of_bound_ligand_cluster \
+      starting_binding_energy_of)ligand final_binding_energy_of_ligand \
+      final_energy_of_bound_ligand_cluster not_implemented not_implemented
+
+  write_files = *restraints pdb_core pdb_buffer pdb_final_core pdb_final_buffer
+    .type = choice(multi=True)
+    .help = which ligand or cluster files to write
+    .caption = restraints_file \
+      input_ligand_in_PDB_format input_cluster_in_PDB_format \
+      final_ligand_in_PDB_format final_cluster_in_PDB_format
+
+  protein_optimisation_freeze = *all None main_chain main_chain_to_beta main_chain_to_delta torsions
+    .type = choice(multi=True)
+    .help = the parts of protein residues that are frozen when an amino \
+            acid is the main selection
+    .caption = all None N_CA_C_O N_CA_CB_C_O N_CA_CB_CD_C_O all_torsions
+
+  remove_water = False
     .type = bool
-  calculate_final_energy = False
-    .type = bool
-  calculate_starting_strain = False
-    .type = bool
-  calculate_final_strain = False
-    .type = bool
-  write_pdb_core = False
-    .type = bool
-  write_pdb_buffer = False
-    .type = bool
-  write_final_pdb_core = False
-    .type = bool
-  write_final_pdb_buffer = False
-    .type = bool
-  write_restraints = True
-    .type = bool
+    .style = hidden
+
   restraints_filename = Auto
     .type = path
     .style = new_file
+    .help = restraints filename is based on model name if not specified
   cleanup = all *most None
-    .type = choice
-  run_in_macro_cycles = *first_only all test
     .type = choice
   ignore_x_h_distance_protein = False
     .type = bool
+    .help = skip check on transfer of proton during QM optimisation
+  ignore_lack_of_h_on_ligand = False
+    .type = bool
+    .help = skip check on protonation of ligand for entities such as MgF3
   capping_groups = True
     .type = bool
+
+  freeze_specific_atoms
+    .optional = True
+    .multiple = True
+    .short_caption = specify atoms of the main selection frozen in optimisation
+    .caption = can be used to freeze a ligand from moving too far. use Auto \
+               to freeze the atom closest to the centre of mass.
+    .style = auto_align
+  {
+    atom_selection = None
+      .type = atom_selection
+      .input_size = 400
+  }
+
   include_nearest_neighbours_in_optimisation = False
     .type = bool
+    .short_caption = include protein side chain in ligand optimisation
+    .help = include the side chains of protein in the QM optimisation
+
+  include_inter_residue_restraints = False
+    .type = bool
+    .short_caption = include residue (including metal) linking in restraints \
+                     update
+
   do_not_update_restraints = False
     .type = bool
     .style = hidden
     .help = For testing and maybe getting strain energy of standard restraints
-  do_not_even_calculate_qm_restraints = False
-    .type = bool
+  buffer_selection = None
+    .type = atom_selection
+    .help = use this instead of distance from selection
     .style = hidden
-    .help = For testing and maybe getting strain energy of standard restraints
   %s
 }
 '''
@@ -114,7 +173,7 @@ qm_restraints
       if package=='mopac':
         programs += ' *%s' % package
       else:
-        programs += '   %s' % package
+        programs += ' %s' % package
   if verbose: print(programs)
   if validate:
     assert programs, 'Need to set some parameters for QM programs %s' % program_options
@@ -122,41 +181,116 @@ qm_restraints
   qm_restraints_scope = qm_restraints_scope % qm_package_scope
   return qm_restraints_scope
 
-def electrons(model, log=None):
-  from elbow.quantum import electrons
+master_phil_str = get_qm_restraints_scope()
+
+def electrons(model, specific_atom_charges=None, log=None):
+  from libtbx.utils import Sorry
+  from mmtbx.ligands import electrons
   atom_valences = electrons.electron_distribution(
     model.get_hierarchy(), # needs to be altloc free
     model.get_restraints_manager().geometry,
+    specific_atom_charges=specific_atom_charges,
     log=log,
     verbose=False,
   )
-  atom_valences.validate(ignore_water=True,
-                         raise_if_error=False)
+  rc = atom_valences.validate(ignore_water=True,
+                              raise_if_error=False)
+  # rc = atom_valences.report(ignore_water)
+  if rc:
+    print('''
+  Unusual atom valences
+%s
+    ''' % str(atom_valences), file=log)
+    print(atom_valences)
+    for key, item in rc.items():
+      print('  %s' % key, file=log)
+      for i in item:
+        print('    %s' % i[0], file=log)
+    # raise Sorry('Unusual charges found')
   charged_atoms = atom_valences.get_charged_atoms()
   return atom_valences.get_total_charge()
 
-def get_safe_filename(s):
+def get_safe_filename(s, compact_selection_syntax=True):
+  assert compact_selection_syntax
+  if compact_selection_syntax:
+    s=s.replace('chain', '')
+    s=s.replace('resid', '')
+    s=s.replace('resseq', '')
+    s=s.replace('resname', '')
+    s=s.replace('and', '')
   while s.find('  ')>-1:
     s=s.replace('  ',' ')
+  if s[0]==' ': s=s[1:]
   s=s.replace(' ','_')
   s=s.replace("'",'_prime_')
   s=s.replace('*','_star_')
   s=s.replace('(','_lb_')
   s=s.replace(')','_rb_')
+  s=s.replace('=', '_equals_')
+  s=s.replace(':', '_colon_')
   return s
 
-def get_preamble(macro_cycle, i, qmr, old_style=False):
+def populate_qmr_defaults(qmr):
+  def default_defaults(qmr):
+    if qmr.package.basis_set is Auto:
+      qmr.package.basis_set=''
+    if qmr.package.solvent_model is Auto:
+      qmr.package.solvent_model=''
+    if qmr.package.multiplicity is Auto:
+      qmr.package.multiplicity=1
+    if qmr.package.charge is Auto:
+      qmr.package.charge=0
+  program = qmr.package.program
+  if program=='test':
+    pass
+  elif program=='orca':
+    default_defaults(qmr)
+    if qmr.package.method is Auto:
+      qmr.package.method='AM1'
+      qmr.package.method='PBEh-3c'
+  elif program=='mopac':
+    default_defaults(qmr)
+    if qmr.package.method is Auto:
+      qmr.package.method='PM7'
+      qmr.package.method='PM6-D3H4'
+  else:
+    assert 0
+  return qmr
+
+def get_working_directory(model, params, prefix=None):
+  rc = 'qm_work_dir'
+  return rc
+  if prefix is None:
+    prefix = getattr(params.output, 'prefix', None)
+  if prefix is not None:
+    rc='%s_%s' % (prefix, rc)
+  return rc
+
+def get_preamble(macro_cycle, i, qmr, old_style=False, compact_selection_syntax=True):
+  qmr = populate_qmr_defaults(qmr)
   s=''
   if macro_cycle is not None:
     s+='%02d_' % macro_cycle
+  # else:
+  #   s+='00_'
   if old_style:
     s+='%02d_%s_%s' % (i+1, get_safe_filename(qmr.selection), qmr.buffer)
   else:
-    s+='%s_%s' % (get_safe_filename(qmr.selection), qmr.buffer)
+    s+='%s_%s' % (get_safe_filename(qmr.selection,
+                                    compact_selection_syntax=compact_selection_syntax),
+                  qmr.buffer)
   if qmr.capping_groups:
     s+='_C'
   if qmr.include_nearest_neighbours_in_optimisation:
     s+='_N'
+  if 'main_chain_to_delta' in qmr.protein_optimisation_freeze:
+    s+='_D'
+  elif 'main_chain_to_beta' in qmr.protein_optimisation_freeze:
+    s+='_B'
+  elif 'main_chain' in qmr.protein_optimisation_freeze:
+    s+='_S'
+  if 'torsions' in qmr.protein_optimisation_freeze:
+    s+='_T'
   if qmr.package.method is not Auto:
     s+='_%s' % get_safe_filename(qmr.package.method)
   if qmr.package.basis_set is not Auto and qmr.package.basis_set:
@@ -181,6 +315,10 @@ def is_any_quantum_package_installed(env):
     .help = QM
     .expert_level = 3
   {
+    working_directory = None
+      .type = path
+      .style = hidden
+      .caption = not implemented
     %s
   }
 ''' % get_qm_restraints_scope()
@@ -215,43 +353,10 @@ def is_quantum_interface_active(params, verbose=False):
   if not hasattr(params, 'qi'):
     if verbose: assert 0
     return False
-  if verbose: print('  len(qm_restraints)=%d' % len(params.qi.qm_restraints))
   if len(params.qi.qm_restraints):
     if validate_qm_restraints(params.qi.qm_restraints, verbose=verbose):
       return True, 'qm_restraints' # includes restraints and energy
   return False
-
-def is_qi_energy_pre_refinement(params,
-                                macro_cycle,
-                                ):
-  assert 0
-  qi = is_quantum_interface_active(params)
-  if qi:
-    rc = []
-    if qi[1]=='qm_restraints':
-      for i, qmr in enumerate(params.qi.qm_restraints):
-        if macro_cycle==1:
-          if qmr.calculate_starting_energy or qmr.calculate_starting_strain:
-            rc.append(True)
-    return True in rc
-  else:
-    return False
-
-def is_qi_energy_post_refinement(params,
-                                macro_cycle,
-                                ):
-  assert 0
-  qi = is_quantum_interface_active(params)
-  if qi:
-    rc = []
-    if qi[1]=='qm_restraints':
-      for i, qmr in enumerate(params.qi.qm_restraints):
-        if macro_cycle==params.main.number_of_macro_cycles:
-          if qmr.calculate_final_energy or qmr.calculate_final_strain:
-            rc.append(True)
-    return True in rc
-  else:
-    return False
 
 def is_quantum_interface_active_this_macro_cycle(params,
                                                  macro_cycle,
@@ -259,6 +364,7 @@ def is_quantum_interface_active_this_macro_cycle(params,
                                                  verbose=False):
   from mmtbx.geometry_restraints.quantum_restraints_manager import running_this_macro_cycle
   qi = is_quantum_interface_active(params)
+  if verbose: print('qi',qi,'energy_only',energy_only,'macro_cycle',macro_cycle)
   if qi:
     rc = []
     if qi[1]=='qm_restraints':
@@ -266,10 +372,17 @@ def is_quantum_interface_active_this_macro_cycle(params,
       if hasattr(params, 'main'):
         number_of_macro_cycles = params.main.number_of_macro_cycles
       for i, qmr in enumerate(params.qi.qm_restraints):
-        rc.append(running_this_macro_cycle(qmr,
-                                           macro_cycle,
-                                           number_of_macro_cycles,
-                                           energy_only=energy_only))
+        pre_refinement=True
+        if energy_only and macro_cycle==number_of_macro_cycles:
+          pre_refinement=False
+        tmp = running_this_macro_cycle(qmr,
+                                       macro_cycle,
+                                       number_of_macro_cycles,
+                                       energy_only=energy_only,
+                                       pre_refinement=pre_refinement,
+                                       verbose=verbose)
+        if verbose: print(tmp)
+        if tmp: rc.append(True)
     else:
       assert 0
     return rc
@@ -282,48 +395,48 @@ class unique_item_list(list):
       list.append(self, item)
 
 def get_qi_macro_cycle_array(params, verbose=False, log=None):
+  from mmtbx.geometry_restraints.quantum_restraints_manager import running_this_macro_cycle
   qi = is_quantum_interface_active(params)
-  number_of_macro_cycles = params.main.number_of_macro_cycles
-  tmp=[]
-  for i in range(number_of_macro_cycles+1):
-    tmp.append(unique_item_list())
+  if not qi: return {}
+  if hasattr(params, 'main'):
+    number_of_macro_cycles = params.main.number_of_macro_cycles
+  else:
+    number_of_macro_cycles = 1
   if qi:
+    data={}
     for i, qmr in enumerate(params.qi.qm_restraints):
+      data[qmr.selection]=[]
       rc=[]
-      for i in range(number_of_macro_cycles+1):
+      for j in range(number_of_macro_cycles+1):
         rc.append(unique_item_list())
-      if qmr.calculate_starting_strain:
-        rc[1].append('strain')
-      elif qmr.calculate_starting_energy:
-        rc[1].append('energy')
-      if not qmr.do_not_even_calculate_qm_restraints:
-        if qmr.run_in_macro_cycles=='first_only':
-          rc[1].append('restraints')
-        elif qmr.run_in_macro_cycles=='all':
-          for j in range(1,number_of_macro_cycles+1):
-            rc[j].append('restraints')
-        elif qmr.run_in_macro_cycles=='test':
-          rc[1].append('test')
-      if qmr.calculate_final_strain:
-        rc[-1].append('strain')
-      elif qmr.calculate_final_energy:
-        rc[-1].append('energy')
-    if verbose:
-      print('    %s' % qmr.selection, file=log)
-      for j, actions in enumerate(rc):
-        if actions:
-          print('      %2d : %s' % (j, ' '.join(actions)), file=log)
-    for j, actions in enumerate(rc):
-      for action in actions:
-        tmp[j].append(action)
-  return tmp
+        yn = running_this_macro_cycle(qmr, j, number_of_macro_cycles)
+        if yn:
+          rc[j].append(yn)
+        pre_refinement=(j!=number_of_macro_cycles)
+        yn = running_this_macro_cycle(qmr, j, number_of_macro_cycles,
+                                           energy_only=True,
+                                           pre_refinement=pre_refinement)
+        if yn:
+          for k in range(len(yn)):
+            yn[k]=yn[k].split('_')[-1]
+          rc[j]+=yn
+      data[qmr.selection] = rc
+      if verbose:
+        print('    %s' % qmr.selection, file=log)
+        for j, actions in enumerate(rc):
+          if actions:
+            print('      %2d : %s' % (j, ' '.join(actions)), file=log)
+    if 0:
+      for key, item in data.items():
+        print(key, item)
+  return data
 
 def digester(model, geometry, params, log=None):
   active, choice = is_quantum_interface_active(params)
   assert active
   if not model.has_hd():
     from libtbx.utils import Sorry
-    raise Sorry('Model must has Hydrogen atoms')
+    raise Sorry('Model must have Hydrogen atoms')
   if choice=='qm_restraints':
     from mmtbx.geometry_restraints import quantum_restraints_manager
     geometry = quantum_restraints_manager.digester(model,

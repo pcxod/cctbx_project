@@ -28,7 +28,8 @@ class plot_container(wx.BoxSizer, wxtbx.MouseWheelTransparencyMixin):
                 handle_left_click=False,
                 show_data_points=True,
                 point_types=('o', '^', '+', 's', 'D'),
-                title_alignment="right"):
+                title_alignment="right",
+                toolbar_position=None):
     wx.BoxSizer.__init__(self, wx.VERTICAL)
     adopt_init_args(self, locals())
     self._fonts = {}
@@ -80,7 +81,12 @@ class plot_container(wx.BoxSizer, wxtbx.MouseWheelTransparencyMixin):
         self.figure.figurePatch.set_alpha(0.0)
       self.canvas = FigureCanvasWxAgg(self.parent, -1, self.figure)
       self.canvas.toolbar = oop.null()
-      self.figmgr = FigureManager(self.canvas, 1, self)
+      try: # XXX TEMPORARY Python 3 FIX TT  conda_base/lib/python3.8/site-packages/matplotlib/backends/backend_wx.py", line 1041, in set_window_title AttributeError: 'RefinementStatsPlot' object has no attribute 'SetTitle'
+        self.figmgr = FigureManager(self.canvas, 1, self)
+      except Exception as e:
+        pass
+      if toolbar_position and self.figmgr.toolbar:
+        self.figmgr.toolbar.SetPosition(toolbar_position)
       self.Add(self.canvas, 1, wx.EXPAND|wx.ALL)
       self.setup_fonts()
       self.null_fmt = matplotlib.ticker.NullFormatter()

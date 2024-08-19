@@ -80,7 +80,7 @@ secondary_structure
       .type = bool
       .style = noauto
       .help = Turn on secondary structure restraints for protein
-    search_method = *ksdssp mmtbx_dssp from_ca cablam
+    search_method = *ksdssp from_ca cablam
       .type = choice
       .help = Particular method to search protein secondary structure.
     distance_ideal_n_o = 2.9
@@ -220,6 +220,8 @@ class manager(object):
     self.stats = {'n_protein_hbonds':0, 'n_na_hbonds':0, 'n_na_hbond_angles':0,
         'n_na_basepairs':0, 'n_na_stacking_pairs':0}
 
+    if not pdb_hierarchy:
+      pdb_hierarchy = iotbx.pdb.hierarchy.root()
     atoms = pdb_hierarchy.atoms()
     i_seqs = atoms.extract_i_seq()
     if (i_seqs.all_eq(0)):
@@ -370,10 +372,11 @@ class manager(object):
     return None
 
   def find_sec_str(self, pdb_hierarchy):
-    if (pdb_hierarchy.atoms_size() > 99999 and
+    if ((pdb_hierarchy.atoms_size() > 99999 or not pdb_hierarchy.fits_in_pdb_format()) and
         self.params.secondary_structure.protein.search_method == "ksdssp"):
-      print("Warning!!! ksdssp method is not applicable for" + \
-          "structures with more than 99999 atoms!\nSwitching to from_ca.", file=self.log)
+      print("\n".join([
+          "Warning!!! ksdssp method is not applicable for",
+          "structures that cannot fit in PDB format. Switching to from_ca."]), file=self.log)
       self.params.secondary_structure.protein.search_method = "from_ca"
     if self.params.secondary_structure.protein.search_method == "ksdssp":
       pdb_str = pdb_hierarchy.as_pdb_string()
@@ -382,13 +385,6 @@ class manager(object):
       return iotbx.pdb.secondary_structure.annotation.from_records(
           records=records,
           log=self.log)
-    elif self.params.secondary_structure.protein.search_method == "mmtbx_dssp":
-      from mmtbx.secondary_structure import dssp
-      print("  running mmtbx.dssp...", file=self.log)
-      return dssp.dssp(
-        pdb_hierarchy=pdb_hierarchy,
-        pdb_atoms=self.pdb_atoms,
-        out=null_out()).get_annotation()
     elif self.params.secondary_structure.protein.search_method == "from_ca":
       from mmtbx.secondary_structure import find_ss_from_ca
       from_ca_args = []

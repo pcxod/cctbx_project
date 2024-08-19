@@ -4,12 +4,14 @@ from iotbx import pdb
 from libtbx.test_utils import approx_equal
 from libtbx.utils import null_out
 from libtbx.easy_pickle import loads, dumps
+from iotbx.data_manager import DataManager
 import libtbx.load_env
 import time
-import os
+import json
 
 #protein
 pdb_str_1 = """
+MODEL        1
 ATOM    556  N   LEU A  71      32.763  35.831  23.090  1.00 12.71           N
 ATOM    557  CA  LEU A  71      34.145  35.472  23.481  1.00 16.06           C
 ATOM    558  C   LEU A  71      34.239  35.353  24.979  1.00 18.09           C
@@ -48,151 +50,118 @@ ATOM    590  NE  ARG A  74      43.311  29.735  30.563  0.45 41.13           N
 ATOM    591  CZ  ARG A  74      44.174  29.905  29.554  0.45 41.91           C
 ATOM    592  NH1 ARG A  74      43.754  30.312  28.356  0.45 42.75           N
 ATOM    593  NH2 ARG A  74      45.477  29.726  29.763  0.45 41.93           N
+ENDMDL
 END
 """
 
-def exercise_clashscore_old():
-  if (not libtbx.env.has_module(name="probe")):
-    print("Skipping exercise_clashscore(): probe not configured")
-    return
-
-  pdb_io = pdb.input(source_info=None, lines=pdb_str_1)
-  pdb_hierarchy = pdb_io.construct_hierarchy()
-  cs = clashscore.clashscore(pdb_hierarchy=pdb_hierarchy, out=null_out())
-  for unpickle in [False, True] :
-    if (unpickle):
-      cs = loads(dumps(cs))
-    c_score = cs.get_clashscore()
-    assert approx_equal(c_score, 35.29, eps=0.01)
-    bad_clashes_list = cs.results
-    assert ([ c.format_old() for c in bad_clashes_list ] ==
-      [' A  72  ARG  HG2  A  72  ARG  O   :1.038',
-       ' A  72  ARG  CG   A  72  ARG  O   :0.465',
-       ' A  71  LEU  HA   A  71  LEU HD12 :0.446']), [ c.format_old() for c in bad_clashes_list ]
-
-  #test nuclear distances
-  cs = clashscore.clashscore(pdb_hierarchy=pdb_hierarchy, nuclear=True)
-  for unpickle in [False, True] :
-    if (unpickle):
-      cs = loads(dumps(cs))
-    c_score = cs.get_clashscore()
-    assert approx_equal(c_score, 58.82, eps=0.01)
-    bad_clashes_list = cs.results
-    assert ([ c.format_old() for c in bad_clashes_list ] ==
-      [ ' A  72  ARG  HG2  A  72  ARG  O   :1.082',
-        ' A  72  ARG  CG   A  72  ARG  O   :0.622',
-        ' A  71  LEU  HA   A  71  LEU HD12 :0.535',
-        ' A  72  ARG  HB3  A  72  ARG  HE  :0.475',
-        ' A  72  ARG  HD3  A  72  ARG HH11 :0.451'])
-
-  #test B factor cutoff
-  cs = clashscore.clashscore(pdb_hierarchy=pdb_hierarchy, b_factor_cutoff=40)
-  for unpickle in [False, True] :
-    if (unpickle):
-      cs = loads(dumps(cs))
-    c_score = cs.get_clashscore()
-    assert approx_equal(c_score, 35.29, eps=0.01)
-    c_score_b_cutoff = cs.get_clashscore_b_cutoff()
-    assert approx_equal(c_score_b_cutoff, 39.47, eps=0.01)
-    bad_clashes_list = cs.results
-    assert ([ c.format_old() for c in bad_clashes_list ] ==
-      [' A  72  ARG  HG2  A  72  ARG  O   :1.038',
-       ' A  72  ARG  CG   A  72  ARG  O   :0.465',
-       ' A  71  LEU  HA   A  71  LEU HD12 :0.446'])
-
 def exercise_clashscore():
-  if (not libtbx.env.has_module(name="probe")):
-    print("Skipping exercise_clashscore(): probe not configured")
-    return
+  for cp in [True, False]:
+    pdb_io = pdb.input(source_info=None, lines=pdb_str_1)
+    pdb_hierarchy = pdb_io.construct_hierarchy()
+    cs = clashscore.clashscore(
+        pdb_hierarchy=pdb_hierarchy,
+        fast = False,
+        condensed_probe=cp,
+        out=null_out())
+    for unpickle in [False, True] :
+      if (unpickle):
+        cs = loads(dumps(cs))
+      c_score = cs.get_clashscore()
+      assert approx_equal(c_score, 35.29, eps=0.01)
+      bad_clashes_list = cs.results
+      assert ([ c.format_old() for c in bad_clashes_list ] ==
+        [' A  72  ARG  HG2  A  72  ARG  O   :1.038',
+        ' A  72  ARG  CG   A  72  ARG  O   :0.465',
+        ' A  71  LEU  HA   A  71  LEU HD12 :0.446']), [ c.format_old() for c in bad_clashes_list ]
 
-  pdb_io = pdb.input(source_info=None, lines=pdb_str_1)
-  pdb_hierarchy = pdb_io.construct_hierarchy()
-  cs = clashscore.clashscore(
-      pdb_hierarchy=pdb_hierarchy,
-      fast = False,
-      condensed_probe=True,
-      out=null_out())
-  for unpickle in [False, True]:
-    if unpickle:
-      cs = loads(dumps(cs))
-    c_score = cs.get_clashscore()
-    assert approx_equal(c_score, 35.29, eps=0.01)
-    bad_clashes_list = cs.results
-    assert ([ c.format_old() for c in bad_clashes_list ] ==
-      [' A  72  ARG  HG2  A  72  ARG  O   :1.048',
-      ' A  71  LEU  HA   A  71  LEU HD12 :0.768',
-      ' A  72  ARG  CG   A  72  ARG  O   :0.720']), [ c.format_old() for c in bad_clashes_list ]
+    #test nuclear distances
+    cs = clashscore.clashscore(
+        pdb_hierarchy=pdb_hierarchy,
+        fast = False,
+        condensed_probe=cp,
+        nuclear=True)
+    for unpickle in [False, True] :
+      if (unpickle):
+        cs = loads(dumps(cs))
+      c_score = cs.get_clashscore()
+      assert approx_equal(c_score, 58.82, eps=0.01)
+      bad_clashes_list = cs.results
+      assert ([ c.format_old() for c in bad_clashes_list ] ==
+        [ ' A  72  ARG  HG2  A  72  ARG  O   :1.082',
+          ' A  72  ARG  CG   A  72  ARG  O   :0.622',
+          ' A  71  LEU  HA   A  71  LEU HD12 :0.535',
+          ' A  72  ARG  HB3  A  72  ARG  HE  :0.475',
+          ' A  72  ARG  HD3  A  72  ARG HH11 :0.451'])
 
-  #test nuclear distances
-  cs = clashscore.clashscore(
-      pdb_hierarchy=pdb_hierarchy,
-      fast = False,
-      condensed_probe=True,
-      nuclear=True)
-  for unpickle in [False, True] :
-    if (unpickle):
-      cs = loads(dumps(cs))
-    c_score = cs.get_clashscore()
-    assert approx_equal(c_score, 58.82, eps=0.01)
-    bad_clashes_list = cs.results
-    assert ([ c.format_old() for c in bad_clashes_list ] ==
-      [' A  72  ARG  HG2  A  72  ARG  O   :1.085',
-      ' A  71  LEU  HA   A  71  LEU HD12 :0.793',
-      ' A  72  ARG  CG   A  72  ARG  O   :0.720',
-      ' A  72  ARG  HD3  A  72  ARG HH11 :0.669',
-      ' A  72  ARG  HB3  A  72  ARG  HE  :0.647']), [ c.format_old() for c in bad_clashes_list ]
+    #test B factor cutoff
+    cs = clashscore.clashscore(
+        pdb_hierarchy=pdb_hierarchy,
+        fast = False,
+        condensed_probe=cp,
+        b_factor_cutoff=40)
+    for unpickle in [False, True] :
+      if (unpickle):
+        cs = loads(dumps(cs))
+      c_score = cs.get_clashscore()
+      assert approx_equal(c_score, 35.29, eps=0.01)
+      c_score_b_cutoff = cs.get_clashscore_b_cutoff()
+      assert approx_equal(c_score_b_cutoff, 39.47, eps=0.01)
+      bad_clashes_list = cs.results
+      assert ([ c.format_old() for c in bad_clashes_list ] ==
+        [' A  72  ARG  HG2  A  72  ARG  O   :1.038',
+        ' A  72  ARG  CG   A  72  ARG  O   :0.465',
+        ' A  71  LEU  HA   A  71  LEU HD12 :0.446'])
 
-  #test B factor cutoff
-  cs = clashscore.clashscore(
-      pdb_hierarchy=pdb_hierarchy,
-      fast = False,
-      condensed_probe=True,
-      b_factor_cutoff=40)
-  for unpickle in [False, True] :
-    if (unpickle):
-      cs = loads(dumps(cs))
-    c_score = cs.get_clashscore()
-    assert approx_equal(c_score, 35.29, eps=0.01)
-    c_score_b_cutoff = cs.get_clashscore_b_cutoff()
-    assert approx_equal(c_score_b_cutoff, 39.47, eps=0.01)
-    bad_clashes_list = cs.results
-    assert ([ c.format_old() for c in bad_clashes_list ] ==
-      [' A  72  ARG  HG2  A  72  ARG  O   :1.048',
-      ' A  71  LEU  HA   A  71  LEU HD12 :0.768',
-      ' A  72  ARG  CG   A  72  ARG  O   :0.720']), [ c.format_old() for c in bad_clashes_list ]
+def exercise_fast_clashscore():
+  for fast_clash in [True, False]:
+    pdb_io = pdb.input(source_info=None, lines=pdb_str_1)
+    pdb_hierarchy = pdb_io.construct_hierarchy()
+    cs = clashscore.clashscore(
+        pdb_hierarchy=pdb_hierarchy,
+        fast = fast_clash,
+        condensed_probe=True,
+        out=null_out())
+    for unpickle in [False, True] :
+      if (unpickle):
+        cs = loads(dumps(cs))
+      c_score = cs.get_clashscore()
+      assert approx_equal(c_score, 35.29, eps=0.01)
 
-# TODO
-def exercise_full_validation():
-  from phenix.validation import analyze_all
-  import iotbx.phil
-  open("tmp_validation_neutron.pdb", "w").write(pdb_str_1)
-  test_phil = iotbx.phil.parse("""
-model_vs_data {
-  pdb_file = tmp_validation_neutron.pdb
-  scattering_table = *neutron
-}
-""")
-  working_phil = analyze_all.model_vs_data_params.fetch(source=test_phil)
-  params = working_phil.extract()
-  validation = analyze_all.validation_result(
-    params=params,
-    tmp_dir=os.getcwd(),
-    out=null_out(),
-    quiet=True)
-  c_score = validation.molprobity_result.get_clashscore()
-  assert approx_equal(c_score, 58.82, eps=0.01)
-  params.model_vs_data.scattering_table = "n_gaussian"
-  validation = analyze_all.validation_result(
-    params=params,
-    tmp_dir=os.getcwd(),
-    out=null_out(),
-    quiet=True)
-  c_score = validation.molprobity_result.get_clashscore()
-  assert approx_equal(c_score, 35.29, eps=0.01)
+    #test nuclear distances
+    cs = clashscore.clashscore(
+        pdb_hierarchy=pdb_hierarchy,
+        fast = fast_clash,
+        condensed_probe=True,
+        nuclear=True)
+    for unpickle in [False, True] :
+      if (unpickle):
+        cs = loads(dumps(cs))
+      c_score = cs.get_clashscore()
+      assert approx_equal(c_score, 58.82, eps=0.01)
+
+def exercise_clashscore_json():
+  dm = DataManager()
+  #print(help(dm))
+  dm.process_model_str("1",pdb_str_1)
+  m = dm.get_model("1")
+  cs = clashscore.clashscore(pdb_hierarchy=m.get_hierarchy())
+  csjson_dict = json.loads(cs.as_JSON())
+  #import pprint
+  #pprint.pprint(csjson_dict)
+  assert len(csjson_dict['flat_results']) == 3, "tst_clashscore json output not returning correct number of clashes"
+  assert approx_equal(csjson_dict['flat_results'][0]["overlap"], -1.038), "tst_clashscore json output first overlap value changed"
+  from mmtbx.validation import test_utils
+  assert test_utils.count_dict_values(csjson_dict['hierarchical_results'], "bo")==3, "tst_clashscore json hierarchical output total number of clashes changed"
+  assert csjson_dict['summary_results']["   1"]["num_clashes"] == 3, "tst_clashscore json summary output total number of clashes changed"
+  assert approx_equal(csjson_dict['summary_results']["   1"]["clashscore"], 35.294117647058826), "tst_clashscore json summary output total number of clashes changed"
 
 if (__name__ == "__main__"):
-  t0 = time.time()
-  exercise_clashscore_old()
-  exercise_clashscore()
-  #exercise_full_validation()
-  print("OK. Time: %8.3f"%(time.time()-t0))
+  if (not libtbx.env.has_module(name="probe")):
+    print("Skipping exercise_clashscore(): probe not configured")
+    print("OK")
+  else:
+    t0 = time.time()
+    exercise_clashscore()
+    exercise_fast_clashscore()
+    exercise_clashscore_json()
+    print("OK. Time: %8.3f"%(time.time()-t0))

@@ -9,13 +9,16 @@ Last Changed: 06/04/2016
 Description : XFEL UI Custom Dialogs
 '''
 
+import time
 import os
 import wx
 from wx.lib.mixins.listctrl import TextEditMixin, getListCtrlSelection
 from wx.lib.scrolledpanel import ScrolledPanel
 from xfel.ui.db.task import task_types
+import numpy as np
 
 import xfel.ui.components.xfel_gui_controls as gctr
+from xfel.ui.components.submission_tracker import QueueInterrogator
 
 icons = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'icons/')
 
@@ -49,6 +52,11 @@ class EdListCtrl(wx.ListCtrl, TextEditMixin):
     TextEditMixin.__init__(self)
     self.curRow = -1
 
+  def OnLeftDown(self, evt=None):
+    try:
+      return super(EdListCtrl, self).OnLeftDown(evt)
+    except wx._core.wxAssertionError:
+      pass
 
 class BaseDialog(wx.Dialog):
   def __init__(self, parent,
@@ -174,7 +182,6 @@ class SettingsDialog(BaseDialog):
                         flag=wx.EXPAND | wx.ALL,
                         border=10)
 
-    #self.btn_mp = wx.Button(self, label='Multiprocessing...')
     self.btn_op = gctr.Button(self, name='advanced', label='Advanced Settings...')
     self.btn_OK = wx.Button(self, label="OK", id=wx.ID_OK)
     self.btn_OK.SetDefault()
@@ -240,6 +247,7 @@ class SettingsDialog(BaseDialog):
     adv.ShowModal()
 
   def onDBCredentialsButton(self, e):
+    self.update_settings()
     creds = DBCredentialsDialog(self, self.params)
     creds.Center()
     if (creds.ShowModal() == wx.ID_OK):
@@ -253,12 +261,15 @@ class SettingsDialog(BaseDialog):
 
       self.drop_tables = creds.chk_drop_tables.GetValue()
 
-  def onOK(self, e):
+  def update_settings(self):
     self.params.facility.name = self.facility.ctr.GetStringSelection().lower()
     self.params.experiment_tag = self.db_cred.ctr.GetValue()
     self.params.output_folder = self.output.ctr.GetValue()
     if self.params.facility.name == 'lcls':
       self.params.facility.lcls.experiment = self.experiment.ctr.GetValue()
+
+  def onOK(self, e):
+    self.update_settings()
     e.Skip()
 
 
@@ -328,6 +339,8 @@ class DBCredentialsDialog(BaseDialog):
                                            value=params.db.password)
     self.main_sizer.Add(self.db_password, flag=wx.EXPAND | wx.ALL, border=10)
 
+
+
     # Drop tables button
     self.chk_drop_tables = wx.CheckBox(self,
                                        label='Delete and regenerate all tables')
@@ -346,12 +359,21 @@ class DBCredentialsDialog(BaseDialog):
       self.main_sizer.Add(self.web_location, flag=wx.EXPAND | wx.ALL, border=10)
 
     # Dialog control
-    dialog_box = self.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
-    self.main_sizer.Add(dialog_box,
-                        flag=wx.EXPAND | wx.ALL,
-                        border=10)
+
+    self.btn_db_start = gctr.Button(self, name='start_db', label='Start DB Server')
+    self.db_btn_OK = wx.Button(self, name='db_OK', label="OK", id=wx.ID_OK)
+    self.db_btn_OK.SetDefault()
+    self.db_btn_cancel = wx.Button(self, label="Cancel", id=wx.ID_CANCEL)
+    self.button_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.button_sizer.Add(self.btn_db_start)
+    self.button_sizer.Add(-1,-1, proportion=1)
+    self.button_sizer.Add(self.db_btn_OK)
+    self.button_sizer.Add(self.db_btn_cancel)
+    self.main_sizer.Add(self.button_sizer,flag=wx.EXPAND | wx.ALL, border=10)
+
 
     self.Bind(wx.EVT_CHECKBOX, self.onDropTables, self.chk_drop_tables)
+    self.Bind(wx.EVT_BUTTON, self.onStartDB, self.btn_db_start)
 
     self.Fit()
     self.SetTitle('Database Credentials')
@@ -366,6 +388,139 @@ class DBCredentialsDialog(BaseDialog):
       if (msg.ShowModal() == wx.ID_NO):
         self.chk_drop_tables.SetValue(False)
     e.Skip()
+
+  def onStartDB(self, e):
+    self.start_db_dialog = StartDBDialog(self, self.params)
+    if (self.start_db_dialog.ShowModal() == wx.ID_OK):
+      self.params.db.server.root_password = self.start_db_dialog.get_db_root_psswd.ctr.GetValue()
+      self.params.db.server.basedir = self.start_db_dialog.get_db_basedir.ctr.GetValue()
+
+      def _submit_start_server_job(params):
+        from xfel.command_line.cxi_mpi_submit import do_submit
+        assert self.params.db.user is not None, "DB User not defined!"
+        assert self.params.db.password is not None, "Password for DB User not defined!"
+        assert self.params.db.server.root_password is not None, "Root password for DB not defined!"
+        assert self.params.db.server.basedir is not None, "Base directory for DB not defined!"
+
+        try:
+          import copy
+          new_params = copy.deepcopy(params)
+          new_params.mp.use_mpi = False
+          new_params.mp.extra_args = ["db.port=%d db.server.basedir=%s db.user=%s db.name=%s db.server.root_password=%s" %(params.db.port, params.db.server.basedir, params.db.user, params.db.name, params.db.server.root_password)]
+          submit_path = os.path.join(params.output_folder, "launch_server_submit.sh")
+          submission_id = do_submit('cctbx.xfel.ui_server',
+                                    submit_path,
+                                    new_params.output_folder,
+                                    new_params.mp,
+                                    log_name="my_SQL.log",
+                                    err_name="my_SQL.err",
+                                    job_name='cctbx_start_mysql'
+                                   )
+          #remove root password from params
+          if submission_id:
+            if (self.params.mp.method == 'slurm') or (self.params.mp.method == 'shifter'):
+              attempts = 10
+              q = QueueInterrogator(self.params.mp.method)
+              for i in range(attempts):
+                status = q.query(submission_id)
+                if status == 'RUN':
+                  hostname = q.get_mysql_server_hostname(submission_id)
+                  if hostname:
+                    self.params.db.host = hostname
+                  else:
+                    print("Unable to find hostname running MySQL server from SLURM. Submission ID: ", submission_id)
+                else:
+                  print("Waiting for job to start. Submission ID: %s, status: %s"%(submission_id, status))
+                  time.sleep(1)
+            elif self.params.mp.method == 'local':
+              self.params.db.host = params.db.host
+            else:
+              print("Unable to find hostname running MySQL server on ", self.params.mp.method)
+              print("Submission ID: ", submission_id)
+
+            self.params.db.port = int(params.db.port)
+            self.params.db.name = params.db.name
+            self.params.db.user = params.db.user
+            self.params.db.password = params.db.password
+            self.params.db.server.root_password = ''
+            self.params.db.server.basedir = params.db.server.basedir
+
+            os.remove(os.path.join(self.params.output_folder, "launch_server_submit.sh"))
+            os.remove(os.path.join(self.params.output_folder, "launch_server_submit_submit.sh"))
+          else:
+            print('couldn\'t submit job')
+        except RuntimeError:
+          print("Couldn\'t submit job to start MySql DB.")
+          print("Check if all phil parameters required to launch jobs exists.")
+
+      _submit_start_server_job(self.params)
+      db_file_location = self.params.db.server.basedir
+      self.launch_db_sizer = wx.BoxSizer(wx.HORIZONTAL)
+      msg_text = "DB will be located in\n" + str(db_file_location)
+      self.db_start_box = wx.MessageBox(msg_text,"DB Info", wx.OK | wx.ICON_INFORMATION)
+      print("Started DB")
+      self.Close()
+
+class StartDBDialog(BaseDialog):
+  ''' Dialog to start DB '''
+
+  def __init__(self, parent, params,
+               label_style='bold',
+               content_style='normal',
+               *args, **kwargs):
+
+    self.params = params
+    self.start_db_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.start_db_sizer2 = wx.BoxSizer(wx.HORIZONTAL)
+    self.start_db_sizer3 = wx.BoxSizer(wx.HORIZONTAL)
+    self.start_db_sizer4 = wx.BoxSizer(wx.HORIZONTAL)
+    self.vsiz = wx.BoxSizer(wx.VERTICAL)
+    BaseDialog.__init__(self, parent,
+                        label_style=label_style,
+                        content_style=content_style,
+                        style=wx.DEFAULT_FRAME_STYLE,
+                        *args, **kwargs)
+    warn_icon = wx.ArtProvider.GetBitmap(wx.ART_WARNING, wx.ART_OTHER, (50, 50))
+    self.staticbmp = wx.StaticBitmap(self, -1, warn_icon, pos=(1, 1))
+    self.start_db_sizer.Add(self.staticbmp, flag=wx.ALL)
+    self.vsiz.Add(self.start_db_sizer, 0)
+    font = wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.NORMAL, wx.FONTWEIGHT_NORMAL, False)
+    warning_label1 = wx.StaticText(self, wx.ID_STATIC, 'This will start the server! Make sure the server is not already running!')
+    warning_label1.SetFont(font)
+    self.start_db_sizer.Add(warning_label1, 0, wx.ALL | wx.RIGHT)
+    self.vsiz.Add(self.start_db_sizer, 0, wx.ALL, 20)
+    self.get_db_basedir = gctr.TextButtonCtrl(self,
+                                              name='basedir',
+                                              label='DB Base Directory',
+                                              label_style='bold',
+                                              label_size=(150, -1),
+                                              big_button_size=(130, -1),
+                                              value=os.path.join(self.params.output_folder, 'MySql')
+                                              )
+    self.start_db_sizer2.Add(self.get_db_basedir)
+    self.vsiz.Add(self.start_db_sizer2, 0, wx.ALL, 40)
+    self.get_db_root_psswd = gctr.TextButtonCtrl(self,
+                                                 name='db_root_password',
+                                                 label='DB Root Password',
+                                                 label_style='bold',
+                                                 label_size=(150, -1),
+                                                 text_style=wx.TE_PASSWORD,
+                                                )
+
+    self.start_db_sizer3.Add(self.get_db_root_psswd)
+    self.start_db_sizer3.Add(-1, -1, proportion=1)
+    self.start_db_cancel_btn = wx.Button(self, label="Cancel", id=wx.ID_CANCEL)
+    self.start_db_OK_btn = wx.Button(self, label="OK", id=wx.ID_OK)
+    self.start_db_sizer3.Add(self.start_db_cancel_btn)
+    self.start_db_sizer3.Add(self.start_db_OK_btn)
+    self.vsiz.Add(self.start_db_sizer3, 0, wx.ALL, 60)
+    self.main_sizer.Add(self.start_db_sizer, flag=wx.EXPAND | wx.ALL, border=10)
+    self.main_sizer.Add(self.start_db_sizer2, flag=wx.EXPAND | wx.ALL, border=10)
+    self.main_sizer.Add(self.start_db_sizer3, flag=wx.EXPAND | wx.ALL, border=10)
+
+    self.Fit()
+    self.Center()
+    self.SetTitle('Start Database')
 
 class LCLSFacilityOptions(BaseDialog):
   ''' Options settings specific to LCLS'''
@@ -744,20 +899,32 @@ class AdvancedSettingsDialog(BaseDialog):
     self.nnodes_index = gctr.SpinCtrl(self,
                                       name='nnodes_index',
                                       label='Indexing:',
-                                      label_size=(80, -1),
+                                      label_size=(60, -1),
                                       label_style='normal',
-                                      ctrl_size=(100, -1),
+                                      ctrl_size=(60, -1),
                                       ctrl_value='%d'%(params.mp.nnodes_index or 1),
                                       ctrl_min=1,
                                       ctrl_max=1000)
     self.jobtype_nnodes_sizer.Add(self.nnodes_index, flag=wx.EXPAND | wx.ALL, border=10)
 
+    self.nnodes_tder = gctr.SpinCtrl(self,
+                                      name='nnodes_tder',
+                                      label='TDER:',
+                                      label_size=(60, -1),
+                                      label_style='normal',
+                                      ctrl_size=(60, -1),
+                                      ctrl_value='%d'%(params.mp.nnodes_tder or 1),
+                                      ctrl_min=1,
+                                      ctrl_max=1000)
+    self.nnodes_tder.SetToolTip('Time Dependent Ensemble Refinement')
+    self.jobtype_nnodes_sizer.Add(self.nnodes_tder, flag=wx.EXPAND | wx.ALL, border=10)
+
     self.nnodes_scale = gctr.SpinCtrl(self,
                                       name='nnodes_scale',
                                       label='Scaling:',
-                                      label_size=(80, -1),
+                                      label_size=(60, -1),
                                       label_style='normal',
-                                      ctrl_size=(100, -1),
+                                      ctrl_size=(60, -1),
                                       ctrl_value='%d'%(params.mp.nnodes_scale or 1),
                                       ctrl_min=1,
                                       ctrl_max=1000)
@@ -766,9 +933,9 @@ class AdvancedSettingsDialog(BaseDialog):
     self.nnodes_merge = gctr.SpinCtrl(self,
                                       name='nnodes_merge',
                                       label='Merging:',
-                                      label_size=(80, -1),
+                                      label_size=(60, -1),
                                       label_style='normal',
-                                      ctrl_size=(100, -1),
+                                      ctrl_size=(60, -1),
                                       ctrl_value='%d'%(params.mp.nnodes_merge or 1),
                                       ctrl_min=1,
                                       ctrl_max=1000)
@@ -782,7 +949,8 @@ class AdvancedSettingsDialog(BaseDialog):
                                            name='extra_options',
                                            size=(-1, 60),
                                            style=wx.VSCROLL,
-                                           value="\n".join(self.params.mp.extra_options))
+                                           value="\n".join(self.params.mp.extra_options)
+                                                 if any(self.params.mp.extra_options) else "")
     extra_sizer = wx.FlexGridSizer(1, 2, 0, 10)
     extra_sizer.Add(extra_txt, flag=wx.ALL, border=10)
     extra_sizer.Add(self.extra_options, flag=wx.EXPAND | wx.ALL, border=10)
@@ -881,12 +1049,15 @@ class AdvancedSettingsDialog(BaseDialog):
 
     # Processing back-ends
     self.dispatchers_sizer = wx.BoxSizer(wx.HORIZONTAL)
-    self.back_ends = ['cctbx.xfel (LCLS mode)', 'cctbx.xfel (standalone mode)', 'Ha14', 'Small cell', 'custom']
-    self.dispatchers = ['cctbx.xfel.xtc_process', 'cctbx.xfel.process', 'cxi.xtc_process', 'cctbx.xfel.small_cell_process', 'custom']
+    self.back_ends = ['cctbx.xfel', 'Small cell', 'custom']
+    self.dispatchers = ['cctbx.xfel.process', 'cctbx.xfel.small_cell_process', 'custom']
+    # Legacy dispatchers disabled 12/14/22
+    #self.back_ends = ['cctbx.xfel (LCLS mode)', 'cctbx.xfel (standalone mode)', 'Ha14', 'Small cell', 'custom']
+    #self.dispatchers = ['cctbx.xfel.xtc_process', 'cctbx.xfel.process', 'cxi.xtc_process', 'cctbx.xfel.small_cell_process', 'custom']
     self.dispatcher_descriptions = [
-      'Process the data according to Brewster 2018, using DIALS for indexing, refinement and integration, with stills-specific defaults. Converts XTC into CBF in memory and optionally provides dumping of CBFs.',
+      #'Process the data according to Brewster 2018, using DIALS for indexing, refinement and integration, with stills-specific defaults. Converts XTC into CBF in memory and optionally provides dumping of CBFs.',
       'Process the data according to Brewster 2018, using DIALS for indexing, refinement and integration, with stills-specific defaults. Reads image files directly.',
-      'Process the data according to Hattne 2014, using LABELIT for initial indexing and stills-specific refinement and integration code implemented in the package cctbx.rstbx.',
+      #'Process the data according to Hattne 2014, using LABELIT for initial indexing and stills-specific refinement and integration code implemented in the package cctbx.rstbx.',
       'Process the data according to Brewster 2015, using small cell for initial indexing and using DIALS for refinement and integration, with stills-specific defaults.',
       'Provide a custom program. See authors for details.']
 
@@ -957,6 +1128,7 @@ class AdvancedSettingsDialog(BaseDialog):
       self.htcondor_filesystemdomain.Hide()
       self.jobtype_nnodes_box.Hide()
       self.nnodes_index.Hide()
+      self.nnodes_tder.Hide()
       self.nnodes_scale.Hide()
       self.nnodes_merge.Hide()
       self.extra_box.Hide()
@@ -982,6 +1154,7 @@ class AdvancedSettingsDialog(BaseDialog):
       self.htcondor_executable_path.Hide()
       self.htcondor_filesystemdomain.Hide()
       self.nnodes_index.Show()
+      self.nnodes_tder.Show()
       self.nnodes_scale.Show()
       self.nnodes_merge.Show()
       self.extra_box.Show()
@@ -1008,6 +1181,7 @@ class AdvancedSettingsDialog(BaseDialog):
       self.htcondor_executable_path.Show()
       self.htcondor_filesystemdomain.Show()
       self.nnodes_index.Hide()
+      self.nnodes_tder.Hide()
       self.nnodes_scale.Hide()
       self.nnodes_merge.Hide()
       self.extra_box.Hide()
@@ -1034,6 +1208,7 @@ class AdvancedSettingsDialog(BaseDialog):
       self.htcondor_executable_path.Hide()
       self.htcondor_filesystemdomain.Hide()
       self.nnodes_index.Show()
+      self.nnodes_tder.Show()
       self.nnodes_scale.Show()
       self.nnodes_merge.Show()
       self.extra_box.Show()
@@ -1064,6 +1239,7 @@ class AdvancedSettingsDialog(BaseDialog):
       self.htcondor_executable_path.Hide()
       self.htcondor_filesystemdomain.Hide()
       self.nnodes_index.Hide()
+      self.nnodes_tder.Hide()
       self.nnodes_scale.Hide()
       self.nnodes_merge.Hide()
       self.extra_box.Show()
@@ -1129,6 +1305,7 @@ class AdvancedSettingsDialog(BaseDialog):
       self.params.mp.queue = self.queue_text.ctr.GetValue()
       if self.mp_option.ctr.GetStringSelection() in ['shifter', 'slurm', 'pbs']:
         self.params.mp.nnodes_index = int(self.nnodes_index.ctr.GetValue())
+        self.params.mp.nnodes_tder = int(self.nnodes_tder.ctr.GetValue())
         self.params.mp.nnodes_scale = int(self.nnodes_scale.ctr.GetValue())
         self.params.mp.nnodes_merge = int(self.nnodes_merge.ctr.GetValue())
       if self.mp_option.ctr.GetStringSelection() == 'shifter':
@@ -1249,6 +1426,7 @@ class CalibrationDialog(BaseDialog):
     self.chk_split_dataset = wx.CheckBox(self,
                                          label='Split dataset into 2 halves (outputs statistics, double runtime, uses 2x number of images')
     self.chk_split_dataset.SetValue(True)
+
     self.main_sizer.Add(self.chk_split_dataset, flag=wx.ALL, border=10)
 
     # Dialog control
@@ -1388,40 +1566,100 @@ class AveragingDialog(BaseDialog):
                label_style='bold',
                content_style='normal',
                *args, **kwargs):
-
     self.run = run
     self.params = params
+
+    # Looks for a rungroup to use as a template
+    # The averaging job is not assigned a rungroup
+    run_rungroups = run.get_rungroups()
+    if len(run_rungroups) == 0:
+      # If this run has not been included in any rungroups try to use the rungroup
+      # with the closest run
+      all_rungroups = run.app.get_all_rungroups()
+      if len(all_rungroups) == 0:
+        self.template_rungroup = None
+      else:
+        distance = np.zeros(len(all_rungroups))
+        for index, rungroup in enumerate(all_rungroups):
+          first_run, last_run = rungroup.get_first_and_last_runs()
+          distance[index] = min([
+            abs(int(first_run.run) - int(run.run)),
+            abs(int(last_run.run) - int(run.run))
+          ])
+        template_rungroup_id = all_rungroups[np.argmin(distance)].rungroup_id
+        self.template_rungroup = run.app.get_rungroup(rungroup_id=template_rungroup_id)
+    else:
+      # If this run has been included in any rungroups - use that
+      self.template_rungroup = run_rungroups[-1]
 
     BaseDialog.__init__(self, parent, label_style=label_style,
                         content_style=content_style, *args, **kwargs)
 
-    # Raw image option
-    self.raw_toggle = gctr.RadioCtrl(self,
-                                     label='',
-                                     label_style='normal',
-                                     label_size=(-1, -1),
-                                     direction='horizontal',
-                                     items={'corrected':'corrected',
-                                            'raw':'raw'})
-    self.raw_toggle.corrected.SetValue(1)
-    self.main_sizer.Add(self.raw_toggle, flag=wx.EXPAND | wx.ALL, border=10)
+    # Image Average Options
+    self.skip_images = gctr.SpinCtrl(self,
+                                   label='Skip Images:',
+                                   label_style='bold',
+                                   label_size=(150, -1),
+                                   ctrl_value=0,
+                                   ctrl_min=0,
+                                   ctrl_max=None)
+    self.num_images_type = gctr.RadioCtrl(self,
+                                   name='Use All Images',
+                                   label='',
+                                   label_style='normal',
+                                   label_size=(100, -1),
+                                   direction='vertical',
+                                   items={'all': 'Use all images',
+                                          'specify': 'Specify total images'})
+    self.num_images = gctr.SpinCtrl(self,
+                                   label='Number Images:',
+                                   label_style='bold',
+                                   label_size=(150, -1),
+                                   ctrl_value=0,
+                                   ctrl_min=0,
+                                   ctrl_max=None)
+    self.main_sizer.Add(self.skip_images, flag=wx.EXPAND | wx.ALL, border=10)
+    self.main_sizer.Add(self.num_images_type, flag=wx.EXPAND | wx.ALL, border=10)
+    self.main_sizer.Add(self.num_images, flag=wx.EXPAND | wx.ALL, border=10)
+    self.skip_images.SetToolTip('Number of images to skip at the start of the dataset')
+    self.num_images.SetToolTip('Maximum number of frames to average.')
+    self.Bind(wx.EVT_RADIOBUTTON, self.onAllImages, self.num_images_type.all)
+    self.Bind(wx.EVT_RADIOBUTTON, self.onSpecifyImages, self.num_images_type.specify)
+    self.num_images.Disable()
 
     # Dialog control
     dialog_box = self.CreateSeparatedButtonSizer(wx.OK | wx.CANCEL)
-    self.main_sizer.Add(dialog_box,
-                        flag=wx.EXPAND | wx.ALL,
-                        border=10)
+    self.main_sizer.Add(dialog_box, flag=wx.EXPAND | wx.ALL, border=10)
     self.Bind(wx.EVT_BUTTON, self.onOK, id=wx.ID_OK)
 
+  def onAllImages(self, e):
+    self.num_images.Disable()
+
+  def onSpecifyImages(self, e):
+    self.num_images.Enable()
+
   def onOK(self, e):
-    from xfel.ui.components.averaging import AveragingCommand
-    from libtbx import easy_run
-    raw = self.raw_toggle.raw.GetValue() == 1
-    average_command = AveragingCommand(self.run, self.params, raw)()
-    print("executing", average_command)
-    result = easy_run.fully_buffered(command=average_command)
-    result.show_stdout()
-    e.Skip()
+    if self.template_rungroup is None:
+      wx.MessageBox('Add this run to a rungroup in the Trials tab first!', 'Warning', wx.ICON_EXCLAMATION)
+      return
+
+    skip_images = self.skip_images.ctr.GetValue()
+    if self.num_images_type.all.GetValue():
+      num_images = 0
+    else:
+      num_images = self.num_images.ctr.GetValue()
+    if num_images == 1:
+      print("Average Aborted.\nNeed more than one image to average.")
+      return
+    else:
+      from xfel.ui.db.job import AveragingJob
+      job = AveragingJob(self.run.app)
+      job.run = self.run
+      job.rungroup = self.template_rungroup
+      job.skip_images = skip_images
+      job.num_images = num_images
+      job.submit()
+      self.Destroy()
 
 class TrialTagSelectionDialog(BaseDialog):
   def __init__(self, parent,
@@ -1535,7 +1773,7 @@ class MultiRunTagDialog(BaseDialog):
 
     self.select_runs_panel = wx.Panel(self)
     self.select_runs_sizer = wx.BoxSizer(wx.HORIZONTAL)
-    self.select_runs =  gctr.CheckListCtrl(self,
+    self.select_runs =  gctr.CheckListCtrl(self.select_runs_panel,
                                            label='Selected runs:',
                                            label_size=(200, -1),
                                            label_style='normal',
@@ -1950,28 +2188,6 @@ class RunBlockDialog(BaseDialog):
                                  ctr_value=str(block.extra_format_str))
       self.format_sizer.Add(self.format, 1, flag=wx.EXPAND | wx.ALL, border=10)
 
-    # Image format choice
-    if self.is_lcls and self.parent.trial.app.params.dispatcher in \
-        ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
-      if self.parent.trial.app.params.dispatcher == "cxi.xtc_process":
-        image_choices = ['pickle']
-      else:
-        image_choices = ['cbf','pickle']
-      self.img_format = gctr.ChoiceCtrl(self.runblock_panel,
-                                        label='Image Format:',
-                                        label_size=(100, -1),
-                                        ctrl_size=(150, -1),
-                                        choices=image_choices)
-      if block.format:
-        try:
-          format_idx = image_choices.index(block.format)
-        except ValueError:
-          format_idx = 0 #in case of selecting an unavailable default
-      else:
-        format_idx = 0
-      self.img_format.ctr.SetSelection(format_idx)
-      self.runblock_sizer.Add(self.img_format, flag=wx.TOP | wx.LEFT, border=10)
-
     self.start_stop_sizer = wx.FlexGridSizer(1, 3, 60, 20)
 
     self.runblocks_start = gctr.SpinCtrl(self.runblock_panel,
@@ -2028,9 +2244,6 @@ class RunBlockDialog(BaseDialog):
     if self.is_lcls:
       items = [('binning', block.binning),
                ('energy', block.energy)]
-      if self.parent.trial.app.params.dispatcher == "cctbx.xfel.xtc_process":
-        items.append(('gain_mask_level', block.gain_mask_level))
-
       self.bin_nrg_gain = gctr.OptionCtrl(self.runblock_panel,
                                           name='rg_bin_nrg_gain',
                                           ctrl_size=(80, -1),
@@ -2074,48 +2287,6 @@ class RunBlockDialog(BaseDialog):
     self.runblock_sizer.Add(self.untrusted_path, flag=wx.EXPAND | wx.ALL,
                             border=10)
 
-    if self.is_lcls and self.parent.trial.app.params.dispatcher in \
-        ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
-      # Calibration folder
-      self.calib_dir = gctr.TextButtonCtrl(self.runblock_panel,
-                                           label='Calibration:',
-                                           label_style='normal',
-                                           label_size=(100, -1),
-                                           big_button=True,
-                                           value=str(block.calib_dir))
-      self.runblock_sizer.Add(self.calib_dir, flag=wx.EXPAND | wx.ALL,
-                              border=10)
-
-      # Dark average path (pickle only)
-      self.dark_avg_path = gctr.TextButtonCtrl(self.runblock_panel,
-                                               label='Dark Average:',
-                                               label_style='normal',
-                                               label_size=(100, -1),
-                                               big_button=True,
-                                               value=str(block.dark_avg_path))
-      self.runblock_sizer.Add(self.dark_avg_path, flag=wx.EXPAND | wx.ALL,
-                              border=10)
-
-      # Dark stddev path (pickle only)
-      self.dark_stddev_path = gctr.TextButtonCtrl(self.runblock_panel,
-                                                  label='Dark StdDev:',
-                                                  label_style='normal',
-                                                  label_size=(100, -1),
-                                                  big_button=True,
-                                                  value=str(block.dark_stddev_path))
-      self.runblock_sizer.Add(self.dark_stddev_path, flag=wx.EXPAND | wx.ALL,
-                              border=10)
-
-      # Dark map path (pickle only)
-      self.gain_map_path = gctr.TextButtonCtrl(self.runblock_panel,
-                                               label='Gain Map:',
-                                               label_style='normal',
-                                               label_size=(100, -1),
-                                               big_button=True,
-                                               value=str(block.gain_map_path))
-      self.runblock_sizer.Add(self.gain_map_path, flag=wx.EXPAND | wx.ALL,
-                              border=10)
-
     # Comment
     self.comment = gctr.TextButtonCtrl(self.runblock_panel,
                                        label='Comment:',
@@ -2146,18 +2317,6 @@ class RunBlockDialog(BaseDialog):
       self.Bind(wx.EVT_BUTTON, self.onImportFormat, self.format.btn_import)
     self.Bind(wx.EVT_BUTTON, self.onUntrustedBrowse,
               id=self.untrusted_path.btn_big.GetId())
-    if self.is_lcls and self.parent.trial.app.params.dispatcher in \
-        ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
-      self.Bind(wx.EVT_BUTTON, self.onDarkAvgBrowse,
-                id=self.dark_avg_path.btn_big.GetId())
-      self.Bind(wx.EVT_BUTTON, self.onImportConfig, self.config.btn_import)
-      self.Bind(wx.EVT_BUTTON, self.onDefaultConfig, self.config.btn_default)
-      self.Bind(wx.EVT_BUTTON, self.onDarkMapBrowse,
-                id=self.gain_map_path.btn_big.GetId())
-      self.Bind(wx.EVT_BUTTON, self.onDarkStdBrowse,
-                id=self.dark_stddev_path.btn_big.GetId())
-      self.Bind(wx.EVT_BUTTON, self.onCalibDirBrowse,
-                id=self.calib_dir.btn_big.GetId())
     self.Bind(wx.EVT_BUTTON, self.onOK, id=wx.ID_OK)
 
 
@@ -2229,21 +2388,34 @@ class RunBlockDialog(BaseDialog):
       assert first > 0 and first >= self.first_avail
       self.first_run = first
     except (ValueError, AssertionError) as e:
-      print("Please select a run between %d and %d." % (self.first_avail, self.last_avail))
-      raise e
+      wx.MessageBox("Please select a contiguous runs between %d and %d." % (self.first_avail, self.last_avail),
+                    'Warning!', wx.ICON_EXCLAMATION)
+      return
     if self.end_type.specify.GetValue() == 1:
       try:
         last = int(self.runblocks_end.ctr.GetValue())
         assert last > 0 and last <= self.last_avail and last >= first
         self.last_run = last
       except (ValueError, AssertionError) as e:
-        print("Please select a run between %d and %d." % (self.first_run, self.last_avail))
-        raise e
+        wx.MessageBox("Please select contiguous runs between %d and %d." % (self.first_avail, self.last_avail),
+                      'Warning!', wx.ICON_EXCLAMATION)
+        return
     elif self.end_type.specify.GetValue() == 0:
       self.last_run = None
     else:
       assert False
     rg_open = self.last_run is None
+
+    if self.is_lcls:
+      # Validation
+      if 'rayonix' in self.address.ctr.GetValue().lower():
+        def is_none(string):
+          return string is None or string in ['', 'None']
+        if is_none(self.beam_xyz.X.GetValue()) or is_none(self.beam_xyz.Y.GetValue()) or \
+             is_none(self.beam_xyz.DetZ.GetValue()):
+          wx.MessageBox("For Rayonix, beam x, y, and DetZ are required, even if reference_geometry is specified. reference_geometry will take precedence.",
+                        'Warning!', wx.ICON_EXCLAMATION)
+          return
 
     rg_dict = dict(active=True,
                    open=rg_open,
@@ -2259,14 +2431,6 @@ class RunBlockDialog(BaseDialog):
       rg_dict['beamy']=self.beam_xyz.Y.GetValue()
       rg_dict['energy']=self.bin_nrg_gain.energy.GetValue()
       rg_dict['wavelength_offset']=self.wavelength_offset.wavelength_offset.GetValue()
-      if self.parent.trial.app.params.dispatcher in \
-          ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
-        rg_dict['format']=self.img_format.ctr.GetStringSelection()
-        rg_dict['dark_avg_path']=self.dark_avg_path.ctr.GetValue()
-        rg_dict['dark_stddev_path']=self.dark_stddev_path.ctr.GetValue()
-        rg_dict['gain_map_path']=self.gain_map_path.ctr.GetValue()
-        rg_dict['gain_mask_level']=self.bin_nrg_gain.gain_mask_level.GetValue()
-        rg_dict['calib_dir']=self.calib_dir.ctr.GetValue()
       rg_dict['binning']=self.bin_nrg_gain.binning.GetValue()
       rg_dict['detector_address']=self.address.ctr.GetValue()
       rg_dict['config_str']=self.config.ctr.GetValue()
@@ -2334,13 +2498,6 @@ class RunBlockDialog(BaseDialog):
         self.wavelength_offset.wavelength_offset.SetValue(str(last.wavelength_offset))
         self.spectrum_calibration.spectrum_eV_per_pixel.SetValue(str(last.spectrum_eV_per_pixel))
         self.spectrum_calibration.spectrum_eV_offset.SetValue(str(last.spectrum_eV_offset))
-        if self.parent.trial.app.params.dispatcher in \
-            ["cxi.xtc_process", "cctbx.xfel.xtc_process"]:
-          self.dark_avg_path.ctr.SetValue(str(last.dark_avg_path))
-          self.dark_stddev_path.ctr.SetValue(str(last.dark_stddev_path))
-          self.gain_map_path.ctr.SetValue(str(last.gain_map_path))
-          self.bin_nrg_gain.gain_mask_level.SetValue(str(last.gain_mask_level))
-          self.calib_dir.ctr.SetValue(str(last.calib_dir))
       self.two_thetas.two_theta_low.SetValue(str(last.two_theta_low))
       self.two_thetas.two_theta_high.SetValue(str(last.two_theta_high))
       self.untrusted_path.ctr.SetValue(str(last.untrusted_pixel_mask_path))
@@ -2698,12 +2855,8 @@ class TrialDialog(BaseDialog):
 
       # Parameter validation
       dispatcher = self.db.params.dispatcher
-      if dispatcher == 'cxi.xtc_process': #LABELIT
-        from spotfinder.applications.xfel import cxi_phil
-        phil_scope = cxi_phil.cxi_versioned_extract().persist.phil_scope
-      else:
-        from xfel.ui import load_phil_scope_from_dispatcher
-        phil_scope = load_phil_scope_from_dispatcher(dispatcher)
+      from xfel.ui import load_phil_scope_from_dispatcher
+      phil_scope = load_phil_scope_from_dispatcher(dispatcher)
 
       from iotbx.phil import parse
       msg = None
@@ -2875,6 +3028,7 @@ class DatasetDialog(BaseDialog):
     else:
       self.dataset.name = name
       self.dataset.comment = comment
+      self.dataset.tag_operator = mode
 
     checked = self.tag_checklist.ctr.GetCheckedItems()
     for tag_idx, tag in enumerate(self.all_tags):

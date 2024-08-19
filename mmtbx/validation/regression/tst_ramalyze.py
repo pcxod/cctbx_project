@@ -1,16 +1,21 @@
 
 from __future__ import absolute_import, division, print_function
-from iotbx import pdb
-from libtbx.test_utils import show_diff
+from libtbx.test_utils import show_diff, approx_equal
 import libtbx.load_env
 from libtbx.easy_pickle import loads, dumps
 from six.moves import cStringIO as StringIO
 import os.path
 from mmtbx.validation import ramalyze
+from mmtbx.rotamer.rotamer_eval import find_rotarama_data_dir
+from iotbx.data_manager import DataManager
+from libtbx.test_utils import convert_string_to_cif_long
+
 import time
+import json
 
 def exercise_ramalyze():
   from mmtbx.rotamer.rotamer_eval import find_rotarama_data_dir
+  import iotbx.pdb
   regression_pdb = libtbx.env.find_in_repositories(
     relative_path="phenix_regression/pdb/jcm.pdb",
     test=os.path.isfile)
@@ -20,11 +25,10 @@ def exercise_ramalyze():
   if (find_rotarama_data_dir(optional=True) is None):
     print("Skipping exercise_ramalyze(): rotarama_data directory not available")
     return
-  from iotbx import file_reader
   # Exercise 1
-  pdb_in = file_reader.any_file(file_name=regression_pdb)
-  hierarchy = pdb_in.file_object.hierarchy
-  pdb_io = pdb.input(file_name=regression_pdb)
+  pdb_in = iotbx.pdb.input(file_name=regression_pdb)
+  hierarchy = pdb_in.construct_hierarchy()
+  pdb_io = iotbx.pdb.input(file_name=regression_pdb)
   hierarchy.atoms().reset_i_seq()
   r = ramalyze.ramalyze(
     pdb_hierarchy=hierarchy,
@@ -110,8 +114,8 @@ def exercise_ramalyze():
   regression_pdb = libtbx.env.find_in_repositories(
     relative_path="phenix_regression/pdb/pdb1jxt.ent",
     test=os.path.isfile)
-  pdb_in = file_reader.any_file(file_name=regression_pdb)
-  hierarchy = pdb_in.file_object.hierarchy
+  pdb_in = iotbx.pdb.input(file_name=regression_pdb)
+  hierarchy = pdb_in.construct_hierarchy()
   hierarchy.atoms().reset_i_seq()
   r = ramalyze.ramalyze(
     pdb_hierarchy=hierarchy,
@@ -170,8 +174,8 @@ def exercise_ramalyze():
  A  45  ALA:57.37:-86.61:-8.57:Favored:General""")
 
   # Exercise 3: 2plx excerpt (unusual icode usage)
-  import iotbx.pdb.hierarchy
-  pdb_io = iotbx.pdb.hierarchy.input(pdb_string="""\
+  import iotbx.pdb
+  hierarchy = iotbx.pdb.input(source_info=None, lines="""\
 ATOM   1468  N   GLY A 219       3.721  21.322  10.752  1.00 14.12           N
 ATOM   1469  CA  GLY A 219       3.586  21.486  12.188  1.00 14.85           C
 ATOM   1470  C   GLY A 219       4.462  20.538  12.995  1.00 15.63           C
@@ -200,9 +204,9 @@ ATOM   1492  N   LYS A 222      -1.537  14.773  13.694  1.00 14.34           N
 ATOM   1493  CA  LYS A 222      -2.053  13.536  13.125  1.00 15.07           C
 ATOM   1494  C   LYS A 222      -1.679  13.455  11.655  1.00 14.88           C
 ATOM   1495  O   LYS A 222      -1.856  14.424  10.883  1.00 14.32           O
-""")
+""").construct_hierarchy()
   r = ramalyze.ramalyze(
-    pdb_hierarchy=pdb_io.hierarchy,
+    pdb_hierarchy=hierarchy,
     outliers_only=False)
   assert (len(r.results) == 3)
 
@@ -229,10 +233,51 @@ def exercise_constants():
   assert ramalyze.RAMALYZE_ANY == 3
   assert ramalyze.RAMALYZE_NOT_FAVORED == 4
 
+def exercise_ramalyze_json(test_mmcif=False):
+  regression_pdb = libtbx.env.find_in_repositories(
+    relative_path="phenix_regression/pdb/jcm.pdb",
+    test=os.path.isfile)
+  if (regression_pdb is None):
+    print("Skipping exercise_ramalyze(): input pdb (jcm.pdb) not available")
+    return
+  if (find_rotarama_data_dir(optional=True) is None):
+    print("Skipping exercise_ramalyze(): rotarama_data directory not available")
+    return
+  dm = DataManager()
+  if test_mmcif:
+    with open(regression_pdb) as f:
+      pdb_jcm_str = f.read()
+    pdb_jcm_str = convert_string_to_cif_long(pdb_jcm_str, chain_addition="LONGCHAIN")
+    dm.process_model_str("1", pdb_jcm_str)
+    m = dm.get_model("1")
+  else:
+    m = dm.get_model(regression_pdb)
+  ramalyze_json = ramalyze.ramalyze(pdb_hierarchy=m.get_hierarchy(), outliers_only=True).as_JSON()
+  rmjson_dict = json.loads(ramalyze_json)
+  #import pprint
+  #pprint.pprint(rmjson_dict)
+  assert len(rmjson_dict['flat_results'])==100, "tst_ramalyze json output not returning correct number of values"
+  assert approx_equal(rmjson_dict['flat_results'][0]['phi'], 50.51521639791719), "tst_ramalyze json output first calculated phi dihedral angle not matching previous value"
+  assert approx_equal(rmjson_dict['flat_results'][0]['psi'], -80.04604513007598), "tst_ramalyze json output first calculated psi dihedral angle not matching previous value"
+  assert rmjson_dict['flat_results'][0]['rama_type']=='OUTLIER', "tst_ramalyze json output first rama_type not matching previous value"
+  assert approx_equal(rmjson_dict['flat_results'][99]['phi'], 60.09378543010022), "tst_ramalyze json output last calculated phi dihedral angle not matching previous value"
+  assert approx_equal(rmjson_dict['flat_results'][99]['psi'], -80.26327714086905), "tst_ramalyze json output last calculated psi dihedral angle not matching previous value"
+  assert rmjson_dict['flat_results'][99]['rama_type']=='OUTLIER', "tst_ramalyze json output last rama_type not matching previous value"
+  from mmtbx.validation import test_utils
+  assert test_utils.count_dict_values(rmjson_dict['hierarchical_results'], "OUTLIER")==100, "tst_ramalyze json hierarchical output total number of rama outliers changed"
+  assert rmjson_dict['summary_results'][""]['num_allowed'] == 162, "tst_ramalyze json output summary total num_allowed not matching previous value"
+  assert rmjson_dict['summary_results'][""]['num_favored'] == 463, "tst_ramalyze json output summary total num_favored not matching previous value"
+  assert rmjson_dict['summary_results'][""]['num_outliers'] == 100, "tst_ramalyze json output summary total num_outliers not matching previous value"
+  assert rmjson_dict['summary_results'][""]['num_residues'] == 725, "tst_ramalyze json output summary total num_residues not matching previous value"
+  return rmjson_dict
+
 if (__name__ == "__main__"):
   t0=time.time()
   exercise_ramalyze()
   exercise_favored_regions()
   exercise_constants()
+  rm_dict = exercise_ramalyze_json()
+  rm_dict_cif = exercise_ramalyze_json(test_mmcif=True)
+  assert rm_dict['summary_results'] == rm_dict_cif['summary_results'], "tst_ramalyze summary results changed between pdb and cif version"
   print("Time: %6.4f"%(time.time()-t0))
   print("OK")

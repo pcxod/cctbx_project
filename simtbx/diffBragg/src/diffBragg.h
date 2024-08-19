@@ -1,20 +1,27 @@
-
 #ifndef SIMTBX_DIFFBRAGG_H
 #define SIMTBX_DIFFBRAGG_H
+
 #include <simtbx/nanoBragg/nanoBragg.h>
 #include <simtbx/diffBragg/src/util.h>
 #include <vector>
+#include <memory>
 #include <boost/ptr_container/ptr_vector.hpp>
 #include <Eigen/Dense>
 #include <boost/python.hpp>
-#include<Eigen/StdVector>
+#include <boost/python/numpy.hpp>
+#include <Eigen/StdVector>
 #include <boost/python/numpy.hpp>
 
-#ifdef NANOBRAGG_HAVE_CUDA
+#ifdef DIFFBRAGG_HAVE_CUDA
 #include "diffBraggCUDA.h"
 #endif
 
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+#include "diffBraggKOKKOS.h"
+#endif
+
 //#include <boost/python/numpy.hpp>
+namespace np=boost::python::numpy;
 
 namespace simtbx {
 namespace nanoBragg {
@@ -132,10 +139,13 @@ class diffBragg: public nanoBragg{
 
   ~diffBragg(){};
 
+  af::shared<mat3> get_mosaic_blocks_prime();
+
   /// pixels
   double* floatimage_roi;
   af::flex_double raw_pixels_roi;
   af::flex_double ave_wavelength_img();
+  boost::python::tuple ave_hkl_img();
   int Npix_total, Npix_to_model;
   void diffBragg_list_steps(step_arrays& db_steps);
 
@@ -148,14 +158,29 @@ class diffBragg: public nanoBragg{
   cuda_flags db_cu_flags;
   detector db_det;
 
-
-#ifdef NANOBRAGG_HAVE_CUDA
+#ifdef DIFFBRAGG_HAVE_CUDA
     diffBragg_cudaPointers device_pointers;
-    inline void gpu_free(){
+    inline void cuda_free(){
         freedom(device_pointers);
     }
-
 #endif
+
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+    // diffBragg_cudaPointers cuda_pointers;
+    inline void kokkos_free() { diffBragg_runner.reset(); }
+    // allocate when needed to avoid problems with kokkos initialization when cuda/kokkos isn't used
+    std::shared_ptr<diffBraggKOKKOS> diffBragg_runner{};
+    // diffBraggKOKKOS diffBragg_runner;
+#endif
+
+    inline void gpu_free(){
+#ifdef DIFFBRAGG_HAVE_CUDA
+            cuda_free();
+#endif
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+            kokkos_free();
+#endif
+    }
 
   // methods
   void update_xray_beams(scitbx::af::versa<dxtbx::model::Beam, scitbx::af::flex_grid<> > const& value);
@@ -165,6 +190,12 @@ class diffBragg: public nanoBragg{
   void rotate_fs_ss_vecs(double panel_rot_ang);
   void rotate_fs_ss_vecs_3D(double panel_rot_angO, double panel_rot_angF, double panel_rot_angS);
   void add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows);
+  np::ndarray add_Fhkl_gradients(const af::shared<size_t>& panels_fasts_slows,
+           np::ndarray& residual, np::ndarray& variance, np::ndarray& trusted, np::ndarray& freq,
+           int num_Fhkl_channels, double Gscale, bool track, bool errors);
+  void update_Fhkl_channels(np::ndarray& channels);
+  boost::python::list get_Fhkl_channels();
+  void update_Fhkl_scale_factors(np::ndarray& scale_factors, int num_Fhkl_channels);
   void add_diffBragg_spots(const af::shared<size_t>& panels_fasts_slows, boost::python::list per_pix_nominal_hkl);
   void add_diffBragg_spots();
   af::shared<double> add_diffBragg_spots_full();
@@ -270,7 +301,7 @@ class diffBragg: public nanoBragg{
   void show_fp_fdp();
   bool track_Fhkl;
   std::vector<int> nominal_hkl;
-  void linearize_Fhkl();
+  void linearize_Fhkl(bool compute_dists);
   void sanity_check_linear_Fhkl();
   void update_linear_Fhkl();
 
@@ -280,6 +311,7 @@ class diffBragg: public nanoBragg{
   double Nd, Ne, Nf;
   bool refine_Ncells_def;
   bool no_Nabc_scale;  // if true, then absorb the Nabc scale into an overall scale factor
+  double prev_shiftZ=0; // keep track of when detector Z was shifted  (helps determine when to set the update_detector flag for GPU devices
   Eigen::Matrix3d NABC;
 
   bool use_lambda_coefficients;
@@ -292,12 +324,12 @@ class diffBragg: public nanoBragg{
   bool update_rotmats_on_device=false;
   bool update_umats_on_device=false;
   bool update_panels_fasts_slows_on_device=false;
-  bool update_sources_on_device=false;
   bool update_Fhkl_on_device=false;
   bool update_refine_flags_on_device=false;
   bool update_step_positions_on_device=false;
   bool update_panel_deriv_vecs_on_device=false;
-  bool use_cuda=false;
+  bool use_gpu=false;
+  bool force_cpu=false;
   int Npix_to_allocate=-1; // got GPU allocation, -1 is auto mode
 
   timer_variables TIMERS;
@@ -305,7 +337,22 @@ class diffBragg: public nanoBragg{
 
   void show_timing_stats(int MPI_RANK);
   bool last_kernel_on_GPU; // reveals whether the GPU kernel was run
+  boost::python::tuple get_ave_I_cell(bool use_Fhkl_scale, int i_channel, bool use_geometric_mean);
+  np::ndarray Fhkl_restraint_data(int i_channel, double Fhkl_beta, bool use_geometric_mean, int flag);
+  void set_Friedel_mate_inds(boost::python::list pos_inds, boost::python::list neg_inds);
 }; // end of diffBragg
+
+
+double diffBragg_cpu_kernel_polarization(
+    Eigen::Vector3d incident,
+    Eigen::Vector3d diffracted,
+    Eigen::Vector3d polarization_axis,
+    double kahn_factor);
+
+std::vector<double> I_cell_ave(crystal& db_cryst,bool use_Fhkl_scale, int i_channel, std::vector<double>& Fhkl_scale);
+void Ih_grad_terms(crystal& db_cryst, int i_chan, std::vector<double>& Fhkl_scale, std::vector<double>& out);
+void Friedel_grad_terms(crystal& db_cryst, int i_chan, std::vector<double>& Fhkl_scale, std::vector<double>& out);
+void Finit_grad_terms(crystal& db_cryst, int i_chan, std::vector<double>& Fhkl_scale, std::vector<double>& out);
 
 void diffBragg_sum_over_steps(
       int Npix_to_model, std::vector<unsigned int>& panels_fasts_slows,

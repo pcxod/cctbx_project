@@ -1,10 +1,13 @@
 from __future__ import absolute_import, division, print_function
 from xfel.merging.application.worker import worker
-from xfel.merging.application.reflection_table_utils import reflection_table_utils
+from xfel.merging.application.reflection_table_utils import \
+    reflection_table_utils as rt_util
 from cctbx.crystal import symmetry
 from cctbx import miller
 import os
 from six.moves import cStringIO as StringIO
+import numpy as np
+from scitbx.array_family import flex
 
 class merger(worker):
   """
@@ -18,18 +21,41 @@ class merger(worker):
 
   def run(self, experiments, reflections):
 
+    sel_col = "id"
+    if self.params.statistics.shuffle_ids:
+      refl_ids = list(set(reflections["id"]))
+      new_ids = np.random.permutation(refl_ids).astype(np.int32)
+      new_id_map = {old_id: new_id for old_id, new_id in zip(refl_ids, new_ids)}
+      new_id_col = [new_id_map[i] for i in reflections["id"]]
+      reflections["shuffled_id"] = flex.int(new_id_col)
+      sel_col = "shuffled_id"
+
     # select, merge and output odd reflections
-    odd_reflections = reflection_table_utils.select_odd_experiment_reflections(reflections)
-    odd_reflections_merged = reflection_table_utils.merge_reflections(odd_reflections, self.params.merging.minimum_multiplicity)
+    odd_reflections = rt_util.select_odd_experiment_reflections(reflections, sel_col)
+    odd_reflections_merged = rt_util.merge_reflections(
+        odd_reflections,
+        self.params.merging.minimum_multiplicity,
+        thresh=self.params.filter.outlier.mad_thresh
+    )
     self.gather_and_output_reflections(odd_reflections_merged, 'odd')
 
     # select, merge and output even reflections
-    even_reflections = reflection_table_utils.select_even_experiment_reflections(reflections)
-    even_reflections_merged = reflection_table_utils.merge_reflections(even_reflections, self.params.merging.minimum_multiplicity)
+    even_reflections = rt_util.select_even_experiment_reflections(reflections, sel_col)
+    even_reflections_merged = rt_util.merge_reflections(
+        even_reflections,
+        self.params.merging.minimum_multiplicity,
+        thresh=self.params.filter.outlier.mad_thresh
+    )
     self.gather_and_output_reflections(even_reflections_merged, 'even')
 
     # merge and output all reflections
-    all_reflections_merged = reflection_table_utils.merge_reflections(reflections, self.params.merging.minimum_multiplicity)
+    name = "merged_good_refls2/rank%d" % self.mpi_helper.comm.rank
+    all_reflections_merged = rt_util.merge_reflections(
+        reflections,
+        self.params.merging.minimum_multiplicity,
+        nameprefix=name,
+        thresh=self.params.filter.outlier.mad_thresh
+    )
     self.gather_and_output_reflections(all_reflections_merged, 'all')
 
     return None, reflections
@@ -44,7 +70,7 @@ class merger(worker):
     # concatenate all merged HKLs
     if self.mpi_helper.rank == 0:
       self.logger.log_step_time("MERGE")
-      final_merged_reflection_table = reflection_table_utils.merged_reflection_table()
+      final_merged_reflection_table = rt_util.merged_reflection_table()
       self.logger.log("Concatenating merged %s HKLs at rank 0..."%selection_name)
       for table in all_merged_reflection_tables:
         final_merged_reflection_table.extend(table)
@@ -94,6 +120,17 @@ class merger(worker):
     mtz_out.add_miller_array(
       miller_array=all_obs.average_bijvoet_mates(),
       column_root_label="IMEAN")
+
+    if self.params.merging.include_multiplicity_column:
+      all_mult = miller.array(
+        miller_set=miller.set(final_symm, reflections['miller_index'], not self.params.merging.merge_anomalous),
+        data=reflections['multiplicity']).resolution_filter(
+                                          d_min=self.params.merging.d_min,
+                                          d_max=self.params.merging.d_max).set_observation_type_xray_intensity()
+      mtz_out.add_miller_array(
+        miller_array=all_mult,
+        column_root_label='multiplicity')
+
     mtz_obj = mtz_out.mtz_object()
     mtz_obj.write(mtz_file)
     self.logger.main_log("Output anomalous and mean data:\n    %s" %os.path.abspath(mtz_file))

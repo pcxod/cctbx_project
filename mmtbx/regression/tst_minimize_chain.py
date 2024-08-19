@@ -568,14 +568,13 @@ def tst_01():
   mtz_object.write(file_name = "%s_map.mtz"%prefix)
 
   from mmtbx.building.merge_models import run as merge_models
-  hierarchy=merge_models(
+  hierarchy, pdb_out=merge_models(
       map_data=target_map_data,
       pdb_inp=pdb_inp,
       dist_max=100,
       verbose=True)
 
-  pdb_inp=hierarchy.as_pdb_input(crystal_symmetry=fc.crystal_symmetry())
-  xrs=pdb_inp.xray_structure_simple()
+  xrs=hierarchy.extract_xray_structure(crystal_symmetry=fc.crystal_symmetry())
   hierarchy.write_pdb_file(file_name="%s_refined.pdb"%prefix)
   rmsd=xrs.sites_cart().rms_difference(xrs_answer_full.sites_cart())
   print("RMSD from TARGET allowing any CROSSOVERS: %8.2f " %(rmsd))
@@ -620,8 +619,8 @@ def tst_02(args,prefix=None):
      crystal_symmetry=fc.crystal_symmetry(),
      pdb_string=pdb_str_poor_full)
 
-  pdb_inp=hierarchy.as_pdb_input(crystal_symmetry=fc.crystal_symmetry())
-  xrs_refined=pdb_inp.xray_structure_simple()
+  xrs_refined=hierarchy.extract_xray_structure(
+     crystal_symmetry=fc.crystal_symmetry())
   hierarchy.write_pdb_file(file_name="%s_refined.pdb"%prefix)
   multiple_model_hierarchy.write_pdb_file(
       file_name="%s_refined_all_states.pdb"%prefix)

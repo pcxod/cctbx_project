@@ -103,7 +103,7 @@ class Scraper(object):
       return "%.1f"%(1/math.sqrt(x))
     formatter = FuncFormatter(resolution)
     ax1.xaxis.set_major_formatter(formatter)
-    ax1.set_xlabel(u'Resolution ${\AA}$')
+    ax1.set_xlabel(r'Resolution ${\AA}$')
     ax1.set_ylabel('%')
     ax2.set_ylabel('Multiplicity')
     handles, labels = ax1.get_legend_handles_labels()
@@ -149,6 +149,8 @@ class Scraper(object):
       if 'CC1/2' in r:
         last = last_res = 0
         for row in r['CC1/2']:
+          if 'All' in row:
+            break
           row_n, d_max, d_min, cc = row
           if cc > 0 and not last:
             last = cc; last_res = (d_max + d_min) / 2
@@ -184,13 +186,13 @@ class Scraper(object):
     ax2.set_xlabel("N images")
     ax1a.set_ylabel("Overall CC1/2 (%)")
     ax1b.set_ylabel("Overall multiplicity")
-    ax2.set_ylabel(u"Resolution ($\AA$")
+    ax2.set_ylabel(r"Resolution ($\AA$")
     ax1a.set_title(title)
 
     def resolution(y, pos):
       if y <= 0:
         return '-'
-      return "%.1f"%(1/math.sqrt(y))
+      return "%.2f"%(1/math.sqrt(y))
     formatter = FuncFormatter(resolution)
     ax2.yaxis.set_major_formatter(formatter)
 

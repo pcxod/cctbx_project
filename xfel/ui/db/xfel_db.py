@@ -21,6 +21,8 @@ from six.moves import zip
 
 from xfel.command_line.experiment_manager import initialize as initialize_base
 
+CACHED_CONNECT_TIMEOUT = 300
+
 class initialize(initialize_base):
   expected_tables = ["run", "job", "rungroup", "trial", "tag", "run_tag", "event", "trial_rungroup",
                      "imageset", "imageset_event", "beam", "detector", "experiment",
@@ -293,6 +295,7 @@ class db_application(object):
   def __init__(self, params, cache_connection = True, mode = 'execute'):
     self.params = params
     self.dbobj = None
+    self.dbobj_refreshed_time = None
     self.cache_connection = cache_connection
     self.query_count = 0
     self.mode = mode
@@ -326,8 +329,12 @@ class db_application(object):
         # https://stackoverflow.com/questions/1617637/pythons-mysqldb-not-getting-updated-row
         if not commit: # connection caching is not attempted if commit=False
           dbobj = get_db_connection(self.params, autocommit=False)
-        elif self.dbobj is None:
+        elif (
+            self.dbobj is None
+            or time.time() - self.dbobj_refreshed_time > CACHED_CONNECT_TIMEOUT
+        ):
           dbobj = get_db_connection(self.params, autocommit=True)
+          self.dbobj_refreshed_time = time.time()
           if self.cache_connection:
             self.dbobj = dbobj
         else:
@@ -344,7 +351,20 @@ class db_application(object):
             print('Query % 6d SQLTime Taken = % 10.6f seconds' % (self.query_count, et), query[:min(len(query),145)])
         return cursor
       except OperationalError as e:
-        if "Can't connect to MySQL server" not in str(e) and "Lost connection to MySQL server" not in str(e):
+        reconnect_strings = [
+            "MySQL server has gone away",
+            "max_user_connections",
+            "is not allowed to connect to this MariaDB server",
+        ]
+        retry_strings = [
+            "Can't connect to MySQL server",
+            "Lost connection to MySQL server",
+            "Deadlock found when trying to get lock",
+            "WSREP has not yet prepared node for application use",
+        ]
+        if any([s in str(e) for s in reconnect_strings]):
+          self.dbobj = None
+        elif all([s not in str(e) for s in retry_strings]):
           print(query)
           raise e
         retry_count += 1
@@ -824,8 +844,8 @@ class xfel_db_application(db_application):
   def get_all_jobs(self, active = False, where = None):
     if active:
       if where is None:
-        where = ""
-      where += " WHERE (trial.active = True AND rungroup.active = True) OR dataset.active = True"
+        where = "LEFT OUTER JOIN `%s_dataset_task` dataset_task ON job.dataset_id = dataset_task.dataset_id " % self.params.experiment_tag
+        where += "WHERE (trial.active = True AND rungroup.active = True) OR (dataset.active = True AND job.task_id = dataset_task.task_id AND dataset_task.task_id IS NOT NULL)"
     return self.get_all_x_with_subitems(JobFactory.from_args, "job", sub_items = [(Trial, 'trial', False),
                                                                                   (Run, 'run', False),
                                                                                   (Rungroup, 'rungroup', False),
@@ -900,9 +920,6 @@ class xfel_db_application(db_application):
 
   def create_dataset_version(self, **kwargs):
     return DatasetVersion(self, **kwargs)
-
-  def get_dataset(self, dataset_version_id):
-    return Dataset(self, dataset_version_id)
 
   def get_dataset_version(self, dataset_version_id):
     return DatasetVersion(self, dataset_version_id)

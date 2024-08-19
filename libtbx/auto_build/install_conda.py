@@ -154,15 +154,15 @@ class conda_manager(object):
   # Currently, there is one monolithic environment
   # The key names for this dictionary must match the builder names in
   # bootstrap.py
+  phenix_env = os.path.join('phenix', 'conda_envs',
+    default_format.format(builder='phenix', version=version,
+                          platform=conda_platform[platform.system()]))
   env_locations = {
     'cctbxlite': default_file,
     'cctbx': default_file,
-    'phenix': os.path.join('phenix', 'conda_envs',
-      default_format.format(builder='phenix', version=version,
-                            platform=conda_platform[platform.system()])),
-    'phenix_voyager': os.path.join('phenix', 'conda_envs',
-      default_format.format(builder='phenix', version=version,
-                            platform=conda_platform[platform.system()])),
+    'phenix': phenix_env,
+    'phenix_voyager': phenix_env,
+    'phenix_release': phenix_env,
     'xfellegacy': default_file,
     'dials-old': os.path.join('dials', '.conda-envs',
       default_format.format(builder='dials', version=version,
@@ -540,8 +540,8 @@ common compilers provided by conda. Please update your version with
         format(install_dir=install_dir)
       command_list = ['"' + filename + '"', flags]
     else:
-      flags = '-b -u -p "{install_dir}"'.format(install_dir=install_dir)
-      command_list = ['/bin/sh', filename, flags]
+      flags = ['-b', '-p', '{install_dir}'.format(install_dir=install_dir)]
+      command_list = ['/bin/sh', filename] + flags
     print('Installing miniconda to "{install_dir}"'.format(
       install_dir=install_dir), file=self.log)
     output = check_output(command_list, env=self.env)
@@ -679,9 +679,9 @@ format(builder=builder, builders=', '.join(sorted(self.env_locations.keys()))))
       filename = os.path.join(
         self.root_dir, 'modules', self.env_locations[builder])
       if python is not None:
-        if python not in ['27', '36', '37', '38', '39']:
+        if python not in ['27', '37', '38', '39', '310']:
           raise RuntimeError(
-            """Only Python 2.7, 3.6, 3.7, 3.8, and 3.9 are currently supported.""")
+            """Only Python 2.7, 3.7, 3.8, 3.9, and 3.10 are currently supported.""")
         filename = filename.replace('PYTHON_VERSION', python)
     else:
       filename = os.path.abspath(filename)
@@ -1006,7 +1006,7 @@ Example usage:
       same as the ones for bootstrap.py. The default builder is "cctbx." """)
   parser.add_argument(
     '--python', default='27', type=str, nargs='?', const='27',
-    choices=['27', '36', '37', '38', '39'],
+    choices=['27', '37', '38', '39', '310'],
     help="""When set, a specific Python version of the environment will be used.
     This only affects environments selected with the --builder flag.""")
   parser.add_argument(

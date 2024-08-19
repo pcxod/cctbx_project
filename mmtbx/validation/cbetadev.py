@@ -21,6 +21,7 @@ from libtbx import group_args
 
 from mmtbx.conformation_dependent_library import generate_protein_threes
 from mmtbx.validation import cbd_utils
+import json
 
 relevant_atom_names = {
   " CA ": None, " N  ": None, " C  ": None, " CB ": None} # FUTURE: set
@@ -49,6 +50,7 @@ class cbeta(residue):
     "deviation",
     "dihedral_NABB",
     "ideal_xyz",
+    "model_id"
   ]
   __slots__ = residue.__slots__ + __cbeta_attr__
 
@@ -98,12 +100,23 @@ class cbeta(residue):
     y = self.deviation * np.sin(angle)
     return "{%s} %.3f %.3f 0" % (key,x,y)
 
+  def as_JSON(self):
+    serializable_slots = [s for s in self.__slots__ if hasattr(self, s)]
+    slots_as_dict = ({s: getattr(self, s) for s in serializable_slots})
+    return json.dumps(slots_as_dict, indent=2)
+
+  def as_hierarchical_JSON(self):
+    hierarchical_dict = {}
+    hierarchy_nest_list = ['model_id', 'chain_id', 'resid', 'altloc']
+    return json.dumps(self.nest_dict(hierarchy_nest_list, hierarchical_dict), indent=2)
+
   def as_table_row_phenix(self):
     return [ self.chain_id, "%1s%s %s" % (self.altloc,self.resname, self.resid),
              self.deviation, self.dihedral_NABB ]
 
 class cbetadev(validation):
-  __slots__ = validation.__slots__ + ["beta_ideal","_outlier_i_seqs","stats"]
+  __slots__ = validation.__slots__ + ["beta_ideal","_outlier_i_seqs","stats",
+                                      'percent_outliers', 'new_outliers', 'outliers_removed']
   program_description = "Analyze protein sidechain C-beta deviation"
   output_header = "pdb:alt:res:chainID:resnum:dev:dihedralNABB:Occ:ALT:"
   gui_list_headers = ["Chain", "Residue","Deviation","Angle"]
@@ -118,6 +131,7 @@ class cbetadev(validation):
       collect_ideal=False,
       apply_phi_psi_correction=False,
       display_phi_psi_correction=False,
+      exclude_d_peptides=False,
       quiet=False):
     validation.__init__(self)
     self._outlier_i_seqs = flex.size_t()
@@ -126,15 +140,20 @@ class cbetadev(validation):
     self.stats = group_args(n_results=0,
                             n_weighted_results = 0,
                             n_weighted_outliers = 0)
+    total_residues = 0
+    new_outliers = None
+    outliers_removed = None
     if apply_phi_psi_correction:
       phi_psi_angles = get_phi_psi_dict(pdb_hierarchy)
       new_outliers = 0
       outliers_removed = 0
-      total_residues = 0
     from mmtbx.validation import utils
     use_segids = utils.use_segids_in_place_of_chainids(
       hierarchy=pdb_hierarchy)
     for model in pdb_hierarchy.models():
+      if model.id not in self.n_total_by_model:
+        self.n_total_by_model[model.id] = 0
+        self.n_outliers_by_model[model.id] = 0
       for chain in model.chains():
         if use_segids:
           chain_id = utils.get_segid_as_chainid(chain=chain)
@@ -163,13 +182,14 @@ class cbetadev(validation):
                 if (dev is None) : continue
                 resCB = relevant_atoms[" CB "]
                 self.stats.n_results += 1
+                self.n_total_by_model[model.id] += 1
                 self.stats.n_weighted_results += resCB.occ
                 if (is_alt_conf):
                   altchar = cf.altloc
                 else:
                   altchar = " "
+                total_residues+=1
                 if apply_phi_psi_correction:
-                  total_residues+=1
                   id_str = '|%s:%s|' % (residue.id_str(), altchar)
                   phi_psi = phi_psi_angles.get(id_str, None)
                   if phi_psi:
@@ -181,13 +201,17 @@ class cbetadev(validation):
                       )
                     if rc:
                       dev, dihedralNABB, start, finish = rc
+                      # if start or finish: print(id_str,dev,dihedralNABB,start,finish)
                       if start and not finish:
                         outliers_removed += 1
                       elif not start and finish:
                         new_outliers += 1
-                if(dev >=0.25 or outliers_only==False):
+                if(exclude_d_peptides and dev>=2.):
+                  pass
+                elif(dev >=0.25 or outliers_only==False):
                   if(dev >=0.25):
                     self.n_outliers+=1
+                    self.n_outliers_by_model[model.id]+=1
                     self.stats.n_weighted_outliers += resCB.occ
                     self._outlier_i_seqs.append(atom.i_seq)
                   res=residue.resname.lower()
@@ -195,6 +219,7 @@ class cbetadev(validation):
                   if(len(sub)==1):
                     sub=" "+sub
                   result = cbeta(
+                    model_id=model.id,
                     chain_id=chain_id,
                     resname=residue.resname,
                     resseq=residue.resseq,
@@ -221,6 +246,12 @@ class cbetadev(validation):
          self.n_outliers,
          total_residues,
         ))
+    self.new_outliers=new_outliers
+    self.outliers_removed=outliers_removed
+    if total_residues:
+      self.percent_outliers=self.n_outliers/total_residues*100
+    else:
+      self.percent_outliers = None
 
   def show_old_output(self, out, verbose=False, prefix="pdb"):
     if (verbose):
@@ -300,6 +331,33 @@ class cbetadev(validation):
     if len(cbeta_alt_labels) == 1: cbeta_alt_labels = []
     return "\n".join(header + cbeta_main + cbeta_main_labels + cbeta_alt + cbeta_alt_labels)
 
+  def as_JSON(self, addon_json={}):
+    if not addon_json:
+      addon_json = {}
+    addon_json["validation_type"] = "cbetadev"
+    data = addon_json
+    flat_results = []
+    hierarchical_results = {}
+    summary_results = {}
+    for result in self.results:
+      flat_results.append(json.loads(result.as_JSON()))
+      hier_result = json.loads(result.as_hierarchical_JSON())
+      hierarchical_results = self.merge_dict(hierarchical_results, hier_result)
+
+    data['flat_results'] = flat_results
+    data['hierarchical_results'] = hierarchical_results
+    data['summary_results'] = summary_results
+    for model_id in self.n_total_by_model.keys():
+      if self.n_total_by_model[model_id]:
+        summary_results[model_id] = {
+          "num_outliers" : self.n_outliers_by_model[model_id],
+          "num_cbeta_residues" : self.n_total_by_model[model_id],
+          "outlier_percentage" : self.n_outliers_by_model[model_id]/self.n_total_by_model[model_id]*100,
+          "outlier_goal" : 0,
+        }
+    data['summary_results'] = summary_results
+    return json.dumps(data, indent=2)
+
   def as_coot_data(self):
     data = []
     for result in self.results :
@@ -312,6 +370,7 @@ class calculate_ideal_and_deviation(object):
   __slots__ = ["deviation", "ideal", "dihedral"]
   def __init__(self, relevant_atoms, resname):
     assert (resname != "GLY")
+    from cctbx.geometry_restraints import chirality
     self.deviation = None
     self.ideal = None
     self.dihedral = None
@@ -319,8 +378,16 @@ class calculate_ideal_and_deviation(object):
     resN  = relevant_atoms[" N  "]
     resC  = relevant_atoms[" C  "]
     resCB = relevant_atoms[" CB "]
+    if None not in [resCA, resN, resCB, resC]:
+      chiral_volume = chirality([resCA.xyz, resN.xyz, resCB.xyz, resC.xyz],
+                               volume_ideal=0.,
+                               both_signs=True,
+                               weight=1.,
+                               ).volume_model
+    else:
+      chiral_volume = None
     dist, angleCAB, dihedralNCAB, angleNAB, dihedralCNAB, angleideal= \
-      idealized_calpha_angles(resname)
+      idealized_calpha_angles(resname, chiral_volume)
     betaNCAB = construct_fourth(resN,
                                 resCA,
                                 resC,
@@ -347,22 +414,27 @@ class calculate_ideal_and_deviation(object):
           sites=[resN.xyz,resCA.xyz,betaxyz.elems,resCB.xyz], deg=True)
         self.ideal = betaxyz.elems
 
-def idealized_calpha_angles(resname):
-  if (resname == "ALA"):
+def idealized_calpha_angles(resname, chiral_volume=None):
+  from iotbx.pdb import common_residue_names_get_class
+  if (resname in ["ALA", "DAL"]):
+    #target values are for L-aminao acids.
+    #D-amino acids will require the signs of the dihedrals to be flipped
+    #This will be performed just before the return
     dist = 1.536
     angleCAB = 110.1
     dihedralNCAB = 122.9
     angleNAB = 110.6
     dihedralCNAB = -122.6
     angleideal = 111.2
-  elif (resname == "PRO"):
+  elif (resname in ["PRO", "DPR"]):
     dist = 1.530
     angleCAB = 112.2
     dihedralNCAB = 115.1
     angleNAB = 103.0
     dihedralCNAB = -120.7
     angleideal = 111.8
-  elif (resname in ["VAL", "THR", "ILE"]):
+  elif (resname in ["VAL", "THR", "ILE",
+                    "DVA", "DTH", "DIL"]):
     dist = 1.540
     angleCAB = 109.1
     dihedralNCAB = 123.4
@@ -383,6 +455,15 @@ def idealized_calpha_angles(resname):
     angleNAB = 110.5
     dihedralCNAB = -122.6
     angleideal = 111.2
+  #check if dihedral signs should be flipped becasue residue has D chirality
+  #rely on residue names first, so that mis-named residues gat marked as outliers
+  #if the residue name is nonstandard, use the chiral volume for best guess about target
+  res_class = common_residue_names_get_class(resname)
+  if res_class == "common_amino_acid" or chiral_volume is None:
+    pass
+  elif res_class == "d_amino_acid" or chiral_volume > 0:
+    dihedralNCAB = dihedralNCAB * -1
+    dihedralCNAB = dihedralCNAB * -1
   return dist, angleCAB, dihedralNCAB, angleNAB, dihedralCNAB, angleideal
 
 def construct_fourth(resN,resCA,resC,dist,angle,dihedral,method="NCAB"):
@@ -423,6 +504,7 @@ def construct_fourth(resN,resCA,resC,dist,angle,dihedral,method="NCAB"):
     a = col(res2.xyz)
     c += a
     b = c
+    if a == b: return newD.elems
     return rotate_point_around_axis(
       axis_point_1=a.elems,
       axis_point_2=b.elems,

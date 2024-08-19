@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function
 import six
-import sys, time
+import os, sys, time
 import mmtbx.model
 import iotbx.pdb
 import boost_adaptbx.boost.python as bp
@@ -14,16 +14,128 @@ from cctbx.maptbx.box import shift_and_box_model
 
 ext = bp.import_ext("cctbx_geometry_restraints_ext")
 get_class = iotbx.pdb.common_residue_names_get_class
-# For development
-print_time = False
 
 # ==============================================================================
 
-def mon_lib_query(residue, mon_lib_srv):
-    md, ani = mon_lib_srv.get_comp_comp_id_and_atom_name_interpretation(
-      residue_name=residue.resname,
-      atom_names=residue.atoms().extract_name())
-    return md
+def get_h_restraints(resname, strict=True):
+  from mmtbx.monomer_library import cif_types
+  from mmtbx.chemical_components import get_cif_dictionary
+  from mmtbx.chemical_components import get_cif_filename
+  from mmtbx.ligands.rdkit_utils import read_chemical_component_filename
+  filename = get_cif_filename(resname)
+  if not os.path.exists(filename): return None
+  try:
+    molecule = read_chemical_component_filename(filename)
+  except Exception as e:
+    print(e)
+    return None
+  cc_cif = get_cif_dictionary(resname)
+  cc = cc_cif['_chem_comp'][0]
+  hs = []
+  hsi = []
+  chem_comp = cif_types.chem_comp(
+    id=cc.id,
+    three_letter_code=cc.three_letter_code,
+    name=cc.name,
+    group=cc.type,
+    # number_atoms_all=cc.number_atoms_all,
+    # number_atoms_nh=cc.number_atoms_nh,
+    desc_level="")
+  comp_comp_id = cif_types.comp_comp_id(source_info=None, chem_comp=chem_comp)
+  lookup = {}
+  for i, a in enumerate(cc_cif.get('_chem_comp_atom',[])):
+    lookup[a.atom_id]=i
+    lookup[i]=a.atom_id
+    if a.type_symbol in ['H', 'D']:
+      hs.append(a.atom_id)
+      hsi.append(i)
+    comp_comp_id.atom_list.append(cif_types.chem_comp_atom(
+      atom_id=a.atom_id,
+      type_symbol=a.type_symbol,
+      # type_energy=a.type_energy,
+      # partial_charge=a.partial_charge,
+      ))
+  conf =  molecule.GetConformer()
+  from rdkit import Chem # needed import
+  from rdkit.Chem import rdMolTransforms
+  for b in cc_cif.get('_chem_comp_bond',[]):
+    if strict:
+      if (b.atom_id_1 not in hs and
+          b.atom_id_2 not in hs): continue
+    atom_idx1=lookup[b.atom_id_1]
+    atom_idx2=lookup[b.atom_id_2]
+    bl = rdMolTransforms.GetBondLength(conf, atom_idx1, atom_idx2)
+    comp_comp_id.bond_list.append(cif_types.chem_comp_bond(
+      atom_id_1=b.atom_id_1,
+      atom_id_2=b.atom_id_2,
+      type=b.value_order,
+      value_dist='%0.3f' % (bl*.9),
+      value_dist_esd=".1"))
+
+  from mmtbx.ligands.rdkit_utils import enumerate_angles
+  for angle in enumerate_angles(molecule):
+    if angle[0] in hsi or angle[2] in hsi:
+      av = rdMolTransforms.GetAngleDeg(conf, angle[0], angle[1], angle[2])
+    else: continue
+    comp_comp_id.angle_list.append(cif_types.chem_comp_angle(
+      atom_id_1=lookup[angle[0]],
+      atom_id_2=lookup[angle[1]],
+      atom_id_3=lookup[angle[2]],
+      value_angle='%0.1f' % av,
+      value_angle_esd="1"))
+
+  from mmtbx.ligands.rdkit_utils import enumerate_torsions
+  for i, angle in enumerate(enumerate_torsions(molecule)):
+    if angle[0] in hsi or angle[3] in hsi:
+      av = rdMolTransforms.GetDihedralDeg(conf, angle[0], angle[1], angle[2], angle[3])
+    else: continue
+    comp_comp_id.tor_list.append(cif_types.chem_comp_tor(
+      id='Var_%03d' % i,
+      atom_id_1=lookup[angle[0]],
+      atom_id_2=lookup[angle[1]],
+      atom_id_3=lookup[angle[2]],
+      atom_id_4=lookup[angle[3]],
+      value_angle='%0.1f' % av,
+      value_angle_esd='1',
+      period='1'))
+  return comp_comp_id
+
+# ==============================================================================
+
+def mon_lib_query(residue, mon_lib_srv, construct_h_restraints=True):
+  # if get_class(residue.resname) in ['common_rna_dna']:
+  #   md = get_h_restraints(residue.resname)
+  #   return md
+  # if print_time: print(residue.resname, get_class(residue.resname))
+  if residue.resname == 'UNL':
+    return None
+  md, ani = mon_lib_srv.get_comp_comp_id_and_atom_name_interpretation(
+    residue_name=residue.resname,
+    atom_names=residue.atoms().extract_name())
+  if md is None:
+    md = get_h_restraints(residue.resname)
+    # md.show()
+  return md
+
+# ==============================================================================
+
+def get_reduce_pdb_interpretation_params(use_neutron_distances):
+  '''
+  Create pdb_interpretation parameter scope.
+  Do this in a function so other programs (reduce2) can use the same parameters
+  '''
+  p = mmtbx.model.manager.get_default_pdb_interpretation_params()
+  p.pdb_interpretation.restraints_library.cdl=False # XXX this triggers a bug !=360
+  p.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
+  p.pdb_interpretation.disable_uc_volume_vs_n_atoms_check=True
+  p.pdb_interpretation.use_neutron_distances = use_neutron_distances
+  p.pdb_interpretation.proceed_with_excessive_length_bonds=True
+  p.pdb_interpretation.allow_polymer_cross_special_position=True
+  #p.pdb_interpretation.automatic_linking.link_metals = True
+  p.pdb_interpretation.automatic_linking.link_residues = True
+  p.pdb_interpretation.automatic_linking.exclude_hydrogens_from_bonding_decisions = True
+  #
+  return p
 
 # ==============================================================================
 
@@ -54,7 +166,8 @@ class place_hydrogens():
                exclude_water         = True,
                stop_for_unknowns     = False,
                keep_existing_H       = False,
-               validate_e            = False):
+               validate_e            = False,
+               print_time            = False):
 
     self.model                 = model
     self.use_neutron_distances = use_neutron_distances
@@ -64,14 +177,27 @@ class place_hydrogens():
     self.stop_for_unknowns     = stop_for_unknowns
     self.keep_existing_H       = keep_existing_H
     self.validate_e            = validate_e
+    self.print_time            = print_time
     #
     self.no_H_placed_mlq        = list()
     self.site_labels_disulfides = list()
     self.site_labels_no_para    = list()
-    self.charged_atoms          = list()
+    #self.charged_atoms          = list()
     self.sl_removed             = list()
     self.n_H_initial            = 0
     self.n_H_final              = 0
+
+    if self.print_time:
+      self.time_rebox_model        = None
+      self.time_remove_element_X   = None
+      self.time_add_missing_H      = None
+      self.time_terminal_propeller = None
+      self.time_make_grm           = None
+      self.time_remove_isolated    = None
+      self.time_riding_manager     = None
+      self.time_remove_H_nopara    = None
+      self.time_reset_idealize     = None
+      self.time_remove_H_on_links  = None
 
 # ------------------------------------------------------------------------------
 
@@ -79,63 +205,65 @@ class place_hydrogens():
     '''
     Function that places H atoms
     '''
-    model_has_bogus_cs = False
 
-    # TODO temporary fix until the code is moved to model class
-    # check if box cussion of 5 A is enough to prevent symm contacts
+    # Create symmetry if necessary
+    # ------------------------------
+    model_has_bogus_cs = False
+    t0 = time.time()
     cs = self.model.crystal_symmetry()
     if (cs is None) or (cs.unit_cell() is None):
       self.model = shift_and_box_model(model = self.model)
       model_has_bogus_cs = True
+      #self.model.add_crystal_symmetry_if_necessary() # this is slower than shift_and_box_model!!!!
+    self.time_rebox_model = round(time.time()-t0, 2)
+
+
+    # Don't stop if model contains element X atoms
+    # This needs more discussion before being made final
+    # ---------------------------------------------
+    t0 = time.time()
+    if ' X' in self.model.get_hierarchy().atoms().extract_element():
+      self.model = self.model.select(~self.model.selection('element X'))
+    self.time_remove_element_X = round(time.time()-t0, 2)
+
 
     # Remove existing H if requested
+    # ------------------------------
+    self.model.get_xray_structure()
     self.n_H_initial = self.model.get_hd_selection().count(True)
     if not self.keep_existing_H:
       self.model = self.model.select(~self.model.get_hd_selection())
 
+    # Add missing H atoms and place them at bogus position
+    # ----------------------------------------------------
     t0 = time.time()
-    # Add H atoms and place them at center of coordinates
     pdb_hierarchy = self.add_missing_H_atoms_at_bogus_position()
-    if print_time:
-      print("add_missing_H_atoms_at_bogus_position:", round(time.time()-t0, 2))
-
+    self.time_add_missing_H = round(time.time()-t0, 2)
+    # DEBUG
     #print(pdb_hierarchy.composition().n_hd)
+    #f = open("intermediate1.pdb","w")
+    #f.write(self.model.model_as_pdb())
 
-#    f = open("intermediate1.pdb","w")
-#    f.write(self.model.model_as_pdb())
-
-    # place N-terminal propeller hydrogens
-#    if self.n_terminal_charge != 'no_charge':
-#      for m in pdb_hierarchy.models():
-#        for chain in m.chains():
-#          rgs = chain.residue_groups()[0]
-#          # by default, place NH3 only at residue with resseq 1
-#          if (self.n_terminal_charge == 'residue_one' and rgs.resseq_as_int() != 1):
-#            continue
-#          elif (self.n_terminal_charge == 'first_in_chain'):
-#            pass
-#          for ag in rgs.atom_groups():
-#            if (get_class(name=ag.resname) in
-#                ['common_amino_acid', 'modified_amino_acid', 'd_amino_acid']):
-#              if ag.get_atom('H'):
-#                ag.remove_atom(ag.get_atom('H'))
-#            rc = add_n_terminal_hydrogens_to_residue_group(rgs)
-#            # rc is always empty list?
+    # Place N-terminal propeller hydrogens
+    # TODO double check N-terminal position for PRO residues
+    # ------------------------------------
+    if self.n_terminal_charge in ['residue_one', 'first_in_chain']:
+      t0 = time.time()
+      self.place_n_terminal_propeller(pdb_hierarchy = pdb_hierarchy)
+      self.time_terminal_propeller = round(time.time()-t0, 2)
 
     pdb_hierarchy.sort_atoms_in_place()
     pdb_hierarchy.atoms().reset_serial()
-#    f = open("intermediate2.pdb","w")
-#    f.write(self.model.model_as_pdb())
 
-    p = mmtbx.model.manager.get_default_pdb_interpretation_params()
-    p.pdb_interpretation.clash_guard.nonbonded_distance_threshold=None
-    p.pdb_interpretation.use_neutron_distances = self.use_neutron_distances
-    p.pdb_interpretation.proceed_with_excessive_length_bonds=True
-    #p.pdb_interpretation.automatic_linking.link_metals = True
+    # DEBUG
+    #f = open("intermediate2.pdb","w")
+    #f.write(self.model.model_as_pdb())
 
-    t0 = time.time()
-    #p.pdb_interpretation.restraints_library.cdl=False # XXX this triggers a bug !=360
+    # Make new model obj and get restraints manager
+    # ---------------------------------------------
+    p = get_reduce_pdb_interpretation_params(self.use_neutron_distances)
     ro = self.model.get_restraint_objects()
+    t0 = time.time()
     self.model = mmtbx.model.manager(
       model_input       = None,
       pdb_hierarchy     = pdb_hierarchy,
@@ -143,107 +271,121 @@ class place_hydrogens():
       crystal_symmetry  = self.model.crystal_symmetry(),
       restraint_objects = ro,
       log               = null_out())
-    self.model.process(pdb_interpretation_params=p,
-      make_restraints=True)
-    if print_time:
-      print("get new model obj and grm:", round(time.time()-t0, 2))
+    self.model.process(pdb_interpretation_params=p, make_restraints=True)
+    #self.model.idealize_h_minimization()
+    #STOP()
+    self.time_make_grm = round(time.time()-t0, 2)
 
     #f = open("intermediate3.pdb","w")
     #f.write(self.model.model_as_pdb())
 
-    # Only keep H that have been parameterized in riding H procedure
+    # Return if no H have been placed
     sel_h = self.model.get_hd_selection()
-    if sel_h.count(True) == 0:
-      return
+    if sel_h.count(True) == 0: return
 
-    # get rid of isolated H atoms.
-    #For example when heavy atom is missing, H needs not to be placed
-    sel_isolated = self.model.isolated_atoms_selection()
-    self.sel_lone_H = sel_h & sel_isolated
-    self.model = self.model.select(~self.sel_lone_H)
-
+    # Remove isolated H atoms
+    # -----------------------
+    # (when heavy atom is missing, H needs not to be placed)
     t0 = time.time()
-    # get riding H manager --> parameterize all H atoms
+    sel_isolated = self.model.isolated_atoms_selection()
+    sel_lone_H = sel_h & sel_isolated
+    # As h_parameterization will not include these, they can be removed in the
+    # next step; for book-keeping it is useful to keep track of lone H as a
+    # selection
+    #if not sel_lone_H.all_eq(False):
+    #  self.model = self.model.select(~sel_lone_H)
+    self.time_remove_isolated = round(time.time()-t0, 2)
+
     sel_h = self.model.get_hd_selection()
+
+    # Setup riding H manager
+    # ----------------------
+    t0 = time.time()
     self.model.setup_riding_h_manager(use_ideal_dihedral = True)
     riding_h_manager = self.model.riding_h_manager
     if riding_h_manager is None:
       return
+    self.time_riding_manager = round(time.time()-t0, 2)
+
+    # Remove H that could not be parameterized
+    # ----------------------------------------
+    t0 = time.time()
     sel_h_in_para = flex.bool(
       [bool(x) for x in riding_h_manager.h_parameterization])
     sel_h_not_in_para = sel_h_in_para.exclusive_or(sel_h)
+    # no need to display lone H atoms in the log, so remove from labels
+    sel_h_not_in_para_but_not_lone = sel_h_not_in_para.exclusive_or(sel_lone_H)
     self.site_labels_no_para = [atom.id_str().replace('pdb=','').replace('"','')
-      for atom in self.model.get_hierarchy().atoms().select(sel_h_not_in_para)]
-    #
-    self.model = self.model.select(~sel_h_not_in_para)
-    if print_time:
-      print("set up riding H manager and some cleanup:", round(time.time()-t0, 2))
+      for atom in self.model.get_hierarchy().atoms().select(sel_h_not_in_para_but_not_lone)]
+    if not sel_h_not_in_para.all_eq(False):
+      self.model = self.model.select(~sel_h_not_in_para)
+    self.time_remove_H_nopara = round(time.time()-t0, 2)
 
   #  f = open("intermediate4.pdb","w")
   #  f.write(model.model_as_pdb())
 
-    if self.validate_e:
-      t0 = time.time()
-      self.validate_electrons()
-      if print_time:
-        print("validate electrons:", round(time.time()-t0, 2))
+# to be removed; was for curiosity only
+#    if self.validate_e:
+#      t0 = time.time()
+#      self.validate_electrons()
+#      if self.print_time:
+#        print("validate electrons:", round(time.time()-t0, 2))
 
-    t0 = time.time()
     # Reset occupancies, ADPs and idealize H atom positions
+    # -----------------------------------------------------
+    t0 = time.time()
     self.model.reset_adp_for_hydrogens(scale = self.adp_scale)
     self.model.reset_occupancy_for_hydrogens_simple()
     self.model.idealize_h_riding()
-    if print_time:
-      print("reset adp, occ; idealize:", round(time.time()-t0, 2))
+    self.time_reset_idealize = round(time.time()-t0, 2)
 
+    # Remove H atoms that are involved in links (bonds, metal coordination, etc)
+    # --------------------------------------------------------------------------
     t0 = time.time()
     self.exclude_H_on_links()
-    if print_time:
-      print("all links:", round(time.time()-t0, 2))
+    self.time_remove_H_on_links = round(time.time()-t0, 2)
 
-    # place N-terminal propeller hydrogens
-    if self.n_terminal_charge != 'no_charge':
-      hierarchy = self.model.get_hierarchy()
-      for m in hierarchy.models():
-        for chain in m.chains():
-          rgs = chain.residue_groups()[0]
-          # by default, place NH3 only at residue with resseq 1
-          if (self.n_terminal_charge == 'residue_one' and rgs.resseq_as_int() != 1):
-            continue
-          elif (self.n_terminal_charge == 'first_in_chain'):
-            pass
-          add_charge = True
-          for ag in rgs.atom_groups():
-            if (get_class(name=ag.resname) in
-                ['common_amino_acid', 'modified_amino_acid', 'd_amino_acid']):
-              if ag.get_atom('N'):
-                N = ag.get_atom('N')
-                if N.i_seq in self.exclusion_iseqs:
-                  add_charge = False
-              if ag.get_atom('H'):
-                H = ag.get_atom('H')
-                ag.remove_atom(H)
-                H_label = H.id_str().replace('pdb=','').replace('"','')
-                if H_label in self.site_labels_no_para:
-                  self.site_labels_no_para.remove(H_label)
-            if add_charge:
-              rc = add_n_terminal_hydrogens_to_residue_group(rgs)
-      hierarchy.sort_atoms_in_place()
-      hierarchy.atoms().reset_serial()
-      self.model = mmtbx.model.manager(
-        model_input       = None,
-        pdb_hierarchy     = hierarchy,
-        stop_for_unknowns = self.stop_for_unknowns,
-        crystal_symmetry  = self.model.crystal_symmetry(),
-        restraint_objects = ro,
-        log               = null_out())
+
+    # TODO: this should be ideally done *after* reduce optimization
+    if not self.exclude_water:
+      self.model.add_hydrogens(1., occupancy=0.)
 
     self.n_H_final = self.model.get_hd_selection().count(True)
 
-# ------------------------------------------------------------------------------
+    if self.print_time:
+      self.print_times()
+
+  # ----------------------------------------------------------------------------
+
+  def place_n_terminal_propeller(self, pdb_hierarchy):
+    '''
+    Place NH3 at residue #1 or at first residue in chain
+    Changes hierarchy in place
+    '''
+    for m in pdb_hierarchy.models():
+      for chain in m.chains():
+        rgs = chain.residue_groups()[0]
+        # by default, place NH3 only at residue with resseq 1
+        if (self.n_terminal_charge == 'residue_one' and rgs.resseq_as_int() != 1):
+          continue
+        elif (self.n_terminal_charge == 'first_in_chain'):
+          pass
+        for ag in rgs.atom_groups():
+          #if ag.resname == 'AYA': return
+          if (get_class(name=ag.resname) in
+              ['common_amino_acid', 'modified_amino_acid', 'd_amino_acid']):
+            if ag.get_atom('H'):
+              ag.remove_atom(ag.get_atom('H'))
+          # TODO make the function below smart, so it
+          # 1) knows when to add H1H2H3 or not
+          # 2) renames H to H1 (so no need to remove it beforehand)
+          rc = add_n_terminal_hydrogens_to_residue_group(rgs) # rc is always empty list?
+
+  # ----------------------------------------------------------------------------
 
   def add_missing_H_atoms_at_bogus_position(self):
-    '''Add missing H atoms at bogus positions to the pdb_hierarchy
+    '''
+    Add missing H atoms at bogus positions to the pdb_hierarchy
 
     This procedure changes the hierarchy in place.
     All H atoms are placed at center of coordinates + (0.5, 0.5, 0.5)
@@ -266,37 +408,43 @@ class place_hydrogens():
     pdb_hierarchy = self.model.get_hierarchy()
     mon_lib_srv = self.model.get_mon_lib_srv()
     #XXX This breaks for 1jxt, residue 2, TYR
-    #get_class = iotbx.pdb.common_residue_names_get_class
-    #no_H_placed_resnames = list()
     for m in pdb_hierarchy.models():
       for chain in m.chains():
         for rg in chain.residue_groups():
           n_atom_groups = len(rg.atom_groups())
           for ag in rg.atom_groups():
-            if n_atom_groups == 3 and ag.altloc == '':
+            if n_atom_groups > 2 and ag.altloc == '':
               continue
             #print list(ag.atoms().extract_name())
             if(get_class(name=ag.resname) == "common_water"): continue
             actual = [a.name.strip().upper() for a in ag.atoms()]
             #
             mlq = mon_lib_query(residue=ag, mon_lib_srv=mon_lib_srv)
-            #if (get_class(name=ag.resname) in ['modified_rna_dna', 'other']):
             if mlq is None:
               self.no_H_placed_mlq.append(ag.resname)
               continue
 
-            expected_h = list()
+            expected_h = []
+            #expected_ha = []
             atom_dict = mlq.atom_dict()
             for k, v in six.iteritems(atom_dict):
               if(v.type_symbol=="H"):
                 expected_h.append(k)
-            # TODO start: temporary fix until v3 names are in mon lib
-            for altname in alternative_names:
-              if (altname[0] in expected_h and altname[1] in expected_h):
-                if (atom_dict[altname[0]].type_energy == 'HCH2' and
-                    atom_dict[altname[1]].type_energy == 'HCH2'):
-                  expected_h.append(altname[2])
-                  expected_h.remove(altname[0])
+              #else:
+              #  expected_ha.append(k)
+            #print('expected H', expected_h)
+            #
+            # TODO start
+            # temporary fix until v3 names are in mon lib
+            if (get_class(name=ag.resname) in
+                ['common_amino_acid', 'modified_amino_acid', 'd_amino_acid']):
+              for altname in alternative_names:
+                if (altname[0] in expected_h and altname[1] in expected_h):
+                  if (atom_dict[altname[0]].type_energy == 'HCH2' and
+                      atom_dict[altname[1]].type_energy == 'HCH2'):
+                    expected_h.append(altname[2])
+                    expected_h.remove(altname[0])
+                    #print('renamed %s to %s' % (altname[0], altname[2]))
             # TODO end
             missing_h = list(set(expected_h).difference(set(actual)))
             if 0: print(ag.resname, missing_h)
@@ -309,7 +457,6 @@ class place_hydrogens():
             segid = ag.atoms()[0].segid
 
             for mh in missing_h:
-              # TODO: this should be probably in a central place
               if len(mh) < 4: mh = (' ' + mh).ljust(4)
               a = (iotbx.pdb.hierarchy.atom()
                 .set_name(new_name=mh)
@@ -323,31 +470,34 @@ class place_hydrogens():
     return pdb_hierarchy
 
 # ------------------------------------------------------------------------------
-
-  def validate_electrons(self):
-    from elbow.quantum import electrons
-    atom_valences = electrons.electron_distribution(
-      # XXX How do we get this working on models with alternate locations?
-      self.model.get_hierarchy(), # needs to be altloc free
-      self.model.get_restraints_manager().geometry,
-      verbose=False,
-    )
-    atom_valences.validate(ignore_water=True,
-                           raise_if_error=False)
-    self.charged_atoms = atom_valences.get_charged_atoms()
+#
+#  def validate_electrons(self):
+#    from elbow.quantum import electrons
+#    atom_valences = electrons.electron_distribution(
+#      self.model.get_hierarchy(), # needs to be altloc free
+#      self.model.get_restraints_manager().geometry,
+#      verbose=False,
+#    )
+#    atom_valences.validate(ignore_water=True, raise_if_error=False)
+#    self.charged_atoms = atom_valences.get_charged_atoms()
 
 # ------------------------------------------------------------------------------
 
-  def exclude_H_on_links(self):
+  def exclude_H_on_links(self, verbose=False):
     """Remove H atoms bound to heavy atoms that form a link
 
     An exception are HD1 and HE2 of HIS. The mover functionality in reduce will
     take care of those.
+
+    TODO: Could restraints manager have a list of links with relevant information?
+          Then we don't have to loop through all proxies here.
     """
+    from mmtbx.ligands.chemistry import get_valences
     origin_ids = linking_class()
     grm = self.model.get_restraints_manager()
     bond_proxies_simple, asu = grm.geometry.get_all_bond_proxies(
       sites_cart = self.model.get_sites_cart())
+    atoms = self.model.get_atoms()
     elements = self.model.get_hierarchy().atoms().extract_element()
     exclusion_iseqs = list()
     exclusion_dict = dict()
@@ -365,30 +515,65 @@ class place_hydrogens():
         exclusion_dict[j] = proxy.origin_id
     sel_remove = flex.size_t()
 
-    atoms = self.model.get_atoms()
     # Find H atoms bound to linked atoms
     removed_dict = dict()
+    parent_dict = dict()
+    bonds = dict()
     for proxy in all_proxies:
       if(  isinstance(proxy, ext.bond_simple_proxy)): i,j=proxy.i_seqs
       elif(isinstance(proxy, ext.bond_asu_proxy)):    i,j=proxy.i_seq,proxy.j_seq
       else: assert 0 # never goes here
+      bonds.setdefault(i,[])
+      bonds[i].append(j)
+      bonds.setdefault(j,[])
+      bonds[j].append(i)
       # Exception for HIS HD1 and HE2
       if (atoms[i].parent().resname == 'HIS' and
         atoms[i].name.strip() in ['HD1','DD1', 'HE2', 'DE2']): continue
       if (atoms[j].parent().resname == 'HIS' and
         atoms[j].name.strip() in ['HD1','DD1', 'HE2', 'DE2']): continue
       if(elements[i] in ["H","D"] and j in exclusion_iseqs):
-        sel_remove.append(i)
-        removed_dict[i] = exclusion_dict[j]
+        if i not in sel_remove:
+          sel_remove.append(i)
+          removed_dict[i] = exclusion_dict[j]
+          parent_dict[i]=j
       if(elements[j] in ["H","D"] and i in exclusion_iseqs):
-        sel_remove.append(j)
-        removed_dict[j] = exclusion_dict[i]
+        if j not in sel_remove:
+          sel_remove.append(j)
+          removed_dict[j] = exclusion_dict[i]
+          parent_dict[j]=i
+    # remove H atoms NOT to remove - double negative!
+    #verbose=True
+    if verbose:
+      print('removed_dict',removed_dict)
+      for i_seq in sel_remove:
+        print('remove?',atoms[i_seq].quote())
+    remove_from_sel_remove=[]
+    for ii, i_seq in reversed(list(enumerate(sel_remove))):
+      j_seq=parent_dict[i_seq]
+      # need to add the use of atomic charge
+      valences=get_valences(elements[j_seq])
+      number_of_bonds=len(bonds[j_seq])
+      if number_of_bonds in valences:
+        # remove this H from delection
+        remove_from_sel_remove.append(i_seq) # ??
+        del removed_dict[i_seq]
+      else:
+        bonds[j_seq].remove(i_seq)
+        bonds[i_seq].remove(j_seq)
+    if remove_from_sel_remove:
+      sel_remove=list(sel_remove)
+      for r in remove_from_sel_remove:
+        sel_remove.remove(r)
+        if verbose: print('keep',atoms[r].quote())
+      sel_remove=flex.size_t(sel_remove)
     #
     sl_removed = [(atom.id_str().replace('pdb=','').replace('"',''),
                    origin_ids.get_origin_key(removed_dict[atom.i_seq]))
         for atom in self.model.get_hierarchy().atoms().select(sel_remove)]
     #
-    self.model = self.model.select(~flex.bool(self.model.size(), sel_remove))
+    if sel_remove:
+      self.model = self.model.select(~flex.bool(self.model.size(), sel_remove))
     self.sl_removed = sl_removed
     self.exclusion_iseqs = exclusion_iseqs
 
@@ -431,15 +616,15 @@ The following H atoms were not placed because they could not be parameterized
       print(msg, file=log)
       for label in self.site_labels_no_para:
         print(label)
-    if self.charged_atoms:
-      msg = '''
-The following heavy atom have an unusual electron count. This could be because
-heavy atoms or H atoms are missing.'''
-      print(msg, file=log)
-      for item in self.charged_atoms:
-        idstr = item[0].id_str().replace('pdb=','').replace('"','')
-        if 'HOH' in idstr: continue
-        print(idstr, item[1])
+#    if self.charged_atoms:
+#      msg = '''
+#The following heavy atom have an unusual electron count. This could be because
+#heavy atoms or H atoms are missing.'''
+#      print(msg, file=log)
+#      for item in self.charged_atoms:
+#        idstr = item[0].id_str().replace('pdb=','').replace('"','')
+#        if 'HOH' in idstr: continue
+#        print(idstr, item[1])
 
     if self.sl_removed:
       print()
@@ -452,6 +637,8 @@ heavy atoms or H atoms are missing.'''
   def get_model(self):
     return self.model
 
+# ------------------------------------------------------------------------------
+
   def get_counts(self):
     return group_args(
       number_h_final  = self.n_H_final,
@@ -459,39 +646,70 @@ heavy atoms or H atoms are missing.'''
       site_labels_disulfides = self.site_labels_disulfides,
       site_labels_no_para = self.site_labels_no_para)
 
+# ------------------------------------------------------------------------------
+
+  def get_times(self):
+    return group_args(
+      time_rebox_model        = self.time_rebox_model,
+      time_remove_element_X   = self.time_remove_element_X,
+      time_add_missing_H      = self.time_add_missing_H,
+      time_terminal_propeller = self.time_terminal_propeller,
+      time_make_grm           = self.time_make_grm,
+      time_remove_isolated    = self.time_remove_isolated,
+      time_riding_manager     = self.time_riding_manager,
+      time_remove_H_nopara    = self.time_remove_H_nopara,
+      time_reset_idealize     = self.time_reset_idealize,
+      time_remove_H_on_links  = self.time_remove_H_on_links)
+
+# ------------------------------------------------------------------------------
+
+  def print_times(self):
+    print('Detailed timings:')
+    print("Rebox model:", self.time_rebox_model)
+    print('Remove element X:', self.time_remove_element_X)
+    print("Add_missing_H_atoms_at_bogus_position:", self.time_add_missing_H)
+    print('Add N-terminal propeller', self.time_terminal_propeller)
+    print("Get new model obj and grm:", self.time_make_grm )
+    print("Remove isolated H:", self.time_remove_isolated)
+    print("Setup Riding manager:", self.time_riding_manager)
+    print("Remove H that were not parameterized:", self.time_remove_H_nopara)
+    print("Reset adp, occ; idealize H positions:", self.time_reset_idealize)
+    print("Remove H on links:", self.time_remove_H_on_links)
+    print()
+
 # ==============================================================================
 
-# stub for reduce parameters
-# TODO can be parameters or phil, depending on how many options are really needed
-reduce_master_params_str = """
-flip_NQH = True
-  .type = bool
-  .help = add H and rotate and flip NQH groups
-search_time_limit = 600
-  .type = int
-  .help = max seconds to spend in exhaustive search (default=600)
-"""
-
-def optimize(model):
-  """
-  Carry out reduce optimization
-
-  Parameters
-  ----------
-  model
-      mmtbx model object that contains H atoms
-      H atoms should be at approprite distances
-
-  Returns
-  -------
-  model
-      mmtbx model object with optimized H atoms
-  """
-  # hierarchy object --> has hierarchy of structure
-  pdb_hierarchy = model.get_hierarchy()
-  # geometry restraints manager --> info about ideal bonds, angles; what atoms are bonded, etc.
-  grm = model.get_restraints_manager()
-
-  print("Reduce optimization happens here")
-
-  return model
+## stub for reduce parameters
+## TODO can be parameters or phil, depending on how many options are really needed
+#reduce_master_params_str = """
+#flip_NQH = True
+#  .type = bool
+#  .help = add H and rotate and flip NQH groups
+#search_time_limit = 600
+#  .type = int
+#  .help = max seconds to spend in exhaustive search (default=600)
+#"""
+#
+#def optimize(model):
+#  """
+#  Carry out reduce optimization
+#
+#  Parameters
+#  ----------
+#  model
+#      mmtbx model object that contains H atoms
+#      H atoms should be at approprite distances
+#
+#  Returns
+#  -------
+#  model
+#      mmtbx model object with optimized H atoms
+#  """
+#  # hierarchy object --> has hierarchy of structure
+#  pdb_hierarchy = model.get_hierarchy()
+#  # geometry restraints manager --> info about ideal bonds, angles; what atoms are bonded, etc.
+#  grm = model.get_restraints_manager()
+#
+#  print("Reduce optimization happens here")
+#
+#  return model

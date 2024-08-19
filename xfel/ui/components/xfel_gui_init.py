@@ -41,7 +41,9 @@ import getpass
 user = getpass.getuser()
 
 import libtbx.load_env
-license = os.path.join(libtbx.env.find_in_repositories('cctbx_project'), 'LICENSE.txt')
+license = libtbx.env.under_root(os.path.join("modules","cctbx_project","LICENSE.txt"))
+if not os.path.exists(license):
+  license = libtbx.env.under_root(os.path.join("cctbx", "LICENSE.txt")) # conda installations
 
 description = 'The cctbx.xfel UI is developed for use during data collection ' \
               'and initial processing of serial crystallographic data from' \
@@ -102,42 +104,209 @@ class RunSentinel(Thread):
     use_ids = self.parent.params.facility.name not in ['lcls']
 
     while self.active:
-      # Find the delta
-      known_runs = [r.run for r in db.get_all_runs()]
-      if self.parent.params.facility.name == 'lcls':
-        unknown_run_runs = [str(run['run']) for run in db.list_lcls_runs() if
-                            str(run['run']) not in known_runs]
-        unknown_run_paths = [''] * len(unknown_run_runs)
-      elif self.parent.params.facility.name == 'standalone':
-        standalone_runs = [run for run in self.finder.list_runs() if
-                           run[0] not in known_runs]
-        unknown_run_runs = [r[0] for r in standalone_runs]
-        unknown_run_paths = [r[1] for r in standalone_runs]
+      try:
+        # Find the delta
+        known_runs = [r.run for r in db.get_all_runs()]
+        if self.parent.params.facility.name == 'lcls':
+          unknown_run_runs = [str(run['run']) for run in db.list_lcls_runs() if
+                              str(run['run']) not in known_runs]
+          unknown_run_paths = [''] * len(unknown_run_runs)
+        elif self.parent.params.facility.name == 'standalone':
+          standalone_runs = [run for run in self.finder.list_runs() if
+                             run[0] not in known_runs]
+          unknown_run_runs = [r[0] for r in standalone_runs]
+          unknown_run_paths = [r[1] for r in standalone_runs]
 
-      if len(unknown_run_runs) > 0:
-        for run_run, run_path in zip(unknown_run_runs, unknown_run_paths):
-          db.create_run(run = run_run, path = run_path)
-        new_runs = [r for r in db.get_all_runs() if r.run in unknown_run_runs]
-        if len(self.parent.run_window.runs_tab.persistent_tags) > 0:
-          tags = [t for t in db.get_all_tags() if t.name in self.parent.run_window.runs_tab.persistent_tags]
-          for r in new_runs:
-            for t in tags:
-              r.add_tag(t)
-        # Sync new runs to rungroups
-        for rungroup in db.get_all_rungroups(only_active=True):
-          first_run, last_run = rungroup.get_first_and_last_runs()
-          # HACK: to get working -- TODO: make nice
-          if use_ids:
-            first_run = first_run.id
-            last_run = last_run.id if last_run is not None else None
-          else:
-            first_run = int(first_run.run)
-            last_run = int(last_run.run) if last_run is not None else None
-          rungroup.sync_runs(first_run, last_run, use_ids=use_ids)
+        if len(unknown_run_runs) > 0:
+          for run_run, run_path in zip(unknown_run_runs, unknown_run_paths):
+            db.create_run(run = run_run, path = run_path)
+          new_runs = [r for r in db.get_all_runs() if r.run in unknown_run_runs]
+          if len(self.parent.run_window.runs_tab.persistent_tags) > 0:
+            tags = [t for t in db.get_all_tags() if t.name in self.parent.run_window.runs_tab.persistent_tags]
+            for r in new_runs:
+              for t in tags:
+                r.add_tag(t)
+          # Sync new runs to rungroups
+          for rungroup in db.get_all_rungroups(only_active=True):
+            first_run, last_run = rungroup.get_first_and_last_runs()
+            # HACK: to get working -- TODO: make nice
+            if use_ids:
+              first_run = first_run.id
+              last_run = last_run.id if last_run is not None else None
+            else:
+              first_run = int(first_run.run)
+              last_run = int(last_run.run) if last_run is not None else None
+            rungroup.sync_runs(first_run, last_run, use_ids=use_ids)
 
-        print("%d new runs" % len(unknown_run_runs))
-        self.post_refresh()
-      time.sleep(10)
+          print("%d new runs" % len(unknown_run_runs))
+          self.post_refresh()
+        time.sleep(10)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.run_light.change_status('alert')
+        break
+
+
+# ------------------------------ Calib Worker ------------------------------ #
+
+# Set up events for updating calibration results
+tp_EVT_ENERGY_DONE = wx.NewEventType()
+EVT_ENERGY_DONE = wx.PyEventBinder(tp_EVT_ENERGY_DONE, 1)
+
+class CalibWorker(Thread):
+  ''' Worker thread to execute calibrations in the background without locking
+      up the GUI'''
+
+  def __init__(self,
+               parent,
+               active=True):
+    Thread.__init__(self)
+    self.parent = parent
+    self.active = active
+
+  def post_refresh_energy(self):
+    evt = RefreshRuns(tp_EVT_ENERGY_DONE, -1)
+    wx.PostEvent(self.energy_tab, evt)
+
+  def run(self):
+    # one time setup
+    self.energy_tab = self.parent.run_window.energy_tab
+    self.db = xfel_db_application(self.parent.params)
+
+    from serialtbx.util.energy_scan_notch_finder import notch_phil_string
+    from xfel.command_line.fee_calibration import fee_phil_string
+    from libtbx.phil import parse
+    self.fee_params = parse(notch_phil_string + fee_phil_string).extract()
+    self.energy_tab.refresh_runs()
+
+    while self.active:
+      self.parent.run_window.calib_light.change_status('idle') # yellow -- actually means working
+      try:
+        if self.energy_tab.fee_calib_stale:
+          self.run_fee_calib()
+          self.post_refresh_energy()
+        if self.energy_tab.ebeam_calib_stale:
+          self.run_ebeam_calib()
+          self.post_refresh_energy()
+        self.parent.run_window.calib_light.change_status('on') # green-- actually means idle
+        time.sleep(1)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.calib_light.change_status('alert') # red -- means crashed
+        break
+
+  def run_fee_calib(self):
+    from serialtbx.util.energy_scan_notch_finder import find_notch, plot_notches, calibrate_energy
+    from xfel.command_line.fee_calibration import tally_fee_data
+
+    runs = self.energy_tab.fee_runs
+    energies = self.energy_tab.fee_energies
+    rundata = tally_fee_data(self.energy_tab.experiment, runs, plot=False, verbose=True, max_events=self.energy_tab.max_events)
+    notches = [find_notch(range(len(data)),
+                          data,
+                          self.fee_params.kernel_size,
+                          self.fee_params.fit_half_range,
+                          self.fee_params.baseline_cutoff)
+              for data in rundata]
+
+    plot_notches(runs,
+                 rundata,
+                 notches,
+                 per_run_plots=False,
+                 use_figure=self.energy_tab.spectra_figure)
+    offset, per_px = calibrate_energy(notches,
+                                      energies,
+                                      use_figure=self.energy_tab.trendline_figure)
+    self.energy_tab.spectra_figure.canvas.draw_idle()
+    self.energy_tab.trendline_figure.canvas.draw_idle()
+
+    self.energy_tab.fee_eV_offset = offset
+    self.energy_tab.fee_eV_per_pixel = per_px
+    self.energy_tab.eV_offset_text.SetLabel(f'{offset:.4f} eV')
+    self.energy_tab.eV_per_px_text.SetLabel(f'{per_px:.4f} eV')
+    self.energy_tab.fee_calib_stale = False
+
+  def run_ebeam_calib(self, source='loc'):
+    from xfel.ui.components.ebeam_plotter import compare_ebeams_with_fees
+
+    run_strings = self.energy_tab.selected_runs
+
+    if not hasattr(self, 'loc_dir'):
+      results_dir = self.parent.params.output_folder
+      energy_dir = os.path.join(results_dir, '..', 'energy')
+      if os.path.exists(energy_dir):
+        self.loc_dir = energy_dir
+      else:
+        try:
+          os.mkdir(energy_dir)
+          self.loc_dir = energy_dir
+        except Exception:
+          loc_dir = os.path.join(results_dir, 'locs')
+          os.mkdir(loc_dir)
+          self.loc_dir = loc_dir
+
+    loc_parts = []
+    if self.energy_tab.experiment is None:
+      print("Experiment not set")
+      return
+    loc_parts.append(f'experiment={self.energy_tab.experiment}')
+    if self.energy_tab.fee_eV_offset is None:
+      print("Calibrate spectrometer first")
+      return
+
+    loc_parts.append(f'spectrum_eV_offset={self.energy_tab.fee_eV_offset:.2f}')
+    loc_parts.append(f'spectrum_eV_per_pixel={self.energy_tab.fee_eV_per_pixel:.2f}')
+
+    runs = [run for run in self.db.get_all_runs() if str(run.run) in run_strings]
+    locfiles = []
+    reordered_run_strings = []
+    for run in runs:
+      try:
+        this_loc_parts = loc_parts[::]
+        this_loc_parts.append(f'run={run.run}')
+        try:
+          rungroup = run.get_rungroups()[-1]
+        except Exception:
+          print(f'Run {run.run} does not appear to be in any rungroup. Skipping.')
+          continue
+        det_addr = rungroup.detector_address
+        this_loc_parts.append(f'detector_address={det_addr}')
+        if 'rayonix' in det_addr:
+          this_loc_parts.append(f'rayonix.bin_size={rungroup.binning}')
+        loc_path = os.path.join(self.loc_dir, f'{run.run}.loc')
+        with open(loc_path, 'w') as locf:
+          locf.write('\n'.join(this_loc_parts))
+        locfiles.append(loc_path)
+        reordered_run_strings.append(str(run.run))
+      except Exception as e:
+        print('Failed to load ebeam for run {run.run}')
+        print(e)
+        continue
+
+    if len(locfiles) == 0:
+      print('No runs to compare.')
+      return
+
+    self.energy_tab.ebeam_figure.clear()
+    ebeam_eV_offset, ebeam_wavelength_offset = compare_ebeams_with_fees(
+      locfiles,
+      runs=reordered_run_strings,
+      plot=True,
+      use_figure=self.energy_tab.ebeam_figure,
+      max_events=self.energy_tab.max_events)
+    self.energy_tab.ebeam_figure.canvas.draw_idle()
+
+    if ebeam_eV_offset is not None:
+      self.energy_tab.ebeam_eV_offset = ebeam_eV_offset
+      self.energy_tab.ebeam_wavelength_offset = ebeam_wavelength_offset
+      ang = u'\u212b' # Angstrom
+      self.energy_tab.ebeam_offset_text.SetLabel(f'{ebeam_eV_offset:.2f} eV ({ebeam_wavelength_offset:.6f} {ang})')
+      self.energy_tab.ebeam_calib_stale = False
+
+    #try:
+    #  locfile = os.path.join(db.params.output_folder, f'r{run.run:04d}', f'{trial.trial:03d}_rg{rg.rungroup_id:03d', 'data.loc')
+    #except ValueError: # in case of non-numeric run names
+    #  locfile = os.path.join(db.params.output_folder, f'r{run.run}', f'{trial.trial:03d}_rg{rg.rungroup_id:03d', 'data.loc')
 
 # ------------------------------- Job Monitor ------------------------------- #
 
@@ -179,24 +348,29 @@ class JobMonitor(Thread):
     tracker = TrackerFactory.from_params(self.parent.params)
 
     while self.active:
-      self.parent.run_window.jmn_light.change_status('idle')
+      try:
+        self.parent.run_window.jmn_light.change_status('idle')
 
-      trials = db.get_all_trials()
-      jobs = db.get_all_jobs(active = self.only_active_jobs)
+        trials = db.get_all_trials()
+        jobs = db.get_all_jobs(active = self.only_active_jobs)
 
-      for job in jobs:
-        if job.status in ['DONE', 'EXIT', 'SUBMIT_FAIL', 'DELETED']:
-          continue
-        new_status = tracker.track(job.submission_id, job.get_log_path())
-        # Handle the case where the job was submitted but no status is available yet
-        if job.status == "SUBMITTED" and new_status == "ERR":
-          pass
-        elif job.status != new_status:
-          job.status = new_status
+        for job in jobs:
+          if job.status in ['DONE', 'EXIT', 'SUBMIT_FAIL', 'DELETED']:
+            continue
+          new_status = tracker.track(job.submission_id, job.get_log_path())
+          # Handle the case where the job was submitted but no status is available yet
+          if job.status == "SUBMITTED" and new_status == "ERR":
+            pass
+          elif job.status != new_status:
+            job.status = new_status
 
-      self.post_refresh(trials, jobs)
-      self.parent.run_window.jmn_light.change_status('on')
-      time.sleep(5)
+        self.post_refresh(trials, jobs)
+        self.parent.run_window.jmn_light.change_status('on')
+        time.sleep(5)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.jmn_light.change_status('alert')
+        break
 
 
 # ------------------------------- Job Sentinel ------------------------------- #
@@ -232,9 +406,14 @@ class JobSentinel(Thread):
     from xfel.ui.db.job import submit_all_jobs
 
     while self.active:
-      submit_all_jobs(db)
-      self.post_refresh()
-      time.sleep(2)
+      try:
+        submit_all_jobs(db)
+        self.post_refresh()
+        time.sleep(2)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.job_light.change_status('alert')
+        break
 
 # ----------------------------- Progress Sentinel ---------------------------- #
 
@@ -278,114 +457,119 @@ class ProgressSentinel(Thread):
     db = xfel_db_application(self.parent.params)
 
     while self.active:
-      self.parent.run_window.prg_light.change_status('idle')
+      try:
+        self.parent.run_window.prg_light.change_status('idle')
 
-      if len(db.get_all_trials()) > 0:
-        trial = db.get_trial(
-          trial_number=self.parent.run_window.status_tab.trial_no)
+        if len(db.get_all_trials()) > 0:
+          trial = db.get_trial(
+            trial_number=self.parent.run_window.status_tab.trial_no)
 
-        trial_has_isoforms = len(trial.isoforms) > 0
+          trial_has_isoforms = len(trial.isoforms) > 0
 
-        tags = self.parent.run_window.status_tab.selected_tags
-        tag_ids = [tag.id for tag in tags]
-        cells = db.get_stats(trial=trial, tags=tags, isigi_cutoff = self.parent.run_window.status_tab.isigi_cutoff)()
+          tags = self.parent.run_window.status_tab.selected_tags
+          tag_ids = [tag.id for tag in tags]
+          cells = db.get_stats(trial=trial, tags=tags, isigi_cutoff = self.parent.run_window.status_tab.isigi_cutoff)()
 
-        if self.parent.run_window.status_tab.tag_trial_changed:
-          self.parent.run_window.status_tab.redraw_windows = True
-          self.parent.run_window.status_tab.tag_trial_changed = False
+          if self.parent.run_window.status_tab.tag_trial_changed:
+            self.parent.run_window.status_tab.redraw_windows = True
+            self.parent.run_window.status_tab.tag_trial_changed = False
 
-        run_numbers = []
-        runs = []
-        for rb in trial.rungroups:
-          for run in rb.runs:
-            if run.run not in run_numbers:
-              if len(tags) > 0:
-                for tag in run.tags:
-                  if tag.id in tag_ids:
-                    run_numbers.append(run.run)
-                    runs.append(run)
-              else:
-                run_numbers.append(run.run)
-                runs.append(run)
-        if not trial_has_isoforms:
-          n_img = len(db.get_all_events(trial, runs))
+          run_numbers = []
+          runs = []
+          for rb in trial.rungroups:
+            for run in rb.runs:
+              if run.run not in run_numbers:
+                if len(tags) > 0:
+                  for tag in run.tags:
+                    if tag.id in tag_ids:
+                      run_numbers.append(run.run)
+                      runs.append(run)
+                else:
+                  run_numbers.append(run.run)
+                  runs.append(run)
+          if not trial_has_isoforms:
+            n_img = len(db.get_all_events(trial, runs))
 
-        for cell in cells:
-          # Check for cell isoform
-          if cell.isoform is None:
-            self.noiso_cells.append({'a':cell.cell_a,
-                                     'b':cell.cell_b,
-                                     'c':cell.cell_c,
-                                     'alpha':cell.cell_alpha,
-                                     'beta':cell.cell_beta,
-                                     'gamma':cell.cell_gamma,
-                                     'n_img':n_img})
-          else:
-            current_rows = self.parent.run_window.status_tab.rows
-            if current_rows != {}:
-              if cell.isoform._db_dict['name'] in current_rows:
-                bins = cell.bins[
-                       :int(current_rows[cell.isoform._db_dict['name']]['high_bin'])]
-                highest_bin = cell.bins[int(current_rows[cell.isoform._db_dict['name']]['high_bin'])]
-              else:
-                assert False, "This isoform is not available yet"
+          for cell in cells:
+            # Check for cell isoform
+            if cell.isoform is None:
+              self.noiso_cells.append({'a':cell.cell_a,
+                                       'b':cell.cell_b,
+                                       'c':cell.cell_c,
+                                       'alpha':cell.cell_alpha,
+                                       'beta':cell.cell_beta,
+                                       'gamma':cell.cell_gamma,
+                                       'n_img':n_img})
             else:
-              bins = cell.bins
-              d_mins = [b.d_min for b in bins]
-              highest_bin = bins[d_mins.index(min(d_mins))]
+              current_rows = self.parent.run_window.status_tab.rows
+              if current_rows != {}:
+                if cell.isoform._db_dict['name'] in current_rows:
+                  bins = cell.bins[
+                         :int(current_rows[cell.isoform._db_dict['name']]['high_bin'])]
+                  highest_bin = cell.bins[int(current_rows[cell.isoform._db_dict['name']]['high_bin'])]
+                else:
+                  assert False, "This isoform is not available yet"
+              else:
+                bins = cell.bins
+                d_mins = [b.d_min for b in bins]
+                highest_bin = bins[d_mins.index(min(d_mins))]
 
-            counts_all = [int(i.count) for i in bins]
-            totals_all = [int(i.total_hkl) for i in bins]
-            counts_highest = int(highest_bin.count)
-            totals_highest = int(highest_bin.total_hkl)
+              counts_all = [int(i.count) for i in bins]
+              totals_all = [int(i.total_hkl) for i in bins]
+              counts_highest = int(highest_bin.count)
+              totals_highest = int(highest_bin.total_hkl)
 
-            # Apply throttle to multiplicity calculation
-            if trial.process_percent is None:
-              process_percent = 100
-            else:
-              process_percent = trial.process_percent
+              # Apply throttle to multiplicity calculation
+              if trial.process_percent is None:
+                process_percent = 100
+              else:
+                process_percent = trial.process_percent
 
-            n_img = len(db.get_all_events(trial, runs, isoform = cell.isoform))
+              n_img = len(db.get_all_events(trial, runs, isoform = cell.isoform))
 
-            # Generate multiplicity graph for isoforms
-            mult_all = sum(counts_all) / sum(totals_all) / (process_percent / 100)
-            mult_highest = counts_highest / totals_highest / (process_percent / 100)
-            self.info[cell.isoform._db_dict['name']] = {'multiplicity_all':mult_all,
-                                            'multiplicity_highest':mult_highest,
-                                            'bins':bins,
-                                            'isoform':cell.isoform._db_dict['name'],
-                                            'a':cell.cell_a,
-                                            'b':cell.cell_b,
-                                            'c':cell.cell_c,
-                                            'alpha':cell.cell_alpha,
-                                            'beta':cell.cell_beta,
-                                            'gamma':cell.cell_gamma,
-                                            'n_img':n_img}
-        #if len(self.noiso_cells) > 0:
-        if len(self.info) == 0 and len(self.noiso_cells) > 0:
-          sum_n_img = sum([cell['n_img'] for cell in self.noiso_cells])
-          mean_a = sum([cell['n_img']*cell['a'] for cell in self.noiso_cells])/sum_n_img
-          mean_b = sum([cell['n_img']*cell['b'] for cell in self.noiso_cells])/sum_n_img
-          mean_c = sum([cell['n_img']*cell['c'] for cell in self.noiso_cells])/sum_n_img
-          mean_alpha = sum([cell['n_img']*cell['alpha'] for cell in self.noiso_cells])/sum_n_img
-          mean_beta  = sum([cell['n_img']*cell['beta']  for cell in self.noiso_cells])/sum_n_img
-          mean_gamma = sum([cell['n_img']*cell['gamma'] for cell in self.noiso_cells])/sum_n_img
-          noiso_entry = {'multiplicity_all':0,
-                         'multiplicity_highest':0,
-                         'bins':None,
-                         'isoform':None,
-                         'a':mean_a,
-                         'b':mean_b,
-                         'c':mean_c,
-                         'alpha':mean_alpha,
-                         'beta':mean_beta,
-                         'gamma':mean_gamma,
-                         'n_img':sum_n_img}
-          self.info['noiso'] = noiso_entry
-      self.post_refresh()
-      self.info = {}
-      self.parent.run_window.prg_light.change_status('on')
-      time.sleep(5)
+              # Generate multiplicity graph for isoforms
+              mult_all = sum(counts_all) / sum(totals_all) / (process_percent / 100)
+              mult_highest = counts_highest / totals_highest / (process_percent / 100)
+              self.info[cell.isoform._db_dict['name']] = {'multiplicity_all':mult_all,
+                                              'multiplicity_highest':mult_highest,
+                                              'bins':bins,
+                                              'isoform':cell.isoform._db_dict['name'],
+                                              'a':cell.cell_a,
+                                              'b':cell.cell_b,
+                                              'c':cell.cell_c,
+                                              'alpha':cell.cell_alpha,
+                                              'beta':cell.cell_beta,
+                                              'gamma':cell.cell_gamma,
+                                              'n_img':n_img}
+          #if len(self.noiso_cells) > 0:
+          if len(self.info) == 0 and len(self.noiso_cells) > 0:
+            sum_n_img = sum([cell['n_img'] for cell in self.noiso_cells])
+            mean_a = sum([cell['n_img']*cell['a'] for cell in self.noiso_cells])/sum_n_img
+            mean_b = sum([cell['n_img']*cell['b'] for cell in self.noiso_cells])/sum_n_img
+            mean_c = sum([cell['n_img']*cell['c'] for cell in self.noiso_cells])/sum_n_img
+            mean_alpha = sum([cell['n_img']*cell['alpha'] for cell in self.noiso_cells])/sum_n_img
+            mean_beta  = sum([cell['n_img']*cell['beta']  for cell in self.noiso_cells])/sum_n_img
+            mean_gamma = sum([cell['n_img']*cell['gamma'] for cell in self.noiso_cells])/sum_n_img
+            noiso_entry = {'multiplicity_all':0,
+                           'multiplicity_highest':0,
+                           'bins':None,
+                           'isoform':None,
+                           'a':mean_a,
+                           'b':mean_b,
+                           'c':mean_c,
+                           'alpha':mean_alpha,
+                           'beta':mean_beta,
+                           'gamma':mean_gamma,
+                           'n_img':sum_n_img}
+            self.info['noiso'] = noiso_entry
+        self.post_refresh()
+        self.info = {}
+        self.parent.run_window.prg_light.change_status('on')
+        time.sleep(5)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.prg_light.change_status('alert')
+        break
 
 # ----------------------------- Run Stats Sentinel ---------------------------- #
 
@@ -429,14 +613,19 @@ class RunStatsSentinel(Thread):
     self.db = xfel_db_application(self.parent.params)
 
     while self.active:
-      self.parent.run_window.runstats_light.change_status('idle')
-      self.plot_stats()
-      self.fetch_timestamps(indexed=True)
-      self.fetch_timestamps(indexed=False)
-      self.post_refresh()
-      self.info = {}
-      self.parent.run_window.runstats_light.change_status('on')
-      time.sleep(5)
+      try:
+        self.parent.run_window.runstats_light.change_status('idle')
+        self.plot_stats()
+        self.fetch_timestamps(indexed=True)
+        self.fetch_timestamps(indexed=False)
+        self.post_refresh()
+        self.info = {}
+        self.parent.run_window.runstats_light.change_status('on')
+        time.sleep(5)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.runstats_light.change_status('alert')
+        break
 
   def refresh_stats(self):
     #from xfel.ui.components.timeit import duration
@@ -607,12 +796,17 @@ class SpotfinderSentinel(Thread):
     self.db = xfel_db_application(self.parent.params)
 
     while self.active:
-      self.parent.run_window.spotfinder_light.change_status('idle')
-      self.plot_stats_static()
-      self.post_refresh()
-      self.info = {}
-      self.parent.run_window.spotfinder_light.change_status('on')
-      time.sleep(5)
+      try:
+        self.parent.run_window.spotfinder_light.change_status('idle')
+        self.plot_stats_static()
+        self.post_refresh()
+        self.info = {}
+        self.parent.run_window.spotfinder_light.change_status('on')
+        time.sleep(5)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.spotfinder_light.change_status('alert')
+        break
 
   def refresh_stats(self):
     from xfel.ui.db.stats import SpotfinderStats
@@ -740,85 +934,103 @@ class UnitCellSentinel(Thread):
     self.db = xfel_db_application(self.parent.params)
 
     while self.active:
-      self.parent.run_window.unitcell_light.change_status('idle')
-      trial = self.parent.run_window.unitcell_tab.trial
-      tag_sets = self.parent.run_window.unitcell_tab.tag_sets
-      sizex, sizey = self.parent.run_window.unitcell_tab.unit_cell_panelsize
+      try:
+        self.parent.run_window.unitcell_light.change_status('idle')
+        trial = self.parent.run_window.unitcell_tab.trial
+        tag_sets = self.parent.run_window.unitcell_tab.tag_sets
+        sizex, sizey = self.parent.run_window.unitcell_tab.unit_cell_panelsize
 
-      info_list = []
-      legend_list = []
-      for tag_set in tag_sets:
-        legend_list.append(str(tag_set))
-        cells = self.db.get_stats(trial=trial,
-                                  tags=tag_set.tags,
-                                  isigi_cutoff=1.0,
-                                  tag_selection_mode=tag_set.mode)()
-        info = []
-        for cell in cells:
-          info.append({'a':cell.cell_a,
-                       'b':cell.cell_b,
-                       'c':cell.cell_c,
-                       'alpha':cell.cell_alpha,
-                       'beta':cell.cell_beta,
-                       'gamma':cell.cell_gamma,
-                       'n_img':0})
-        info_list.append(info)
+        info_list = []
+        legend_list = []
+        for tag_set in tag_sets:
+          legend_list.append(str(tag_set))
+          cells = self.db.get_stats(trial=trial,
+                                    tags=tag_set.tags,
+                                    isigi_cutoff=1.0,
+                                    tag_selection_mode=tag_set.mode)()
+          info = []
+          for cell in cells:
+            info.append({'a':cell.cell_a,
+                         'b':cell.cell_b,
+                         'c':cell.cell_c,
+                         'alpha':cell.cell_alpha,
+                         'beta':cell.cell_beta,
+                         'gamma':cell.cell_gamma,
+                         'n_img':0})
+          info_list.append(info)
 
-      iqr_ratio = 1.5 if self.parent.run_window.unitcell_tab.reject_outliers else None
+        iqr_ratio = 1.5 if self.parent.run_window.unitcell_tab.reject_outliers else None
 
-      figure = self.parent.run_window.unitcell_tab.figure
-      plotter = pltr.PopUpCharts(interactive=True, figure=figure)
+        figure = self.parent.run_window.unitcell_tab.figure
+        plotter = pltr.PopUpCharts(interactive=True, figure=figure)
 
-      if not self.parent.run_window.unitcell_tab.plot_clusters:
-        figure.clear()
-        plotter.plot_uc_histogram(
-          info_list=info_list,
-          legend_list=legend_list,
-          xsize=(sizex-115)/82, ysize=(sizey-115)/82,
-          high_vis=self.parent.high_vis,
-          iqr_ratio=iqr_ratio)
-        figure.canvas.draw_idle()
-      elif len(info_list) > 0:
-        from uc_metrics.clustering.step1 import phil_scope
-        from uc_metrics.clustering.step_dbscan3d import dbscan_plot_manager
-        from cctbx.sgtbx import space_group_info
-
-        if len(info_list) > 1:
-          print("Warning, only first tag set will be plotted")
-
-        params = phil_scope.extract()
-        try:
-          sg = self.parent.run_window.unitcell_tab.trial.cell.lookup_symbol
-        except AttributeError:
-          sg = "P1"
-        sg = "".join(sg.split()) # remove spaces
-        params.input.space_group = sg
-
-        iterable = ["{a} {b} {c} {alpha} {beta} {gamma} ".format(**c) + sg for c in info_list[0]]
-        params.input.__inject__('iterable', iterable)
-        params.file_name = None
-        params.cluster.dbscan.eps = float(self.parent.run_window.unitcell_tab.plot_eps.eps.GetValue())
-        params.show_plot = True
-        params.plot.legend = legend_list[0]
-        reject_outliers = self.parent.run_window.unitcell_tab.chk_reject_outliers.GetValue()
-        params.plot.outliers = not reject_outliers
-
-        sginfo = space_group_info(params.input.space_group)
-        cs = sginfo.group().crystal_system()
-        params.input.feature_vector = feature_vectors.get(cs)
-
-        if params.input.feature_vector:
-          figure = self.parent.run_window.unitcell_tab.figure
+        if not self.parent.run_window.unitcell_tab.plot_clusters:
           figure.clear()
-          plots = dbscan_plot_manager(params)
-          plots.wrap_3D_features(fig = figure, embedded = True)
+          plotter.plot_uc_histogram(
+            info_list=info_list,
+            legend_list=legend_list,
+            xsize=(sizex-115)/82, ysize=(sizey-115)/82,
+            high_vis=self.parent.high_vis,
+            iqr_ratio=iqr_ratio)
           figure.canvas.draw_idle()
-        else:
-          print("Unsupported crystal system", cs)
+        elif len(info_list) > 0:
+          from uc_metrics.clustering.step1 import phil_scope
+          from uc_metrics.clustering.step_dbscan3d import dbscan_plot_manager
+          from cctbx.sgtbx import space_group_info
 
-      self.post_refresh()
-      self.parent.run_window.unitcell_light.change_status('on')
-      time.sleep(5)
+          if len(info_list) > 1:
+            print("Warning, only first tag set will be plotted")
+
+          params = phil_scope.extract()
+          try:
+            sg = self.parent.run_window.unitcell_tab.trial.cell.lookup_symbol
+          except AttributeError:
+            sg = "P1"
+          sg = "".join(sg.split()) # remove spaces
+          params.input.space_group = sg
+
+          iterable = ["{a} {b} {c} {alpha} {beta} {gamma} ".format(**c) + sg for c in info_list[0]]
+          params.input.__inject__('iterable', iterable)
+          params.file_name = None
+          params.cluster.dbscan.eps = float(self.parent.run_window.unitcell_tab.plot_eps.eps.GetValue())
+          params.show_plot = True
+          params.plot.legend = legend_list[0]
+          reject_outliers = self.parent.run_window.unitcell_tab.chk_reject_outliers.GetValue()
+          params.plot.outliers = not reject_outliers
+
+          sginfo = space_group_info(params.input.space_group)
+          cs = sginfo.group().crystal_system()
+          params.input.feature_vector = feature_vectors.get(cs)
+
+          if params.input.feature_vector:
+            figure = self.parent.run_window.unitcell_tab.figure
+            figure.clear()
+            plots = dbscan_plot_manager(params)
+            plots.wrap_3D_features(fig = figure, embedded = True)
+            figure.canvas.draw_idle()
+            cluster_dir = os.path.join(self.parent.params.output_folder, "cluster")
+            if not os.path.isdir(cluster_dir):
+              os.makedirs(cluster_dir)
+            cluster_file = os.path.join(cluster_dir,"cluster_%s.pickle"%(plots.FV.sample_name.strip().replace(" ", "_")))
+            print("Writing cluster to", cluster_file)
+            import pickle
+            with open(cluster_file,"wb") as FF:
+              pickle.dump(
+                dict(populations=plots.pop,
+                     features=plots.FV.features_,
+                     info=plots.FV.output_info,
+                     sample=plots.FV.sample_name),FF
+                )
+          else:
+            print("Unsupported crystal system", cs)
+
+        self.post_refresh()
+        self.parent.run_window.unitcell_light.change_status('on')
+        time.sleep(15)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.unitcell_light.change_status('alert')
+        break
 
 # ------------------------------- Frames Sentinel ------------------------------- #
 
@@ -852,16 +1064,21 @@ class FramesSentinel(Thread):
     db = xfel_db_application(self.parent.parent.params)
 
     while self.active:
-      trial = db.get_trial(trial_number=int(self.parent.trial_number.ctr.GetStringSelection()))
-      runs = [db.get_run(run_number=int(r)) for r in self.parent.trial_runs.ctr.GetCheckedStrings()]
-      print("Total events in trial", trial.trial, end=' ')
-      if len(runs) == 0:
-        runs = None
-      else:
-        print("runs", ", ".join(sorted([str(r.run) for r in runs])), end=' ')
-      print(":", len(db.get_all_events(trial, runs)))
-      self.post_refresh()
-      time.sleep(2)
+      try:
+        trial = db.get_trial(trial_number=int(self.parent.trial_number.ctr.GetStringSelection()))
+        runs = [db.get_run(run_number=int(r)) for r in self.parent.trial_runs.ctr.GetCheckedStrings()]
+        print("Total events in trial", trial.trial, end=' ')
+        if len(runs) == 0:
+          runs = None
+        else:
+          print("runs", ", ".join(sorted([str(r.run) for r in runs])), end=' ')
+        print(":", len(db.get_all_events(trial, runs)))
+        self.post_refresh()
+        time.sleep(2)
+      except Exception as e:
+        print(e)
+        #self.parent.run_window.frames_light.change_status('alert')
+        break
 
 # ------------------------------- Clustering --------------------------------- #
 
@@ -1001,11 +1218,16 @@ class MergingStatsSentinel(Thread):
     self.db = xfel_db_application(self.parent.params)
 
     while self.active:
-      self.parent.run_window.mergingstats_light.change_status('idle')
-      self.plot_stats_static()
-      self.post_refresh()
-      self.parent.run_window.mergingstats_light.change_status('on')
-      time.sleep(5)
+      try:
+        self.parent.run_window.mergingstats_light.change_status('idle')
+        self.plot_stats_static()
+        self.post_refresh()
+        self.parent.run_window.mergingstats_light.change_status('on')
+        time.sleep(5)
+      except Exception as e:
+        print(e)
+        self.parent.run_window.mergingstats_light.change_status('alert')
+        break
 
   def plot_stats_static(self):
     from xfel.ui.db.merging_log_scraper import Scraper
@@ -1036,10 +1258,11 @@ class MergingStatsSentinel(Thread):
 
 class MainWindow(wx.Frame):
 
-  def __init__(self, parent, id, title):
+  def __init__(self, parent, id, title, params=None):
     wx.Frame.__init__(self, parent, id, title, size=(200, 200))
 
     self.run_sentinel = None
+    self.calib_worker = None
     self.job_sentinel = None
     self.job_monitor = None
     self.spotfinder_sentinel = None
@@ -1047,7 +1270,9 @@ class MainWindow(wx.Frame):
     self.unitcell_sentinel = None
     self.mergingstats_sentinel = None
 
-    self.params = load_cached_settings()
+    if not params:
+      params = load_cached_settings()
+    self.params = params
     self.db = None
 
     self.high_vis = False
@@ -1146,6 +1371,7 @@ class MainWindow(wx.Frame):
   def stop_sentinels(self):
     if not self.params.monitoring_mode:
       self.stop_run_sentinel()
+      self.stop_calib_worker()
       self.stop_job_sentinel()
       self.stop_job_monitor()
     #self.stop_spotfinder_sentinel()
@@ -1167,6 +1393,18 @@ class MainWindow(wx.Frame):
         self.run_sentinel.join()
     self.run_window.run_light.change_status('off')
     self.toolbar.SetToolNormalBitmap(self.tb_btn_watch_new_runs.Id, wx.Bitmap('{}/32x32/quick_restart.png'.format(icons)))
+
+  def start_calib_worker(self):
+    self.calib_worker = CalibWorker(self, active=True)
+    self.calib_worker.start()
+    self.run_window.calib_light.change_status('on')
+
+  def stop_calib_worker(self, block = True):
+    if self.calib_worker is not None and self.calib_worker.active:
+      self.calib_worker.active = False
+      if block:
+        self.calib_worker.join()
+    self.run_window.calib_light.change_status('off')
 
   def start_job_monitor(self):
     self.job_monitor = JobMonitor(self, active=True)
@@ -1296,11 +1534,11 @@ class MainWindow(wx.Frame):
   def onZoom(self, e):
     self.high_vis = not self.high_vis
 
-  def onCalibration(self, e):
-    calib_dlg = dlg.CalibrationDialog(self, db=self.db)
-    calib_dlg.Fit()
+  # def onCalibration(self, e):
+  #   calib_dlg = dlg.CalibrationDialog(self, db=self.db)
+  #   calib_dlg.Fit()
 
-    calib_dlg.ShowModal()
+  #   calib_dlg.ShowModal()
 
   def onWatchRuns(self, e):
     ''' Toggle autosubmit '''
@@ -1322,6 +1560,10 @@ class MainWindow(wx.Frame):
       if self.job_monitor is None or not self.job_monitor.active:
         self.start_job_monitor()
         self.run_window.jmn_light.change_status('on')
+    elif name == self.run_window.energy_tab.name:
+      if self.calib_worker is None or not self.calib_worker.active:
+        self.start_calib_worker()
+        self.run_window.calib_light.change_status('on')
     # Disabled
     #elif name == self.run_window.spotfinder_tab.name:
     #  if self.job_monitor is None or not self.job_monitor.active:
@@ -1359,6 +1601,10 @@ class MainWindow(wx.Frame):
       if self.job_monitor.active:
         self.stop_job_monitor(block = False)
         self.run_window.jmn_light.change_status('off')
+    elif name == self.run_window.energy_tab.name:
+      if self.calib_worker.active:
+        self.stop_calib_worker(block = False)
+        self.run_window.calib_light.change_status('off')
     # Disabled
     #elif name == self.run_window.spotfinder_tab.name:
     #  if self.job_monitor.active:
@@ -1387,6 +1633,9 @@ class MainWindow(wx.Frame):
   def onQuit(self, e):
     self.stop_sentinels()
     save_cached_settings(self.params)
+    # wx windows resolve to False if closed
+    if self.run_window.runstats_tab.sf_frame:
+      self.run_window.runstats_tab.sf_frame.Close()
     self.Destroy()
 
 
@@ -1400,6 +1649,7 @@ class RunWindow(wx.Panel):
     self.main_panel = wx.Panel(self)
     self.main_nbook = wx.Notebook(self.main_panel, style=0)
     self.runs_tab = RunTab(self.main_nbook, main=self.parent)
+    self.energy_tab = EnergyTab(self.main_nbook, main=self.parent)
     self.trials_tab = TrialsTab(self.main_nbook, main=self.parent)
     self.jobs_tab = JobsTab(self.main_nbook, main=self.parent)
     #self.spotfinder_tab = SpotfinderTab(self.main_nbook, main=self.parent) # Disabled
@@ -1409,6 +1659,7 @@ class RunWindow(wx.Panel):
     #self.merge_tab = MergeTab(self.main_nbook, main=self.parent)
     self.mergingstats_tab = MergingStatsTab(self.main_nbook, main=self.parent)
     self.main_nbook.AddPage(self.runs_tab, self.runs_tab.name)
+    self.main_nbook.AddPage(self.energy_tab, self.energy_tab.name)
     self.main_nbook.AddPage(self.trials_tab, self.trials_tab.name)
     self.main_nbook.AddPage(self.jobs_tab, self.jobs_tab.name)
     #self.main_nbook.AddPage(self.spotfinder_tab, self.spotfinder_tab.name) # Disabled
@@ -1418,8 +1669,9 @@ class RunWindow(wx.Panel):
     #self.main_nbook.AddPage(self.merge_tab, self.merge_tab.name)
     self.main_nbook.AddPage(self.mergingstats_tab, self.mergingstats_tab.name)
 
-    self.sentinel_box = wx.FlexGridSizer(1, 6, 0, 20)
+    self.sentinel_box = wx.FlexGridSizer(1, 7, 0, 20)
     self.run_light = gctr.SentinelStatus(self.main_panel, label='Run Sentinel')
+    self.calib_light = gctr.SentinelStatus(self.main_panel, label='Calib Worker')
     self.job_light = gctr.SentinelStatus(self.main_panel, label='Job Sentinel')
     self.jmn_light = gctr.SentinelStatus(self.main_panel, label='Job Monitor')
     #self.spotfinder_light = gctr.SentinelStatus(self.main_panel, label='Spotfinder Sentinel')
@@ -1427,6 +1679,7 @@ class RunWindow(wx.Panel):
     self.unitcell_light = gctr.SentinelStatus(self.main_panel, label='Unit Cell Sentinel')
     self.mergingstats_light = gctr.SentinelStatus(self.main_panel, label='Merging Stats Sentinel')
     self.sentinel_box.Add(self.run_light)
+    self.sentinel_box.Add(self.calib_light)
     self.sentinel_box.Add(self.job_light)
     self.sentinel_box.Add(self.jmn_light)
     #self.sentinel_box.Add(self.spotfinder_light)
@@ -1444,6 +1697,9 @@ class RunWindow(wx.Panel):
     main_sizer.Add(self.main_panel, 1, flag=wx.EXPAND | wx.ALL, border=3)
     self.SetSizer(main_sizer)
 
+    self.show_hide_tabs()
+
+  def show_hide_tabs(self):
     if self.parent.params.monitoring_mode:
       self.runs_tab.Hide()
       self.trials_tab.Hide()
@@ -1452,8 +1708,19 @@ class RunWindow(wx.Panel):
       self.run_light.Hide()
       self.job_light.Hide()
       self.jmn_light.Hide()
+    else:
+      self.runs_tab.Show()
+      self.trials_tab.Show()
+      self.jobs_tab.Show()
+      self.datasets_tab.Show()
+      self.run_light.Show()
+      self.job_light.Show()
+      self.jmn_light.Show()
 
-
+    if self.parent.params.facility.name == "lcls" and not self.parent.params.monitoring_mode:
+      self.energy_tab.Show()
+    else:
+      self.energy_tab.Hide()
 
 # --------------------------------- UI Tabs ---------------------------------- #
 
@@ -1590,6 +1857,347 @@ class RunTab(BaseTab):
     self.run_panel.SetupScrolling(scrollToTop=False)
     self.run_panel.Refresh()
 
+class EnergyTab(BaseTab):
+  def __init__(self, parent, main):
+    BaseTab.__init__(self, parent=parent)
+    self.name = 'Energy'
+    self.main = main
+
+    self.all_runs = []
+    self.fee_runs = []
+    self.fee_energies = []
+    self.ebeam_runs = []
+    self.fee_eV_per_pixel = None
+    self.fee_eV_offset = None
+    self.ebeam_eV_offset = None
+    self.ebeam_wavelength_offset = None
+
+    self.fee_calib_stale = False
+    self.ebeam_calib_stale = False
+    self.size_stale = False
+    self.experiment = main.params.facility.lcls.experiment
+
+    self.calib_panel = ScrolledPanel(self)
+    self.calib_sizer = wx.BoxSizer(wx.VERTICAL)
+    self.calib_panel.SetSizer(self.calib_sizer)
+    self.calib_grid_sizer = wx.GridBagSizer(vgap=10, hgap=10)
+
+    import matplotlib as mpl
+    from matplotlib.backends.backend_wxagg import (
+      FigureCanvasWxAgg as FigureCanvas,
+      NavigationToolbar2WxAgg as NavigationToolbar)
+
+    # FEE scan section
+    self.scan_runs_panel = ScrolledPanel(self.calib_panel, size=(220, 325))
+    self.scan_runs_sizer = wx.BoxSizer(wx.VERTICAL)
+    self.scan_runs_panel.SetSizer(self.scan_runs_sizer)
+
+    self.scan_runs_panel_label = wx.StaticText(self.scan_runs_panel, label='FEE Energy Scan Description', size=(420, 20))
+    self.scan_runs_sizer.Add(self.scan_runs_panel_label, border=10, flag=wx.BOTTOM)
+
+    self.expt_id_panel = wx.Panel(self.scan_runs_panel)
+    self.expt_id_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.scan_runs_experiment_label = wx.StaticText(self.expt_id_panel, label='Experiment:', size=(80, -1))
+    self.scan_runs_experiment = wx.TextCtrl(self.expt_id_panel, size=(118, -1))
+    self.expt_id_sizer.Add(self.scan_runs_experiment_label)
+    self.expt_id_sizer.Add(self.scan_runs_experiment)
+    self.scan_runs_experiment.SetValue(self.experiment)
+    self.expt_id_panel.SetSizer(self.expt_id_sizer)
+    self.scan_runs_sizer.Add(self.expt_id_panel)
+
+    self.max_evts_panel = wx.Panel(self.scan_runs_panel)
+    self.max_evts_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.max_evts_label = wx.StaticText(self.max_evts_panel, label='Max events:', size=(80, -1))
+    self.max_evts = wx.TextCtrl(self.max_evts_panel, size=(118, -1))
+    self.max_evts_sizer.Add(self.max_evts_label)
+    self.max_evts_sizer.Add(self.max_evts)
+    self.max_evts.SetValue("200")
+    self.max_evts_panel.SetSizer(self.max_evts_sizer)
+    self.scan_runs_sizer.Add(self.max_evts_panel)
+
+    self.scan_runs_list = dlg.EdListCtrl(self.scan_runs_panel,
+                                         style=wx.LC_EDIT_LABELS | wx.LC_REPORT,
+                                         size=(200,165))
+
+    self.scan_runs_list.InsertColumn(0, 'Run', width=60)
+    self.scan_runs_list.InsertColumn(1, 'Notch Energy (eV)', width=140)
+    self.scan_runs_list.integer_columns = {0}
+    self.scan_runs_list.InsertItem(0, 0)
+    self.scan_runs_list.Select(0)
+
+    self.scan_runs_sizer.Add(self.scan_runs_list, 1)
+
+    self.scan_runs_button_panel = wx.Panel(self.scan_runs_panel)
+    self.scan_runs_button_sizer = wx.GridBagSizer(0,0)
+    self.scan_runs_button_add   = wx.Button(self.scan_runs_button_panel,
+                                            size=(94, -1),
+                                            label='Add Row')
+    self.scan_runs_button_clear = wx.Button(self.scan_runs_button_panel,
+                                            size=(94, -1),
+                                            label='Clear All')
+    self.scan_runs_button_run   = wx.Button(self.scan_runs_button_panel,
+                                            size=(194, -1),
+                                            label='Run Calibration')
+    self.scan_runs_button_sizer.Add(self.scan_runs_button_add,
+                                    pos=(0,0), border=3, flag=wx.ALL)
+    self.scan_runs_button_sizer.Add(self.scan_runs_button_clear,
+                                    pos=(0,1), border=3, flag=wx.ALL)
+    self.scan_runs_button_sizer.Add(self.scan_runs_button_run,
+                                    pos=(1,0), span=(1,2), border=3, flag=wx.ALL | wx.EXPAND)
+    self.scan_runs_button_panel.SetSizer(self.scan_runs_button_sizer)
+
+    self.scan_runs_sizer.Add(self.scan_runs_button_panel, 1)
+    self.calib_grid_sizer.Add(self.scan_runs_panel, pos=(0, 0))
+
+    # FEE scan trendline
+    self.trendline_panel = wx.Panel(self.calib_panel)
+    self.trendline_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.trendline_panel.SetSizer(self.trendline_sizer)
+
+    self.trendline_figure = mpl.figure.Figure(figsize=(4,2.3))
+    self.trendline_canvas = FigureCanvas(self.trendline_panel, -1, self.trendline_figure)
+    self.trendline_toolbar = NavigationToolbar(self.trendline_canvas)
+    self.trendline_toolbar.SetWindowStyle(wx.TB_VERTICAL)
+    self.trendline_toolbar.Realize()
+
+    self.trendline_sizer.Add(self.trendline_canvas, 1, flag=wx.EXPAND | wx.ALL)
+    self.trendline_sizer.Add(self.trendline_toolbar, 0)
+
+    self.calib_grid_sizer.Add(self.trendline_panel, pos=(0, 1), flag=wx.EXPAND | wx.ALL)
+
+    # FEE scan spectra
+    self.spectra_panel = wx.Panel(self.calib_panel)
+    self.spectra_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.spectra_panel.SetSizer(self.spectra_sizer)
+
+    self.spectra_figure = mpl.figure.Figure(figsize=(4,2.3))
+    self.spectra_canvas = FigureCanvas(self.spectra_panel, -1, self.spectra_figure)
+    self.spectra_toolbar = NavigationToolbar(self.spectra_canvas)
+    self.spectra_toolbar.SetWindowStyle(wx.TB_VERTICAL)
+    self.spectra_toolbar.Realize()
+
+    self.spectra_sizer.Add(self.spectra_canvas, 1, flag=wx.EXPAND | wx.ALL)
+    self.spectra_sizer.Add(self.spectra_toolbar, 0)
+
+    self.calib_grid_sizer.Add(self.spectra_panel, pos=(0, 2), flag=wx.EXPAND | wx.ALL)
+
+    # Ebeam calibration section
+    self.ebeam_runs_panel = ScrolledPanel(self.calib_panel, size=(220, 270))
+    self.ebeam_runs_sizer = wx.BoxSizer(wx.VERTICAL)
+    self.ebeam_runs_panel.SetSizer(self.ebeam_runs_sizer)
+
+    self.ebeam_runs_selection = gctr.CheckListCtrl(self.ebeam_runs_panel,
+                                                   label='Runs for Ebeam Calibration',
+                                                   label_size=(200, -1),
+                                                   label_style='normal',
+                                                   ctrl_size=(200, 160),
+                                                   direction='vertical',
+                                                   choices=[])
+
+    self.ebeam_runs_sizer.Add(self.ebeam_runs_selection, 1, flag=wx.EXPAND)
+
+    self.ebeam_runs_button_panel = wx.Panel(self.ebeam_runs_panel)
+    self.ebeam_runs_button_sizer = wx.GridBagSizer(0,0)
+    self.ebeam_runs_refresh_button = wx.Button(self.ebeam_runs_button_panel,
+                                               label='Refresh',
+                                               size=(94, -1))
+    self.ebeam_runs_clear_button = wx.Button(self.ebeam_runs_button_panel,
+                                             label='Clear',
+                                             size=(94, -1))
+    self.ebeam_runs_launch_button = wx.Button(self.ebeam_runs_button_panel,
+                                              label='Run Calibration',
+                                              size=(194, -1))
+    self.ebeam_runs_button_sizer.Add(self.ebeam_runs_refresh_button,
+                                     pos=(0,0), border=3, flag=wx.ALL)
+    self.ebeam_runs_button_sizer.Add(self.ebeam_runs_clear_button,
+                                     pos=(0,1), border=3, flag=wx.ALL)
+    self.ebeam_runs_button_sizer.Add(self.ebeam_runs_launch_button,
+                                     pos=(1,0), span=(1,2), border=3, flag=wx.ALL)
+    self.ebeam_runs_button_panel.SetSizer(self.ebeam_runs_button_sizer)
+
+    self.ebeam_runs_sizer.Add(self.ebeam_runs_button_panel, 0)
+
+    self.calib_grid_sizer.Add(self.ebeam_runs_panel, pos=(1, 0))
+
+    # Ebeam vs calibrated FEE spectra overlay
+    self.ebeam_panel = wx.Panel(self.calib_panel)
+    self.ebeam_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    self.ebeam_panel.SetSizer(self.ebeam_sizer)
+
+    self.ebeam_figure = mpl.figure.Figure(figsize=(4,2.3))
+    self.ebeam_canvas = FigureCanvas(self.ebeam_panel, -1, self.ebeam_figure)
+    self.ebeam_toolbar = NavigationToolbar(self.ebeam_canvas)
+    self.ebeam_toolbar.SetWindowStyle(wx.TB_VERTICAL)
+    self.ebeam_toolbar.Realize()
+
+    self.ebeam_sizer.Add(self.ebeam_canvas, 1, flag=wx.EXPAND | wx.ALL)
+    self.ebeam_sizer.Add(self.ebeam_toolbar, 0)
+
+    self.calib_grid_sizer.Add(self.ebeam_panel, pos=(1, 1), flag=wx.EXPAND | wx.ALL)
+
+    # Display and export calibrated values
+    self.results_panel = wx.Panel(self.calib_panel)
+    self.results_box = wx.StaticBox(self.results_panel, label='Calibration Results', size=(300, 200))
+    self.results_sizer = wx.StaticBoxSizer(self.results_box, wx.VERTICAL)
+    self.results_panel.SetSizer(self.results_sizer)
+    self.results_text_sizer = wx.GridBagSizer(3, 3)
+
+    self.results_text_sizer.Add(
+        wx.StaticText(self.results_box, label='FEE eV per pixel:', size=(120, -1)),
+                                                     pos=(0,0), border=5, flag=wx.TOP)
+    self.eV_per_px_text = wx.StaticText(self.results_box, label='', size=(180, -1))
+    self.results_text_sizer.Add(self.eV_per_px_text, pos=(0,1), border=5, flag=wx.TOP)
+
+    self.results_text_sizer.Add(
+        wx.StaticText(self.results_box, label='FEE eV offset:', size=(120, -1)),
+                                                     pos=(1,0), border=5, flag=wx.TOP)
+    self.eV_offset_text = wx.StaticText(self.results_box, label='', size=(180, -1))
+    self.results_text_sizer.Add(self.eV_offset_text, pos=(1,1), border=5, flag=wx.TOP)
+
+    self.results_text_sizer.Add(
+        wx.StaticText(self.results_box, label='Ebeam offset:', size=(120, -1)),
+                                                        pos=(2,0), border=5, flag=wx.TOP)
+    self.ebeam_offset_text = wx.StaticText(self.results_box, label='', size=(180, -1))
+    self.results_text_sizer.Add(self.ebeam_offset_text, pos=(2,1), border=5, flag=wx.TOP)
+
+    self.results_sizer.Add(self.results_text_sizer)
+
+    self.export_button = wx.Button(self.results_box, label='Save calibration', size=(300, -1))
+    self.results_sizer.Add(self.export_button)
+
+    self.save_notif_text = wx.StaticText(self.results_box, label='')
+    self.results_text_sizer.Add(self.save_notif_text, pos=(3,0))
+
+    self.calib_grid_sizer.Add(self.results_panel, pos=(1,2), flag=wx.ALIGN_CENTER)
+
+    self.calib_sizer.Add(self.calib_grid_sizer, flag=wx.EXPAND | wx.ALL, border=10)
+    self.main_sizer.Add(self.calib_panel, 1, flag=wx.EXPAND | wx.ALL, border=10)
+
+    # Bindings
+    self.Bind(wx.EVT_BUTTON, self.onAddScanRuns, self.scan_runs_button_add)
+    self.Bind(wx.EVT_BUTTON, self.onClearScanRuns, self.scan_runs_button_clear)
+    self.Bind(wx.EVT_BUTTON, self.onRunFEECalib, self.scan_runs_button_run)
+    self.Bind(wx.EVT_BUTTON, self.onRunsRefresh, self.ebeam_runs_refresh_button)
+    self.Bind(wx.EVT_BUTTON, self.onRunsClear, self.ebeam_runs_clear_button)
+    self.Bind(wx.EVT_BUTTON, self.onRunEbeamCalib, self.ebeam_runs_launch_button)
+    self.Bind(wx.EVT_BUTTON, self.onSaveCalib, self.export_button)
+
+    self.Layout()
+    self.Fit()
+
+  def onAddScanRuns(self, e):
+    n_rows = self.scan_runs_list.GetItemCount()
+    self.scan_runs_list.InsertItem(n_rows, 0)
+    self.scan_runs_list.Select(n_rows)
+
+  def onClearScanRuns(self, e):
+    n_rows = self.scan_runs_list.GetItemCount()
+    self.scan_runs_list.DeleteAllItems()
+    self.scan_runs_list.InsertItem(0, 0)
+    self.scan_runs_list.Select(0)
+    e.Skip()
+
+  def onRunFEECalib(self, e):
+    self.clear_FEE_calib()
+    self.refresh_runs()
+    fee_runs = []
+    fee_energies = []
+
+    self.experiment = self.scan_runs_experiment.GetValue()
+    if self.experiment.strip() == '':
+      if self.main.params.facility.name == 'lcls':
+        self.experiment = self.main.params.facility.lcls.experiment
+      else:
+        self.experiment = None
+    self.max_events = int(self.max_evts.GetValue())
+
+    #TODO: validation during input instead?
+    self.fee_runs = []
+    self.fee_energies = []
+    for row in range(self.scan_runs_list.GetItemCount()):
+      run = self.scan_runs_list.GetItem(itemIdx=row, col=0).GetText()
+      if not run in self.all_runs:
+        dlg = wx.MessageDialog(self,
+                               message=f'Run {run} not recognized.',
+                               caption='Error',
+                               style=wx.OK | wx.ICON_ERROR)
+        dlg.ShowModal()
+        return
+      self.fee_runs.append(run)
+
+      try:
+        energy = float(self.scan_runs_list.GetItem(itemIdx=row, col=1).GetText())
+      except ValueError:
+        dlg = wx.MessageDialog(self,
+                               message=f'Energy {energy} for run {run} not a float.',
+                               caption='Error',
+                               style=wx.OK | wx.ICON_ERROR)
+        dlg.ShowModal()
+        return
+      self.fee_energies.append(energy)
+    self.fee_calib_stale = True
+    e.Skip()
+
+  def onRunEbeamCalib(self, e):
+    #self.ebeam_offset_text.SetLabel('')
+    self.selected_runs = self.ebeam_runs_selection.ctr.GetCheckedStrings()
+    self.max_events = int(self.max_evts.GetValue())
+    self.ebeam_calib_stale = True
+    e.Skip()
+
+  def onRunsRefresh(self, e):
+    self.refresh_runs()
+    e.Skip()
+
+  def onRunsClear(self, e):
+    self.ebeam_runs_selection.ctr.SetCheckedItems([])
+    self.ebeam_figure.clear()
+    self.ebeam_offset_text.SetLabel('')
+    self.save_notif_text.SetLabel('')
+    e.Skip()
+
+  def onSaveCalib(self, e):
+    save_dlg = wx.FileDialog(self,
+                             message='Save FEE Calibration',
+                             defaultDir=os.path.join(str(self.main.db.params.output_folder), '..', 'fee'),
+                             defaultFile='fee_calib.phil',
+                             wildcard='*.phil',
+                             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT)
+    if save_dlg.ShowModal() == wx.ID_OK:
+      self.write_calib_phil(save_dlg.GetPath())
+    e.Skip()
+
+  def refresh_runs(self):
+    try:
+      all_runs = self.main.db.get_all_runs()
+      for run in all_runs:
+        if run.run not in self.all_runs:
+          self.ebeam_runs_selection.ctr.Append(str(run.run))
+          self.all_runs.append(run.run)
+    except AttributeError:
+      print('Unable to find runs')
+
+  def clear_FEE_calib(self):
+    for figure in (self.trendline_figure, self.spectra_figure, self.ebeam_figure):
+      figure.clear()
+    for text in (self.eV_per_px_text, self.eV_offset_text, self.ebeam_offset_text, self.save_notif_text):
+      text.SetLabel('')
+
+  def write_calib_phil(self, path):
+    lines = []
+    if self.fee_eV_per_pixel is not None:
+      lines.append(f'spectrum_eV_per_pixel={self.fee_eV_per_pixel}\n')
+    if self.fee_eV_offset is not None:
+      lines.append(f'spectrum_eV_offset={self.fee_eV_offset}\n')
+    if self.ebeam_eV_offset is not None:
+      lines.append(f'ebeam_eV_offset={self.ebeam_eV_offset}\n')
+    if self.ebeam_wavelength_offset is not None:
+      lines.append(f'wavelength_offset={self.ebeam_wavelength_offset}\n')
+    with open(path, 'w') as outfile:
+      for line in lines:
+        outfile.write(line)
+    print(f'Wrote calibrated values to {path}')
+
 class TrialsTab(BaseTab):
   def __init__(self, parent, main):
     BaseTab.__init__(self, parent=parent)
@@ -1642,7 +2250,7 @@ class TrialsTab(BaseTab):
                            db=self.main.db,
                            trial=trial,
                            box_label='Trial {} {}'.format(trial.trial,
-                             trial.comment[:min(len(trial.comment), 10)] if trial.comment is not None else ""))
+                             trial.comment[:min(len(trial.comment), 20)] if trial.comment is not None else ""))
     new_trial.chk_active.SetValue(trial.active)
     new_trial.refresh_trial()
     self.trial_sizer.Add(new_trial, flag=wx.EXPAND | wx.ALL, border=10)
@@ -1681,6 +2289,7 @@ class JobsTab(BaseTab):
     self.job_list.InsertColumn(7, "Subm ID")
     self.job_list.InsertColumn(8, "Status")
 
+    self.job_list.integer_columns = {0, 6}
     self.job_list_sort_flag = [0, 0, 0, 0, 0, 0, 0, 0, 0]
     self.job_list_col = 0
 
@@ -1824,6 +2433,10 @@ class JobsTab(BaseTab):
         focused_job_id = None
 
       self.data = {} # reset contents of the table, with unique row ids
+
+      # assemble updated list of job ids
+      job_list_ids = [self.job_list.GetItemData(i) for i in range(self.job_list.GetItemCount())]
+
       for job in e.jobs:
         if job.trial is not None:
           if job.trial.trial not in selected_trials: continue
@@ -1851,8 +2464,8 @@ class JobsTab(BaseTab):
         self.data[job.id] = [j, jt, ds, t, r, rg, tsk, sid, s]
         found_it = False
         # Look to see if item already in list
-        for i in range(self.job_list.GetItemCount()):
-          if self.job_list.GetItemData(i) == job.id:
+        for i, jid in enumerate(job_list_ids):
+          if jid == job.id:
             for k, item in enumerate(self.data[job.id]):
               self.job_list.SetItem(i, k, item)
             found_it = True
@@ -2131,7 +2744,7 @@ class RunStatsTab(SpotfinderTab):
     self.tag_runs_changed = True
     self.tag_last_five = False
     self.entire_expt = False
-    self.d_min = 2.5
+    self.d_min = 2
     self.n_multiples = 2
     self.ratio = 1
     self.n_strong = 16
@@ -2142,6 +2755,8 @@ class RunStatsTab(SpotfinderTab):
     self.strong_indexed_image_paths = None
     self.strong_indexed_image_timestamps = None
     self.auto_update = True
+    self.sf_frame = None
+    self.cached_run = None
 
     self.runstats_panel = wx.Panel(self, size=(100, 100))
     self.runstats_box = wx.StaticBox(self.runstats_panel, label='Run Statistics')
@@ -2182,7 +2797,7 @@ class RunStatsTab(SpotfinderTab):
                                         sub_labels=[''],
                                         label_size=(160, -1),
                                         ctrl_size=(30, -1),
-                                        items=[('d_min', 2.5)])
+                                        items=[('d_min', 2.0)])
     self.n_multiples_selector = gctr.OptionCtrl(self.options_box,
                                                name='rs_multiples',
                                                label='# multiples threshold:',
@@ -2298,6 +2913,7 @@ class RunStatsTab(SpotfinderTab):
 
     self.manage_panel = wx.Panel(self)
     self.manage_sizer = wx.BoxSizer(wx.HORIZONTAL)
+
     self.btn_toggle_options = wx.ToggleButton(self.manage_panel,
                                               label='Hide options')
     self.chk_auto_update = wx.CheckBox(self.manage_panel, label='Auto update')
@@ -2350,6 +2966,10 @@ class RunStatsTab(SpotfinderTab):
     self.Bind(wx.EVT_CHECKBOX, self.onChkAutoUpdate, self.chk_auto_update)
     self.Bind(EVT_RUNSTATS_REFRESH, self.onRefresh)
     self.Bind(wx.EVT_SIZE, self.OnSize)
+
+    if hasattr(self.figure, '_cid'):
+      self.figure.canvas.mpl_disconnect(self.figure._cid)
+    self.figure._cid = self.figure.canvas.mpl_connect('button_press_event', self.onCanvasClick)
 
     self.Layout()
     self.Fit()
@@ -2408,6 +3028,58 @@ class RunStatsTab(SpotfinderTab):
         self.should_have_indexed_box.Show()
     self.Layout()
     self.Fit()
+
+  @staticmethod
+  def onCanvasClick(event):
+    if event.canvas.toolbar.mode: return
+    if event.xdata is None: return
+    tab = event.canvas.GetParent().GetParent().GetParent()
+    params = tab.main.params
+    if params.facility.name != 'lcls': return
+    all_stats = tab.main.runstats_sentinel.stats
+    if not all_stats:
+      return
+    x = round(event.xdata)
+    run_numbers = tab.main.runstats_sentinel.run_numbers
+    found_it = False
+    for run_number, stats in zip(run_numbers, all_stats):
+      timestamps, two_theta_low, two_theta_high, n_strong, resolutions, n_lattices = stats
+      if x < len(timestamps):
+        found_it = True
+        break
+      else:
+        x -= len(timestamps)
+    assert found_it, x
+
+    trial = tab.trial
+    found_it = False
+    for rg in trial.rungroups:
+      for run in rg.runs:
+        if run.run == run_number:
+          found_it = True
+          break
+      if found_it:
+        break
+    assert found_it, run_number
+
+    locator_path = os.path.join(params.output_folder, "r%04d"%int(run_number), \
+                                "%03d_rg%03d"%(trial.trial, rg.id), 'data.loc')
+    print("Loading run %s, image %d"%(run.run, x+1))
+
+    from dials.command_line.image_viewer import phil_scope
+    from dials.util.image_viewer.spotfinder_frame import SpotFrame, chooser_wrapper
+    from dxtbx.model.experiment_list import ExperimentListFactory
+    if not tab.sf_frame: # if closed, wx windows resolve to False
+      expts = ExperimentListFactory.from_filenames([locator_path], load_models=False)
+      tab.sf_frame = SpotFrame(tab.main, params=phil_scope.extract(), experiments=[expts], reflections=[])
+      tab.sf_frame.SetSize((1024, 780))
+    elif tab.cached_run.run != run.run:
+      expts = ExperimentListFactory.from_filenames([locator_path], load_models=False)
+      tab.sf_frame.imagesets = expts.imagesets()
+    tab.sf_frame.add_file_name_or_data(chooser_wrapper(tab.sf_frame.imagesets[x], 0))
+    tab.sf_frame.load_image(chooser_wrapper(tab.sf_frame.imagesets[x], 0))
+    tab.sf_frame.Show()
+    tab.cached_run = run
 
   def onChkAutoUpdate(self, e):
     self.auto_update = self.chk_auto_update.GetValue()
@@ -2573,14 +3245,14 @@ class UnitCellTab(BaseTab):
     # self.selection_columns_sizer = wx.BoxSizer(wx.HORIZONTAL)
     # self.selection_columns_panel.SetSizer(self.selection_columns_sizer)
 
-    self.trial_number = gctr.ChoiceCtrl(self,
+    self.trial_number = gctr.ChoiceCtrl(self.selection_columns_panel,
                                         label='Trial:',
                                         label_size=(90, -1),
                                         label_style='normal',
                                         ctrl_size=(100, -1),
                                         choices=[])
 
-    self.tag_checklist = gctr.CheckListCtrl(self,
+    self.tag_checklist = gctr.CheckListCtrl(self.selection_columns_panel,
                                             label='Available tags:',
                                             label_size=(200, -1),
                                             label_style='normal',
@@ -2588,7 +3260,7 @@ class UnitCellTab(BaseTab):
                                             direction='vertical',
                                             choices=[])
 
-    self.selection_type_radio = gctr.RadioCtrl(self,
+    self.selection_type_radio = gctr.RadioCtrl(self.selection_columns_panel,
                                                name='uc_selection_type',
                                                label='',
                                                label_style='normal',
@@ -2601,7 +3273,7 @@ class UnitCellTab(BaseTab):
                                      label='Add selection',
                                      size=(200, -1))
 
-    self.tag_set_checklist = gctr.CheckListCtrl(self,
+    self.tag_set_checklist = gctr.CheckListCtrl(self.selection_columns_panel,
                                                 label='Tag sets to display:',
                                                 label_size=(200, -1),
                                                 label_style='normal',
@@ -2817,8 +3489,17 @@ class DatasetTab(BaseTab):
     self.dataset_sizer = wx.BoxSizer(wx.HORIZONTAL)
     self.dataset_panel.SetSizer(self.dataset_sizer)
 
-    self.btn_sizer = wx.FlexGridSizer(1, 2, 0, 10)
+    self.btn_sizer = wx.FlexGridSizer(1, 3, 0, 10)
     self.btn_sizer.AddGrowableCol(0)
+
+    self.filter = gctr.TextButtonCtrl(self,
+                                      name='filter',
+                                      label='Filter',
+                                      label_style='bold',
+                                      label_size=(100, -1),
+                                      value="")
+    self.btn_sizer.Add(self.filter, flag=wx.ALIGN_RIGHT)
+
     self.btn_add_dataset = wx.Button(self, label='New Dataset', size=(120, -1))
     self.btn_active_only = wx.ToggleButton(self,
                                            label='Show Only Active Datasets',
@@ -2830,6 +3511,7 @@ class DatasetTab(BaseTab):
     self.main_sizer.Add(self.btn_sizer, flag=wx.EXPAND | wx.ALL, border=10)
 
     # Bindings
+    self.Bind(wx.EVT_TEXT, self.onFilter, self.filter.ctr)
     self.Bind(wx.EVT_BUTTON, self.onAddDataset, self.btn_add_dataset)
     self.Bind(wx.EVT_TOGGLEBUTTON, self.onActiveOnly, self.btn_active_only)
 
@@ -2838,7 +3520,12 @@ class DatasetTab(BaseTab):
   def refresh_datasets(self):
     self.dataset_sizer.Clear(delete_windows=True)
     self.all_datasets = self.main.db.get_all_datasets()
+
+    filter_str = self.filter.ctr.GetValue()
+
     for dataset in self.all_datasets:
+      if filter_str and filter_str not in dataset.name:
+        continue
       if self.show_active_only:
         if dataset.active:
           self.add_dataset(dataset=dataset)
@@ -2863,6 +3550,9 @@ class DatasetTab(BaseTab):
 
     if new_dataset_dlg.ShowModal() == wx.ID_OK:
       self.refresh_datasets()
+
+  def onFilter(self, e):
+    self.refresh_datasets()
 
   def onActiveOnly(self, e):
     self.show_active_only = self.btn_active_only.GetValue()
@@ -2954,7 +3644,7 @@ class MergingStatsTab(BaseTab):
       pass
     else:
       self.dataset_version.ctr.Append('All')
-      for version in dataset.versions:
+      for version in dataset.active_versions:
         self.dataset_version.ctr.Append(str(version.version))
       self.dataset_version.ctr.SetSelection(0)
       self.refresh_stats()
@@ -2964,9 +3654,9 @@ class MergingStatsTab(BaseTab):
     dataset = self.all_datasets[sel]
     self.dataset_name = dataset.name
     if self.dataset_version.ctr.GetSelection() == 0:
-      self.dataset_versions = [version.output_path() for version in dataset.versions]
+      self.dataset_versions = [version.output_path() for version in dataset.active_versions]
     else:
-      version = dataset.versions[self.dataset_version.ctr.GetSelection()-1]
+      version = dataset.active_versions[self.dataset_version.ctr.GetSelection()-1]
       self.dataset_name += " v%03d"%version.version
       self.dataset_versions = [version.output_path()]
 
@@ -3573,7 +4263,7 @@ class DatasetPanel(wx.Panel):
   def refresh_dataset(self):
     self.dataset_comment.SetLabel(self.dataset.comment if self.dataset.comment is not None else "")
     self.dataset_box.SetLabel('Dataset {} {}'.format(self.dataset.dataset_id,
-                               self.dataset.name[:min(len(self.dataset.name), 10)]
+                               self.dataset.name[:min(len(self.dataset.name), 20)]
                                if self.dataset.name is not None else ""))
     self.task_sizer.Clear(delete_windows=True)
     tags = self.dataset.tags

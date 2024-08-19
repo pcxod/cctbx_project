@@ -24,6 +24,7 @@ from __future__ import absolute_import, division, print_function
 # revision 1.60 - JJH 081120 - reorganized code into functions and cleaned up flag usage
 # revision 1.61 - JJH 110622 - moved to iotbx
 # revision 1.70 - VBC 201116 - switch over to using model object and chemical components library
+# revision 1.71 - VBC 230923 - switch to using atom.parent() instead of relying on id_str()
 
 import sys
 import os
@@ -35,6 +36,7 @@ except ImportError:
 
 import libtbx.load_env
 import iotbx.pdb
+import iotbx.pdb.mmcif
 import mmtbx.model
 from libtbx.utils import null_out
 
@@ -79,11 +81,18 @@ Convert version 3.2 file to version 2.3 naming:
   def get_results(self):
     return self.results
 
+  def validate(self):
+    if not self.params.file_name or (not os.path.isfile(self.params.file_name)):
+      raise Sorry("The file %s is missing" %(self.params.file_name))
+
 
 #{{{ pre_screen_file
 def pre_screen_file(filename, atom_exch, alt_atom_exch):
   count = 0
   res_count = 0
+  if not os.path.isfile(filename):
+    from libtbx.utils import Sorry
+    raise Sorry("The file %s is missing" %(filename))
   pdb_file = open(filename)
   for line in pdb_file:
     line=line.rstrip()
@@ -195,8 +204,8 @@ class Remediator():
           atom_exch[old_atom+" "+residue_name] = new_atom+" "+residue_name
         else:
           atom_exch[new_atom+" "+residue_name] = old_atom+" "+residue_name
-    na_old_atom_name_exceptions = ["H5T ","5HO*", "H3T "] # it's difficult in 2020 to figure out the proper spacing for this old style atom name
-    na_new_atom_name_exceptions = ["HO5'","HO5'", "HO3'"] # old remediator uses 5HO* but other examples on the web use H5T for HO5'
+    na_old_atom_name_exceptions = ["H5T ","5HO*", "H3T ", "3HO*"] # it's difficult in 2020 to figure out the proper spacing for this old style atom name
+    na_new_atom_name_exceptions = ["HO5'","HO5'", "HO3'", "HO3'"] # old remediator uses 5HO* but other examples on the web use H5T for HO5'
     residues_to_test = [ residue_name ]
     if (residue_name in self.na_bases) or (residue_name in self.dna_bases):
       if (residue_name in self.na_bases):
@@ -242,7 +251,7 @@ class Remediator():
     non_v3_atoms_count = 0
     for atom in atoms:
       #print(atom.name)
-      res_name = atom.id_str()[10:13]
+      res_name = atom.parent().resname
       if not res_name in self.residues_dict:
         self.residues_dict[res_name] = self.build_hash_from_chem_components(res_name, convert_to_new=False, build_all_atoms=True)
         #print(res_name+"\n"+str(residues_dict[res_name]))
@@ -377,7 +386,7 @@ def remediate(filename, remediated_out, f=None):
       print_line += line + "\n"
     elif previous != current: # appears to check an entire residue for dna residue/atom names
       if re.search(r'^.{12}.\S..  .[ACTGIU]',print_line):
-        if re.search(r'O2[\'|\*]   .',print_line) == None:
+        if re.search(r'O2[\'|\*]   .',print_line) == None and previous != None:
           DNA_base = previous[1]
           if remediated_out == True:
             print_line = re.sub(r'(?m)(^.{12}.\S..)   '+DNA_base+' ',r'\g<1>  D'+DNA_base+' ',print_line)

@@ -1,7 +1,7 @@
 #include "scitbx/array_family/boost_python/flex_fwd.h"
 //#include "cudatbx/cuda_base.cuh"
 #include "simtbx/kokkos/detector.h"
-#include "simtbx/kokkos/kokkos_utils.h"
+#include "kokkostbx/kokkos_utils.h"
 #include "scitbx/vec3.h"
 #include "scitbx/vec2.h"
 
@@ -16,50 +16,46 @@ using Kokkos::deep_copy;
 using Kokkos::create_mirror_view;
 using Kokkos::parallel_for;
 
+auto get_kokkos_vec3 = [](auto&& src) { return vec3(src[0], src[1], src[2]); };
+
 namespace simtbx { namespace Kokkos {
 
   packed_metrology::packed_metrology(dxtbx::model::Detector const & arg_detector,
                                    dxtbx::model::Beam const & arg_beam) {
 
     for (std::size_t panel_id = 0; panel_id < arg_detector.size(); panel_id++){
-          // helper code arising from the nanoBragg constructor, with user_beam=True
-      typedef scitbx::vec3<double> vec3;
+      // helper code arising from the nanoBragg constructor, with user_beam=True
 
       // DETECTOR properties
       // typically: 1 0 0
-      vec3 fdet_vector = arg_detector[panel_id].get_fast_axis();
-      fdet_vector = fdet_vector.normalize();
+      vec3 fdet_vector = get_kokkos_vec3(arg_detector[panel_id].get_fast_axis());
+      fdet_vector.normalize();
 
       // typically: 0 -1 0
-      vec3 sdet_vector = arg_detector[panel_id].get_slow_axis();
-      sdet_vector = sdet_vector.normalize();
+      vec3 sdet_vector = get_kokkos_vec3(arg_detector[panel_id].get_slow_axis());
+      sdet_vector.normalize();
 
       // set orthogonal vector to the detector pixel array
       vec3 odet_vector = fdet_vector.cross(sdet_vector);
-      odet_vector = odet_vector.normalize();
+      odet_vector.normalize();
 
       // dxtbx origin is location of outer corner of the first pixel
-      vec3 pix0_vector = arg_detector[panel_id].get_origin()/1000.0;
+      vec3 pix0_vector = get_kokkos_vec3(arg_detector[panel_id].get_origin()/1000.0);
 
       // what is the point of closest approach between sample and detector?
-      double close_distance = pix0_vector * odet_vector;
+      double close_distance = pix0_vector.dot(odet_vector);
       if (close_distance < 0){
         bool verbose = false;
         if(verbose)printf("WARNING: dxtbx model is lefthanded. Inverting odet_vector.\n");
         odet_vector = -1. * odet_vector;
-        close_distance = -1*close_distance;
+        close_distance = -1 * close_distance;
       }
 
-      sdet.push_back(sdet_vector.length());
-      fdet.push_back(fdet_vector.length());
-      odet.push_back(odet_vector.length());
-      pix0.push_back(0.);
-      for (std::size_t idx_vec = 0; idx_vec < 3; idx_vec++){
-            sdet.push_back(sdet_vector[idx_vec]);
-            fdet.push_back(fdet_vector[idx_vec]);
-            odet.push_back(odet_vector[idx_vec]);
-            pix0.push_back(pix0_vector[idx_vec]);
-      }
+      sdet.push_back(sdet_vector);
+      fdet.push_back(fdet_vector);
+      odet.push_back(odet_vector);
+      pix0.push_back(pix0_vector);
+
       // set beam centre
       scitbx::vec2<double> dials_bc=arg_detector[panel_id].get_beam_centre(arg_beam.get_s0());
       dists.push_back(close_distance);
@@ -69,28 +65,28 @@ namespace simtbx { namespace Kokkos {
   };
 
   packed_metrology::packed_metrology(const simtbx::nanoBragg::nanoBragg& nB){
-      for (std::size_t idx_vec = 0; idx_vec < 4; idx_vec++){
-            sdet.push_back(nB.sdet_vector[idx_vec]);
-            fdet.push_back(nB.fdet_vector[idx_vec]);
-            odet.push_back(nB.odet_vector[idx_vec]);
-            pix0.push_back(nB.pix0_vector[idx_vec]);
-      }
-      dists.push_back(nB.close_distance);
-      Xbeam.push_back(nB.Xbeam);
-      Ybeam.push_back(nB.Ybeam);
+    // Careful, 4-vectors! [length, x, y, z]
+    auto get_kokkos_vec3 = [](auto& src) { return vec3(src[1], src[2], src[3]); };
+    sdet.push_back( get_kokkos_vec3(nB.sdet_vector) );
+    fdet.push_back( get_kokkos_vec3(nB.fdet_vector) );
+    odet.push_back( get_kokkos_vec3(nB.odet_vector) );
+    pix0.push_back( get_kokkos_vec3(nB.pix0_vector) );
+    dists.push_back(nB.close_distance);
+    Xbeam.push_back(nB.Xbeam);
+    Ybeam.push_back(nB.Ybeam);
   }
 
   void
   packed_metrology::show() const {
     for (std::size_t idx_p = 0; idx_p < Xbeam.size(); idx_p++){
       printf(" Panel %3ld\n",idx_p);
-      printf(" Panel %3ld sdet %9.6f %9.6f %9.6f %9.6f fdet %9.6f %9.6f %9.6f %9.6f\n",
-             idx_p,sdet[4*idx_p+0],sdet[4*idx_p+1],sdet[4*idx_p+2],sdet[4*idx_p+3],
-                   fdet[4*idx_p+0],fdet[4*idx_p+1],fdet[4*idx_p+2],fdet[4*idx_p+3]
+      printf(" Panel %3ld sdet %9.6f %9.6f %9.6f fdet %9.6f %9.6f %9.6f\n",
+             idx_p,sdet[idx_p][0],sdet[idx_p][1],sdet[idx_p][2],
+                   fdet[idx_p][0],fdet[idx_p][1],fdet[idx_p][2]
       );
-      printf(" Panel %3ld odet %9.6f %9.6f %9.6f %9.6f pix0 %9.6f %9.6f %9.6f %9.6f\n",
-             idx_p,odet[4*idx_p+0],odet[4*idx_p+1],odet[4*idx_p+2],odet[4*idx_p+3],
-                   pix0[4*idx_p+0],pix0[4*idx_p+1],pix0[4*idx_p+2],pix0[4*idx_p+3]
+      printf(" Panel %3ld odet %9.6f %9.6f %9.6f pix0 %9.6f %9.6f %9.6f\n",
+             idx_p,odet[idx_p][0],odet[idx_p][1],odet[idx_p][2],
+                   pix0[idx_p][0],pix0[idx_p][1],pix0[idx_p][2]
       );
       printf(" Panel %3ld beam %11.8f %11.8f\n",idx_p,Xbeam[idx_p],Ybeam[idx_p]);
     }
@@ -159,7 +155,7 @@ namespace simtbx { namespace Kokkos {
     // nB.raw_pixels = af::flex_double(af::flex_grid<>(nB.spixels,nB.fpixels));
     // do not reallocate CPU memory for the data write, as it is not needed
 
-    transfer_kokkos2flex(nB.raw_pixels, m_accumulate_floatimage);
+    kokkostbx::transfer_kokkos2flex(nB.raw_pixels, m_accumulate_floatimage);
     // vector_double_t::HostMirror host_floatimage = create_mirror_view(m_accumulate_floatimage);
     // deep_copy(host_floatimage, m_accumulate_floatimage);
 
@@ -175,7 +171,7 @@ namespace simtbx { namespace Kokkos {
   kokkos_detector::get_raw_pixels(){
     //return the data array for the multipanel detector case
     af::flex_double output_array(af::flex_grid<>(m_panel_count,m_slow_dim_size,m_fast_dim_size), af::init_functor_null<double>());
-    transfer_kokkos2flex(output_array, m_accumulate_floatimage);
+    kokkostbx::transfer_kokkos2flex(output_array, m_accumulate_floatimage);
 
     // vector_double_t::HostMirror host_floatimage = create_mirror_view(m_accumulate_floatimage);
     // deep_copy(host_floatimage, m_accumulate_floatimage);
@@ -189,7 +185,7 @@ namespace simtbx { namespace Kokkos {
   void
   kokkos_detector::set_active_pixels_on_GPU(af::shared<std::size_t> active_pixel_list_value) {
     m_active_pixel_size = active_pixel_list_value.size();
-    transfer_shared2kokkos(m_active_pixel_list, active_pixel_list_value);
+    kokkostbx::transfer_shared2kokkos(m_active_pixel_list, active_pixel_list_value);
     active_pixel_list = active_pixel_list_value;
   }
 
@@ -197,7 +193,7 @@ namespace simtbx { namespace Kokkos {
   kokkos_detector::get_whitelist_raw_pixels(af::shared<std::size_t> selection) {
     //return the data array for the multipanel detector case, but only for whitelist pixels
     vector_size_t active_pixel_selection = vector_size_t("active_pixel_selection", selection.size());
-    transfer_shared2kokkos(active_pixel_selection, selection);
+    kokkostbx::transfer_shared2kokkos(active_pixel_selection, selection);
 
     size_t output_pixel_size = selection.size();
     vector_cudareal_t active_pixel_results = vector_cudareal_t("active_pixel_results", output_pixel_size);
@@ -212,7 +208,7 @@ namespace simtbx { namespace Kokkos {
     });
 
     af::shared<double> output_array(output_pixel_size, af::init_functor_null<double>());
-    transfer_kokkos2shared(output_array, active_pixel_results);
+    kokkostbx::transfer_kokkos2shared(output_array, active_pixel_results);
 
     SCITBX_ASSERT(output_array.size() == output_pixel_size);
     return output_array;
@@ -228,13 +224,13 @@ namespace simtbx { namespace Kokkos {
     resize(m_maskimage, m_total_pixel_count);
     resize(m_floatimage, m_total_pixel_count);
 
-    transfer_shared2kokkos(m_sdet_vector, metrology.sdet);
-    transfer_shared2kokkos(m_fdet_vector, metrology.fdet);
-    transfer_shared2kokkos(m_odet_vector, metrology.odet);
-    transfer_shared2kokkos(m_pix0_vector, metrology.pix0);
-    transfer_shared2kokkos(m_distance, metrology.dists);
-    transfer_shared2kokkos(m_Xbeam, metrology.Xbeam);
-    transfer_shared2kokkos(m_Ybeam, metrology.Ybeam);
+    kokkostbx::transfer_shared2kokkos(m_sdet_vector, metrology.sdet);
+    kokkostbx::transfer_shared2kokkos(m_fdet_vector, metrology.fdet);
+    kokkostbx::transfer_shared2kokkos(m_odet_vector, metrology.odet);
+    kokkostbx::transfer_shared2kokkos(m_pix0_vector, metrology.pix0);
+    kokkostbx::transfer_shared2kokkos(m_distance, metrology.dists);
+    kokkostbx::transfer_shared2kokkos(m_Xbeam, metrology.Xbeam);
+    kokkostbx::transfer_shared2kokkos(m_Ybeam, metrology.Ybeam);
     fence();
 
     // metrology.show();

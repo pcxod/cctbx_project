@@ -40,26 +40,37 @@ SOFTWARE.
 """
 
 
-def parse_pae_file(pae_file):
+def parse_pae_file(pae_file = None, text = None):
     """Takes PAE file in PKL or JSON format and returns PAE matrix
+     Alternative is text
 
     Arguments:
         *pae_file: file containing PAE matrix in PKL or JSON format
+        text: text containing PAE matrix in JSON format
 
     Returns:
         pae_matrix as numpy array
     """
     import numpy
     import os
-    _, ext = os.path.splitext(pae_file)
-    if ext == '.json' or ext == '.jsn':
-        import json
 
-        try:
+    if not text:
+      _, ext = os.path.splitext(pae_file)
+
+    if text or ext == '.json' or ext == '.jsn':
+
+        import json
+        if not text:
+          try:
             with open(pae_file, 'rt') as f:
                 data = json.load(f)
-        except Exception:
+          except Exception:
             raise Sorry("Unable to read the json file: %s" %(pae_file))
+        else:
+          try:
+            data = json.loads(text)
+          except Exception:
+            raise Sorry("Unable to read json text")
 
         if isinstance(data, dict) and 'pae' in data:
             # ColabFold 1.3 produces a JSON file different from AlphaFold database.
@@ -196,7 +207,7 @@ def domains_from_pae_matrix_igraph(pae_matrix, pae_power=1, pae_cutoff=5,
         import igraph
     except ImportError:
         raise Sorry(
-            'ERROR: This method requires python-igraph to be installed. Please install it using "pip install python-igraph" '
+            'ERROR: This method requires python-igraph to be installed. Please install it using "pip install igraph" '
             'in a Python >=3.6 environment and try again.')
     import numpy
     weights = 1 / pae_matrix ** pae_power

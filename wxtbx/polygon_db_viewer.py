@@ -7,7 +7,7 @@ from libtbx import group_args
 import wx
 from six.moves import zip
 
-STD_FLAGS = wx.ALL|wx.ALIGN_CENTER_VERTICAL
+STD_FLAGS = wx.ALL
 
 all_keys = polygon.keys_to_show + polygon.other_numerical_keys
 all_captions = polygon.key_captions + polygon.other_captions
@@ -169,9 +169,12 @@ class ConfigFrame(wx.Frame):
         raise Sorry("Invalid reference value '%s' - must be a decimal number."%
           reference_value_txt)
     try :
-      n_bins = float(self.n_bins.GetValue())
+      n_bins = int(float(self.n_bins.GetValue()))
     except ValueError :
       raise Sorry("Number of bins must be a decimal number.")
+    if n_bins < 1:
+      raise Sorry("Number of bins must be a decimal number 1 or greater")
+
     data = []
     print(limits.h_min, limits.h_max)
     for (d_, v_) in zip(db['high_resolution'], db[h_key]):
@@ -203,9 +206,12 @@ class ConfigFrame(wx.Frame):
     self.Destroy()
 
   def OnDestroy(self, evt):
-    parent = self.GetParent()
-    if (parent is not None):
-      parent.plot_frame = None
+    try:
+      parent = self.GetParent()
+      if (parent is not None):
+        parent.plot_frame = None
+    except Exception as e: # parent was already deleted
+      pass
 
 class CorrPlot(plots.plot_container):
   def set_plot(self, x, y, x_label, y_label):
@@ -238,9 +244,11 @@ class HistogramPlot(plots.histogram):
   def show_histogram(self, data, n_bins, reference_value, xlabel):
     from scitbx.array_family import flex
     mean = flex.mean(flex.double(data))
+    if not n_bins:
+      raise Sorry("Number of bins must be greater than zero for histograms")
     p = plots.histogram.show_histogram(self,
       data=data,
-      n_bins=n_bins,
+      n_bins=int(n_bins),
       reference_value=reference_value,
       draw_now=False)
     p.axvline(mean, color='g', linewidth=2)

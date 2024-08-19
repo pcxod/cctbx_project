@@ -3,7 +3,8 @@ channels:
  - lcls-i
  - conda-forge
  - cctbx
- - defaults
+ - nodefaults
+
 dependencies:
  # conda compilers
  - c-compiler
@@ -34,6 +35,7 @@ dependencies:
  - pyopengl
 
  # HDF5 (main libraries come with psana)
+ - h5py
  - hdf5plugin  # [unix]
 
  # other
@@ -44,6 +46,7 @@ dependencies:
  - pandas
  - pybind11
  - setuptools
+ - natsort
 
  # cctbx channel
  - libsvm_py
@@ -51,14 +54,17 @@ dependencies:
  # dials
  - jinja2
  - msgpack-python
+ - msgpack-c
+ - msgpack-cxx
  - orderedset
- - procrunner
  - python-blosc
  - scikit-learn
  - tqdm
  - eigen
  - dials-data
  - pint
+ - nxmx
+ - gemmi
 
  # xia2
  - tabulate
@@ -70,7 +76,12 @@ dependencies:
  # xfel gui
  - mysql
  - mysqlclient
+ - pydrive2
 
  # Avoid numpy 1.21.[01234]
  # See https://github.com/cctbx/cctbx_project/issues/627
  - numpy=1.20|>=1.21.5
+
+ # boost
+ - boost
+ - boost-cpp

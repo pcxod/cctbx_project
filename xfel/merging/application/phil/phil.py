@@ -16,6 +16,9 @@ dispatch {
 
 input_phil = """
 input {
+  override_identifiers = False
+    .type = bool
+    .help = override whatever identifiers may be present in experiments, replacing with auto-generated hash
   alist {
     file = None
       .type = str
@@ -94,9 +97,6 @@ input {
       .help = memory reduction factor for MPI alltoall.
       .help = Use mpi_alltoall_slices > 1, when available RAM is insufficient for doing MPI alltoall on all data at once.
       .help = The data will then be split into mpi_alltoall_slices parts and, correspondingly, alltoall will be performed in mpi_alltoall_slices iterations.
-    reset_experiment_id_column = False
-      .type = bool
-      .expert_level = 3
   }
 }
 
@@ -197,12 +197,19 @@ filter
           .type = path
         component = 0
           .type = int(value_min=0)
+        skip_component = None
+          .type = int(value_min=0)
+          .multiple = True
+          .help = If a lattice belongs to any of these components, exclude it from processing.
         mahalanobis = 4.0
           .type = float(value_min=0)
           .help = Is essentially the standard deviation cutoff. Given that the unit cells
           .help = are estimated to be distributed by a multivariate Gaussian, this is the
           .help = maximum deviation (in sigmas) from the central value that is allowable for the
           .help = unit cell to be considered part of the cluster.
+        skip_mahalanobis = 4.0
+          .type = float(value_min=0)
+          .help = Cutoff distance for any components specified under skip_component.
         }
       isoform = None
         .type=str
@@ -212,6 +219,12 @@ filter
       }
   }
   outlier {
+    mad_thresh = None
+      .type = float
+      .help = If provided, during  the actual merge step, symmetrically equivalent reflecitons (same ASU) are filtered
+      .help = according to there median absolute deviation. mad_thresh=3 means a reflection is filtered
+      .help = if its deviation is greater than 3 standard deviations of the median amongst ASU samples,
+      .help = i.e. lower values of mad_thresh will filter more reflections.
     min_corr = 0.1
       .type = float
       .help = Correlation cutoff for rejecting individual experiments by comparing observed intensities to the model.
@@ -398,6 +411,14 @@ scaling {
     .help = "mark0: original per-image scaling by reference to isomorphous PDB model"
     .help = "mark1: no scaling, just averaging (i.e. Monte Carlo
              algorithm).  Individual image scale factors are set to 1."
+  weights = *unit icalc icalc_sigma
+    .type = choice
+    .help = "Sigmas applied in the linear fit of Iobs vs Icalc. unit: sigmas"
+            "equal to 1. icalc: Sigmas are proportional to the square root of"
+            "Icalc (this relation is totally empirical). icalc_sigma: Error"
+            "due to partiality is proportional to Icalc; this term is added to"
+            "the sigma(Iobs) determined in integration so that sigma ="
+            "sqrt(Icalc**2 + sigma(Iobs)**2)."
 }
 """
 
@@ -411,6 +432,10 @@ postrefinement {
     .type = choice
     .help = rs only, eta_deff protocol 7
     .expert_level = 3
+  partiality_threshold_hcfix = 0.2
+    .type = float ( value_min = 0.0001 )
+    .help = Throw out observations below this value. Hard coded as 0.2 for rs2
+    .help = Minimum positive value is required because partiality appears in the denominator
   rs {
     fix = thetax thetay *RS G BFACTOR
       .type = choice(multi=True)
@@ -457,14 +482,13 @@ postrefinement {
     .help = Spot radius for lower plot reflects partiality. Only implemented for rs_hybrid
 }
 """
-
 merging_phil = """
 merging {
   minimum_multiplicity = 2
     .type = int(value_min=2)
     .help = If defined, merged structure factors not produced for the Miller indices below this threshold.
   error {
-    model = ha14 *ev11 errors_from_sample_residuals
+    model = ha14 *ev11 mm24 errors_from_sample_residuals
       .type = choice
       .multiple = False
       .help = ha14, formerly sdfac_auto, apply sdfac to each-image data assuming negative
@@ -492,6 +516,46 @@ merging {
         .type = bool
         .help = If True, plot refinement steps during refinement.
     }
+    mm24
+      .help = Maximum log-likelihood from Mittan-Moreau 2024
+      {
+      expected_gain = None
+        .help = Expected gain used for s_fac initialization.\
+                If None, initialize s_fac using routine.
+        .type = float
+      number_of_intensity_bins = 100
+        .help = Number of intensity bins
+        .type = int
+      n_degrees = 2
+        .help = s_add as a n_degree polynomial of the correlation coefficient
+        .type = int
+      tuning_param = 10
+        .help = Tuning param for t-dist in maximum log likelihood
+        .type = float
+      n_max_differences = 100
+        .help = Maximum number of pairwise differences per reflection.\
+                If None, then do not limit the maximum number of differences
+        .type = int
+      random_seed = 50298
+        .help = Seed used to establish the random number generator for\
+                subsampling the pairwise differences.
+        .type = int
+      tuning_param_opt = False
+        .type = bool
+        .help = If True, optimize the t-distribution's tuning parameter
+      likelihood = normal *t-dist
+        .help = Choice for likelihood function.
+        .type = choice
+        .multiple = False
+      cc_after_pr = True
+        .type = bool
+        .help = If True - use correlation coefficient determined after post-refinement.\
+                If False - use correlation coefficient determined before. \
+                If post-refinement is not performed, must be False.
+      do_diagnostics = False
+        .type = bool
+        .help = Make diagnostic plots.
+    }
   }
   plot_single_index_histograms = False
     .type = bool
@@ -509,6 +573,9 @@ merging {
   merge_anomalous = False
     .type = bool
     .help = Merge anomalous contributors
+  include_multiplicity_column = False
+    .type = bool
+    .help = If True, save multiplicity to output mtz as separate column
 }
 """
 
@@ -517,7 +584,7 @@ output {
   expanded_bookkeeping = False
     .type = bool
     .help = if True, and if save_experiments_and_reflections=True, then include in the saved refl tabls:
-    .help = 1- modified exp_id column that contains the image number and lattice number
+    .help = 1- modified experiment identifier that contains the image number and lattice number
     .help = 2- index corresponding to the particular reflection in the input file (usually something_integrated.refl)
     .help = 3- the is_odd flag
     .help = 4- the original exp id for the reflection
@@ -548,6 +615,9 @@ output {
 
 statistics_phil = """
 statistics {
+  shuffle_ids = False
+    .type = bool
+    .help = shuffle the IDs when dividing into even/odd. This adds variation to half dataset stats like CC1/2
   n_bins = 10
     .type = int(value_min=1)
     .help = Number of resolution bins in statistics table
@@ -560,11 +630,26 @@ statistics {
   cciso {
     mtz_file = None
       .type = str
-      .help = for Riso/ CCiso, the reference structure factors, must have data type F
+      .help = The isomorphous reference structure factors for Riso/ CCiso.
       .help = a fake file is written out to this file name if model is None
+      .help = The experimental reference file can be old type *.mtz or new *sf.cif
     mtz_column_F = fobs
       .type = str
-      .help = for Riso/ CCiso, the column name containing reference structure factors
+      .help = For Riso/ CCiso, the array name containing reference structure factors
+      .help = As an example, could be intensity from *sf.cif
+      .help = Specifically this is a tag searched for in the array name, could be 'tensity' from 'intensity'
+  }
+  deltaccint
+    .help = Parameters used when computing ΔCC½ (aka ΔCC internal), a means of filtering out lattices that
+    .help = degrade the overall CC½. Uses the σ-τ method from Assmann 2016 to avoid splitting the data into
+    .help = odd/even datasets. Enable by adding the deltaccint worker after the group worker.
+  {
+    iqr_ratio = 10
+      .type = float
+      .help = If the ΔCC½ filter is enabled, first compute CC½ when removing every image one at a time, then
+      .help = compute the IQR of these CC½s. Remove all lattices whose contribution degrades CC½ by more than
+      .help = IQR * iqr_ratio above the median. You can discover a good IQR by running the program once,
+      .help = examining the log file where possible values are listed, and running it again with the best value.
   }
   predictions_to_edge {
     apply = False
@@ -614,9 +699,43 @@ lunus {
 
 diffbragg_phil = """
 diffBragg {
-  include scope simtbx.command_line.hopper.phil_scope
+  include scope simtbx.diffBragg.phil.phil_scope
 }
 """
+
+monitor_phil = """
+monitor {
+  detail = *rank node rank0 none
+    .type = choice
+    .help = Detail of data to be collected: from every rank, from rank 0 only,
+    .help = from first rank on every node, or none.
+  period = 5.0
+    .type = float
+    .help = Interval between subsequent resource statistics checks in seconds.
+    .help = Short periods might lead to inconsistent logging.
+  plot = True
+    .type = bool
+    .help = Plot the resource usage history after the monitor is stopped.
+  prefix = monitor
+    .type = str
+    .help = Filename prefix for log files and summary plot.
+  write = True
+    .type = bool
+    .help = Write collected resource information to log files.
+}
+"""
+
+
+filter_global_phil = """
+filter_global {
+  intensity_extrema_iqr_dist_threshold = 1000.0
+    .type = float(value_min=0, value_max=None)
+    .help = Maximum tolerated deviation of max(intensity.sum.value)
+    .help = and min(intensity.sum.value) from expts' population's respective
+    .help = medians, expressed in population's interquartile range units.
+}
+"""
+
 
 # A place to override any defaults included from elsewhere
 program_defaults_phil_str = """
@@ -625,7 +744,8 @@ modify.cosym.use_curvatures=False
 
 master_phil = dispatch_phil + input_phil + tdata_phil + filter_phil + modify_phil + \
               select_phil + scaling_phil + postrefinement_phil + merging_phil + \
-              output_phil + statistics_phil + group_phil + lunus_phil + publish_phil + diffbragg_phil
+              output_phil + statistics_phil + group_phil + lunus_phil + \
+              publish_phil + diffbragg_phil + monitor_phil + filter_global_phil
 
 import os, importlib
 custom_phil_pathstr = os.environ.get('XFEL_CUSTOM_WORKER_PATH')

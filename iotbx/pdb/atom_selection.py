@@ -16,6 +16,7 @@ from libtbx.utils import Sorry, format_exception
 from libtbx import slots_getstate_setstate
 from mmtbx.ncs.ncs_search import get_chains_info
 from six.moves import range
+from iotbx.pdb.hybrid_36 import hy36encode
 
 abc="abcdefghijklmnopqrstuvwxyz"
 ABC="ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -34,6 +35,22 @@ def _character_case_id(strings):
   if (have_upper): return 1
   if (have_lower): return -1
   return 0
+
+def long_int_to_str(number):
+  # if short, no need to transform
+  if len(number) <=4:
+    return number
+  # make sure we deal with actual number
+  for c in number:
+    if c not in '0123456789':
+      return number
+  try:
+    number_int = int(number)
+  except Exception:
+    return number
+  if number_int < 0:
+    return number
+  return hy36encode(4, int(number_int))
 
 def _get_map_string(
       map,
@@ -76,9 +93,9 @@ def _get_serial_range(sel_keyword, map, start, stop):
   o_start = None
   o_stop = None
   if (start is not None and start.count(" ") != len(start)):
-    o_start = o(start)
+    o_start = o(long_int_to_str(start))
   if (stop is not None and stop.count(" ") != len(stop)):
-    o_stop = o(stop)
+    o_stop = o(long_int_to_str(stop))
   if (    o_start is not None
       and o_stop is not None
       and o_start > o_stop):
@@ -223,6 +240,7 @@ class cache(slots_getstate_setstate):
       unconditionally_case_insensitive=False)
 
   def get_resseq(self, pattern):
+    pattern.value = long_int_to_str(pattern.value)
     return _get_map_string(
       map=self.resseq,
       pattern=pattern,
@@ -239,10 +257,11 @@ class cache(slots_getstate_setstate):
       wildcard_escape_char=self.wildcard_escape_char)
 
   def get_resid(self, pattern):
-    return _get_map_string(
+    res = _get_map_string(
       map=self.resid,
       pattern=pattern,
       wildcard_escape_char=self.wildcard_escape_char)
+    return res
 
   def get_resid_range(self, start, stop):
     from iotbx.pdb import utils_base_256_ordinal as o
@@ -638,18 +657,23 @@ class cache(slots_getstate_setstate):
             return (None, None)
           val, i_colon = try_compose_range()
           if (i_colon < 0):
+            # processing absence of colon, i.e. single residue/model or range with "through"
             if (lword == "resseq"):
+              # "resseq 6", does not support "through"
               result_stack.append(self.sel_resseq(pattern=arg))
             elif (lword in ["resid", "resi"]):
               start, stop = try_compose_sequence()
               if (start is None):
+                # "resid 6"
                 result_stack.append(self.sel_resid(pattern=arg))
               else :
+                # resid 5 through 6"
                 result_stack.append(self.sel_resid_sequence(start=start,
                   stop=stop))
             else:
               result_stack.append(self.sel_model_id(pattern=arg))
           else:
+            # processing colon
             start = val[:i_colon]
             stop = val[i_colon+1:]
             if (lword == "resseq"):
@@ -864,13 +888,12 @@ def selection_string_from_selection(pdb_h,
   Args:
     pdb_h : iotbx.pdb.hierarchy
     selection (flex.bool or flex.size_t)
-    chains_info : object containing
-      chains (str): chain IDs OR selections string
+    chains_info (dict): values are object containing
       res_name (list of str): list of residues names
       resid (list of str): list of residues sequence number, resid
-      atom_names (list of list of str): list of atoms in residues
-      atom_selection (list of list of list of int): the location of atoms in ph
-      chains_atom_number (list of int): list of number of atoms in each chain
+      atom_names (list of flex.str): per residue atom names
+      atom_selection (list of flex.size_t()): per residue atom selections
+      chains_atom_number (int): list of number of atoms in each chain
 
   Returns:
     sel_str (str): atom selection string
@@ -894,7 +917,7 @@ def selection_string_from_selection(pdb_h,
     # this "unfolds" the atom_selection array which is [[],[],[],[]...] into
     # a set
     if not chain_is_needed(selection, chains_info[ch_id].atom_selection): continue
-    a_sel = {x for xi in chains_info[ch_id].atom_selection for x in xi}
+    a_sel = set(chains_info[ch_id].flat_atom_selection)
     test_set = a_sel.intersection(selection_set)
     if not test_set: continue
     ch_sel = "chain '%s'" % convert_wildcards_in_chain_id(ch_id)

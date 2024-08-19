@@ -5,54 +5,21 @@ try:
 except ImportError:
   from libtbx.program_template import ProgramTemplate
 import os
-from libtbx.utils import null_out, Sorry
+from libtbx.utils import Sorry
 import mmtbx.maps.polder
 from iotbx import crystal_symmetry_from_any
-import mmtbx.utils
 from iotbx import mrcfile
 from libtbx import group_args
 from cctbx.array_family import flex
-from iotbx import extract_xtal_data
 
 master_phil_str = '''
 include scope libtbx.phil.interface.tracking_params
 include scope mmtbx.maps.polder.master_params
-model_file_name = None
-  .type = path
-  .short_caption = Model file
-  .multiple = False
-  .help = Model file name
-  .style = file_type:pdb bold input_file
 solvent_exclusion_mask_selection = None
   .type = str
   .short_caption = Omit selection
   .help = Atoms around which bulk solvent mask is set to zero
   .input_size = 400
-reflection_file_name = None
-  .type = path
-  .short_caption = Data file
-  .help = File with experimental data (most of formats: CNS, SHELX, MTZ, etc).
-  .style = file_type:hkl bold input_file process_hkl child:fobs:data_labels \
-           child:rfree:r_free_flags_labels child:d_min:high_resolution \
-           child:d_max:low_resolution
-data_labels = None
-  .type = str
-  .short_caption = Data labels
-  .help = Labels for experimental data.
-  .style = renderer:draw_fobs_label_widget parent:file_name:reflection_file_name
-r_free_flags_labels = None
-  .type = str
-  .short_caption = Rfree labels
-  .help = Labels for free reflections.
-  .style = renderer:draw_rfree_label_widget parent:file_name:reflection_file_name
-high_resolution = None
-  .type = float
-  .short_caption = High resolution
-  .help = High resolution limit
-low_resolution = None
-  .type = float
-  .short_caption = Low resolution
-  .help = Low resolution limit
 scattering_table = *n_gaussian wk1995 it1992 neutron electron
   .type = choice
   .short_caption = Scattering table
@@ -79,6 +46,16 @@ gui
   output_dir = None
   .type = path
   .style = output_dir
+
+  data_column_label = None
+  .type = str
+  .style = noauto renderer:draw_any_label_widget
+  .input_size = 200
+
+  free_column_label = None
+  .type = str
+  .style = noauto renderer:draw_any_label_widget
+  .input_size = 200
 }
 '''
 
@@ -140,17 +117,13 @@ Optional output:
     self.data_manager.has_miller_arrays(raise_sorry=True)
     if (len(self.data_manager.get_miller_array_names()) > 2):
       raise Sorry('Dont input more than 2 reflection files.')
-    if (self.params.reflection_file_name is None):
-      self.params.reflection_file_name = self.data_manager.get_default_miller_array_name()
-    if (self.params.model_file_name is None):
-      self.params.model_file_name = self.data_manager.get_default_model_name()
 
     if (self.params.solvent_exclusion_mask_selection is None):
       raise Sorry('''Selection for atoms to be omitted is required.
 
   Try something like
 
-    solvent_exclusion_mask_selection=LIG
+    solvent_exclusion_mask_selection="resname LIG"
   ''')
     if (self.params.polder.sphere_radius < 3):
       raise Sorry("Sphere radius out of range: must be larger than 3 A")
@@ -160,6 +133,22 @@ Optional output:
 
     if (self.params.polder.resolution_factor < 0.0):
       raise Sorry('Use a positive value for the resolution gridding factor.')
+
+    self.fmodel = None
+    try:
+      self.fmodel = self.data_manager.get_fmodel(
+        scattering_table = self.params.scattering_table)
+    except Sorry as s:
+      if 'previously used R-free flags are available run this command again' in str(s):
+        #TODO print stuff here to informa that there is no Rfree flag
+        fmodel_params = self.data_manager.get_fmodel_params()
+        fmodel_params.xray_data.r_free_flags.required = False
+        fmodel_params.xray_data.r_free_flags.ignore_r_free_flags = True
+        self.data_manager.set_fmodel_params(fmodel_params)
+        self.fmodel = self.data_manager.get_fmodel(
+          scattering_table = self.params.scattering_table)
+    if self.fmodel is None:
+      raise Sorry('Failed to create fmodel. Please submit a bug report.')
 
   # ---------------------------------------------------------------------------
 
@@ -198,93 +187,45 @@ Optional output:
 
   # ---------------------------------------------------------------------------
 
-  def get_fobs_rfree(self, crystal_symmetry):
-    f_obs, r_free_flags = None, None
-
-    rfs = self.data_manager.get_reflection_file_server(
-      filenames = self.data_manager.get_miller_array_names(),
-      crystal_symmetry = crystal_symmetry,
-      logger=null_out())
-
-    parameters = extract_xtal_data.data_and_flags_master_params().extract()
-    if (self.params.data_labels is not None):
-      parameters.labels = self.params.data_labels
-    if (self.params.r_free_flags_labels is not None):
-      parameters.r_free_flags.label = self.params.r_free_flags_labels
-    determined_data_and_flags = extract_xtal_data.run(
-      reflection_file_server = rfs,
-      parameters             = parameters,
-      keep_going             = True,
-      working_point_group = crystal_symmetry.space_group().build_derived_point_group())
-
-    f_obs = determined_data_and_flags.f_obs
-    r_free_flags = determined_data_and_flags.r_free_flags
-    assert (f_obs is not None)
-    if (self.params.data_labels is None):
-      self.params.data_labels = f_obs.info().label_string()
-    if (r_free_flags is not None):
-      self.params.r_free_flags_labels = r_free_flags.info().label_string()
-
-    return f_obs, r_free_flags
-
-  # ---------------------------------------------------------------------------
-
-  def prepare_fobs_rfree(self, f_obs, r_free_flags):
-    f_obs = f_obs.resolution_filter(
-      d_min = self.params.high_resolution,
-      d_max = self.params.low_resolution)
-    if (r_free_flags is not None):
-      r_free_flags = r_free_flags.resolution_filter(
-        d_min = self.params.high_resolution,
-        d_max = self.params.low_resolution)
-
-    if (f_obs.anomalous_flag()):
-      f_obs, r_free_flags = self.prepare_f_obs_and_flags_if_anomalous(
-        f_obs        = f_obs,
-        r_free_flags = r_free_flags)
-
-    return f_obs, r_free_flags
-
-  # ---------------------------------------------------------------------------
-
   def check_selection(self, pdb_hierarchy):
-   print("*"*79, file=self.logger)
-   print('Selecting atoms...\n', file=self.logger)
-   print('Selection string:', self.params.solvent_exclusion_mask_selection)
+    print("*"*79, file=self.logger)
+    print('Selecting atoms...\n', file=self.logger)
+    print('Selection string:', self.params.solvent_exclusion_mask_selection,
+      file=self.logger)
 
-   selection_bool = pdb_hierarchy.atom_selection_cache().selection(
-     string = self.params.solvent_exclusion_mask_selection)
-   n_selected = selection_bool.count(True)
-   n_selected_all = pdb_hierarchy.atom_selection_cache().selection(
-     string = 'all').count(True)
-   if(n_selected == 0):
-     raise Sorry("No atoms where selected. Check selection syntax again.")
-   if (n_selected/n_selected_all > 0.5):
-     raise Sorry("""More than half of total number of atoms selected. Omit
-       selection should be smaller, such as one ligand or a few residues.""")
+    selection_bool = pdb_hierarchy.atom_selection_cache().selection(
+      string = self.params.solvent_exclusion_mask_selection)
+    n_selected = selection_bool.count(True)
+    n_selected_all = pdb_hierarchy.atom_selection_cache().selection(
+      string = 'all').count(True)
+    if(n_selected == 0):
+      raise Sorry("No atoms where selected. Check selection syntax again.")
+    if (n_selected/n_selected_all > 0.5):
+      raise Sorry("""More than half of total number of atoms selected. Omit
+        selection should be smaller, such as one ligand or a few residues.""")
 
-   print('Number of atoms selected:', n_selected, file=self.logger)
-   pdb_hierarchy_selected = pdb_hierarchy.select(selection_bool)
-   ligand_str = pdb_hierarchy_selected.as_pdb_string()
-   print(ligand_str, file=self.logger)
-   print("*"*79, file=self.logger)
+    print('Number of atoms selected:', n_selected, file=self.logger)
+    pdb_hierarchy_selected = pdb_hierarchy.select(selection_bool)
+    ligand_str = pdb_hierarchy_selected.as_pdb_string()
+    print(ligand_str, file=self.logger)
+    print("*"*79, file=self.logger)
 
-   return selection_bool
+    return selection_bool
 
   # ---------------------------------------------------------------------------
 
   def broadcast_rfactors(self, r_work, r_free):
-    print('R_work = %6.4f R_free = %6.4f' % (r_work, r_free))
+    print('R_work = %6.4f R_free = %6.4f' % (r_work, r_free), file=self.logger)
     print ('*'*79, file=self.logger)
 
   # ---------------------------------------------------------------------------
 
-  def print_rfactors(self, results):
+  def print_rfactors(self):
     print ('*'*79, file=self.logger)
-    fmodel_input  = results.fmodel_input
-    fmodel_biased = results.fmodel_biased
-    fmodel_omit   = results.fmodel_omit
-    fmodel_polder = results.fmodel_polder
+    fmodel_input  = self.results.fmodel_input
+    fmodel_biased = self.results.fmodel_biased
+    fmodel_omit   = self.results.fmodel_omit
+    fmodel_polder = self.results.fmodel_polder
     print('R factors for unmodified input model and data:', file=self.logger)
     self.broadcast_rfactors(fmodel_input.r_work(), fmodel_input.r_free())
     if (self.params.debug):
@@ -299,9 +240,11 @@ Optional output:
 
   # ---------------------------------------------------------------------------
 
-  def write_files(self, results, f_obs):
+  def write_files(self, f_obs):
     if (self.params.mask_output):
-      masks = [results.mask_data_all, results.mask_data_omit, results.mask_data_polder]
+      masks = [self.results.mask_data_all,
+               self.results.mask_data_omit,
+               self.results.mask_data_polder]
       filenames = ["all", "omit", "polder"]
       for mask_data, filename in zip(masks, filenames):
         mrcfile.write_ccp4_map(
@@ -310,43 +253,44 @@ Optional output:
           space_group = f_obs.space_group(),
           map_data    = mask_data,
           labels      = flex.std_string([""]))
-    mtz_dataset = results.mc_polder.as_mtz_dataset(
+    mtz_dataset = self.results.mc_polder.as_mtz_dataset(
       column_root_label = "mFo-DFc_polder")
     mtz_dataset.add_miller_array(
-      miller_array      = results.mc_omit,
+      miller_array      = self.results.mc_omit,
       column_root_label = "mFo-DFc_omit")
     if (self.params.debug):
       mtz_dataset.add_miller_array(
-        miller_array      = results.mc_biased,
+        miller_array      = self.results.mc_biased,
         column_root_label = "mFo-DFc_bias_omit")
     mtz_object = mtz_dataset.mtz_object()
     polder_file_name = "polder_map_coeffs.mtz"
     if (self.params.output_file_name_prefix is not None):
       polder_file_name = self.params.output_file_name_prefix + "_" + polder_file_name
     mtz_object.write(file_name = polder_file_name)
+    self.output_file_name = polder_file_name
     print('File %s was written.' % polder_file_name, file=self.logger)
 
   # ---------------------------------------------------------------------------
-  def print_validation(self, results):
-    vr = results.validation_results
+
+  def print_validation(self):
+    vr = self.results.validation_results
     if vr is None:
       return ''
-    print('Map 1: calculated Fobs with ligand')
-    print('Map 2: calculated Fobs without ligand')
-    print('Map 3: real Fobs data')
-    print('CC(1,2): %6.4f' % vr.cc12)
-    print('CC(1,3): %6.4f' % vr.cc13)
-    print('CC(2,3): %6.4f' % vr.cc23)
-    print('Peak CC:')
-    print('CC(1,2): %6.4f' % vr.cc12_peak)
-    print('CC(1,3): %6.4f' % vr.cc13_peak)
-    print('CC(2,3): %6.4f' % vr.cc23_peak)
-    print('q    D(1,2) D(1,3) D(2,3)')
+    print('Map 1: calculated Fobs with ligand', file=self.logger)
+    print('Map 2: calculated Fobs without ligand', file=self.logger)
+    print('Map 3: real Fobs data', file=self.logger)
+    print('CC(1,2): %6.4f' % vr.cc12, file=self.logger)
+    print('CC(1,3): %6.4f' % vr.cc13, file=self.logger)
+    print('CC(2,3): %6.4f' % vr.cc23, file=self.logger)
+    print('Peak CC:', file=self.logger)
+    print('CC(1,2): %6.4f' % vr.cc12_peak, file=self.logger)
+    print('CC(1,3): %6.4f' % vr.cc13_peak, file=self.logger)
+    print('CC(2,3): %6.4f' % vr.cc23_peak, file=self.logger)
+    print('q    D(1,2) D(1,3) D(2,3)', file=self.logger)
     for c,d12_,d13_,d23_ in zip(vr.cutoffs,vr.d12,vr.d13,vr.d23):
-      print('%4.2f %6.4f %6.4f %6.4f'%(c,d12_,d13_,d23_))
+      print('%4.2f %6.4f %6.4f %6.4f'%(c,d12_,d13_,d23_), file=self.logger)
     ###
     if(self.params.debug):
-      #box_1.write_ccp4_map(file_name="box_1_polder.ccp4")
       self.write_map_box(
         box      = vr.box_1,
         filename = "box_1_polder.ccp4")
@@ -390,7 +334,8 @@ Optional output:
 
   def run(self):
 
-    print('Using model file:', self.params.model_file_name, file=self.logger)
+    print('Using model file:', self.data_manager.get_default_model_name(),
+      file=self.logger)
     print('Using reflection file(s):', self.data_manager.get_miller_array_names(),
       file=self.logger)
 
@@ -401,28 +346,26 @@ Optional output:
     xrs = model.get_xray_structure()
     selection_bool = self.check_selection(pdb_hierarchy = ph)
 
-    f_obs, r_free_flags = self.get_fobs_rfree(crystal_symmetry = cs)
+    f_obs, r_free_flags = self.fmodel.f_obs(), self.fmodel.r_free_flags()
+
     print('Input data...', file=self.logger)
     print('  Reflection data:', f_obs.info().labels, file=self.logger)
-    if (r_free_flags is not None):
+    if (r_free_flags.info() is not None):
       print('  Free-R flags:', r_free_flags.info().labels, file=self.logger)
     else:
       print('  Free-R flags: not present or not found', file=self.logger)
     print('\nWorking crystal symmetry after inspecting all inputs:', file=self.logger)
     cs.show_summary(f=self.logger)
 
-    f_obs, r_free_flags = self.prepare_fobs_rfree(
+    if (f_obs.anomalous_flag()):
+      f_obs, r_free_flags = self.prepare_f_obs_and_flags_if_anomalous(
         f_obs        = f_obs,
         r_free_flags = r_free_flags)
 
-    model_basename = os.path.basename(self.params.model_file_name.split(".")[0])
+    model_basename = os.path.basename(
+      self.data_manager.get_default_model_name().split(".")[0])
     if (len(model_basename) > 0 and self.params.output_file_name_prefix is None):
       self.params.output_file_name_prefix = model_basename
-
-    mmtbx.utils.setup_scattering_dictionaries(
-      scattering_table = self.params.scattering_table,
-      xray_structure   = xrs,
-      d_min            = f_obs.d_min())
 
     polder_object = mmtbx.maps.polder.compute_polder_map(
       f_obs            = f_obs,
@@ -430,23 +373,24 @@ Optional output:
       model            = model,
       params           = self.params.polder,
       selection_string = self.params.solvent_exclusion_mask_selection)
-      #selection_bool = selection_bool)
+
     polder_object.validate()
     polder_object.run()
-    results = polder_object.get_results()
+    self.results = polder_object.get_results()
 
-    self.print_rfactors(results = results)
-    self.write_files(
-      results = results,
-      f_obs   = f_obs)
+    self.print_rfactors()
+    self.write_files(f_obs = f_obs)
     self.message = None
     if (not self.params.polder.compute_box):
-      self.message = self.print_validation(results = results)
+      self.message = self.print_validation()
 
     print ('*'*79, file=self.logger)
     print ('Finished', file=self.logger)
-    # results object not returned because it contains maps
 
 
   def get_results(self):
-    return group_args(message=self.message)
+    # results object not returned because it contains maps
+    return group_args(
+      message     = self.message,
+      output_file = self.output_file_name,
+      model       = self.data_manager.get_default_model_name())

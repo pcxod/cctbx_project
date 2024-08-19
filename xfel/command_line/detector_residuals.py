@@ -25,6 +25,7 @@ from matplotlib.patches import Polygon
 from matplotlib.colors import Normalize
 from matplotlib import cm
 from matplotlib.backends.backend_pdf import PdfPages
+from matplotlib.colors import LogNorm
 import numpy as np
 from libtbx.phil import parse
 import math
@@ -81,6 +82,11 @@ residuals {
   recompute_outliers = False
     .type = bool
     .help = If True, use sauter_poon to recompute outliers and remove them
+  delta_scalar = 50
+    .type = float
+    .help = For deltaXY and similar plots that show for each reflection the offset \
+            between the observed and predicted spot in mm, scale that offset by this \
+            value
   mcd_filter {
     enable = False
       .type = bool
@@ -204,6 +210,13 @@ plots {
     .help = For each panel, the radial displacements of each reflection are   \
             histogrammed.  The center is marked with a red line. Asymmetry    \
             indicates a panel not properly aligned in the radial direciton.
+  delta_vs_azimuthal_angle = False
+    .type = bool
+    .help = For each reflection, plot either overall, radial, or transverse   \
+            displacements vs. azimuthal angle, where the angle is between     \
+            (0,1,0), i.e. the vector pointing up in real space, and the XY    \
+            component of the vector from the sample to the observed spot      \
+            centroid. Plot is a 2D histogram on a log scale.
   intensity_vs_radials_2dhist = False
     .type = bool
     .help = 2D histogram of reflection intensities vs radial displacements.   \
@@ -390,7 +403,8 @@ def trumpet_plot(experiment, reflections, axis = None):
   axis.plot(two_thetas, tan_outer_deg, "g.")
   axis.plot(two_thetas, -tan_outer_deg, "g.")
 
-from xfel.command_line.cspad_detector_congruence import iterate_detector_at_level, iterate_panels, id_from_name, get_center, detector_plot_dict
+from xfel.command_line.cspad_detector_congruence import detector_plot_dict
+from serialtbx.detector import iterate_detector_at_level, iterate_panels, id_from_name, get_center
 from xfel.command_line.cspad_detector_congruence import Script as DCScript
 class Script(DCScript):
   ''' Class to parse the command line options. '''
@@ -460,7 +474,7 @@ class ResidualsPlotter(object):
 
     # initialize the color map
     norm = Normalize(vmin=vmin, vmax=vmax)
-    cmap = plt.cm.get_cmap(self.params.colormap)
+    cmap = plt.get_cmap(self.params.colormap)
     sm = cm.ScalarMappable(norm=norm, cmap=cmap)
     color_vals = np.linspace(vmin, vmax, 11)
     sm.set_array(color_vals) # needed for colorbar
@@ -472,7 +486,7 @@ class ResidualsPlotter(object):
 
     data = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value']).norms()
     norm, cmap, color_vals, sm = self.get_normalized_colors(data)
-    deltas = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value'])*self.delta_scalar
+    deltas = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value'])*self.params.residuals.delta_scalar
 
     x, y = panel.get_image_size_mm()
     offset = col((x, y, 0))/2
@@ -511,7 +525,7 @@ class ResidualsPlotter(object):
     assert panel is not None and ax is not None and bounds is not None
     data = reflections['delpsical.rad'] * (180/math.pi)
     norm, cmap, color_vals, sm = self.get_normalized_colors(data, vmin=-0.1, vmax=0.1)
-    deltas = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value'])*self.delta_scalar
+    deltas = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value'])*self.params.residuals.delta_scalar
 
     x, y = panel.get_image_size_mm()
     offset = col((x, y, 0))/2
@@ -524,7 +538,7 @@ class ResidualsPlotter(object):
     if self.params.residuals.mcd_filter.enable and len(reflections)>5:
       from xfel.metrology.panel_fitting import Panel_MCD_Filter
       MCD = Panel_MCD_Filter(lab_coords_x, lab_coords_y, data, i_panel = reflections["panel"][0],
-                      delta_scalar = self.delta_scalar, params = self.params)
+                      delta_scalar = self.params.residuals.delta_scalar, params = self.params)
       sX,sY,sPsi = MCD.scatter_coords()
       MCD.plot_contours(ax,show=False) # run this to pre-compute the center position
       ax.scatter(sX, sY, c = sPsi, norm=norm, cmap = cmap, linewidths=0, s=self.params.dot_size)
@@ -537,14 +551,14 @@ class ResidualsPlotter(object):
       if self.params.plots.include_scale_bar_in_pixels > 0:
         pxlsz0,pxlsz1 = panel.get_pixel_size()
         ax.plot([panel_center[0],panel_center[0]],
-                [panel_center[1],panel_center[1]+self.params.plots.include_scale_bar_in_pixels*pxlsz1*self.delta_scalar], 'k-')
-        ax.plot([panel_center[0],panel_center[0]+self.params.plots.include_scale_bar_in_pixels*pxlsz0*self.delta_scalar],
+                [panel_center[1],panel_center[1]+self.params.plots.include_scale_bar_in_pixels*pxlsz1*self.params.residuals.delta_scalar], 'k-')
+        ax.plot([panel_center[0],panel_center[0]+self.params.plots.include_scale_bar_in_pixels*pxlsz0*self.params.residuals.delta_scalar],
                 [panel_center[1],panel_center[1]], 'k-')
       ax.scatter(flex.mean(lab_coords_x), flex.mean(lab_coords_y), c='b', s=self.params.dot_size)
-      if self.params.residuals.mcd_filter.enable:
+      if self.params.residuals.mcd_filter.enable and len(reflections)>5:
         ax.scatter(MCD.robust_model_XY.location_[0],
                    MCD.robust_model_XY.location_[1], c='r', s=self.params.dot_size)
-      print(panel.get_name(), (flex.mean(lab_coords_x) - panel_center[0])/self.delta_scalar, (flex.mean(lab_coords_y) - panel_center[0])/self.delta_scalar)
+      print(panel.get_name(), (flex.mean(lab_coords_x) - panel_center[0])/self.params.residuals.delta_scalar, (flex.mean(lab_coords_y) - panel_center[0])/self.params.residuals.delta_scalar)
 
     return sm, color_vals
 
@@ -556,7 +570,7 @@ class ResidualsPlotter(object):
     assert panel is not None and ax is not None and bounds is not None
     data = reflections['delpsical.rad.pxlambda'] * (180/math.pi)
     norm, cmap, color_vals, sm = self.get_normalized_colors(data, vmin=-0.1, vmax=0.1)
-    deltas = (reflections['xyzcal.mm.pxlambda']-reflections['xyzobs.mm.value'])*self.delta_scalar
+    deltas = (reflections['xyzcal.mm.pxlambda']-reflections['xyzobs.mm.value'])*self.params.residuals.delta_scalar
 
     x, y = panel.get_image_size_mm()
     offset = col((x, y, 0))/2
@@ -575,7 +589,7 @@ class ResidualsPlotter(object):
     assert panel is not None and ax is not None and bounds is not None
     data = 12398.4/reflections['reflection_wavelength_from_pixels']
     norm, cmap, color_vals, sm = self.get_normalized_colors(data, vmin=self.min_energy, vmax=self.max_energy)
-    deltas = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value'])*self.delta_scalar
+    deltas = (reflections['xyzcal.mm']-reflections['xyzobs.mm.value'])*self.params.residuals.delta_scalar
 
     x, y = panel.get_image_size_mm()
     offset = col((x, y, 0))/2
@@ -598,7 +612,7 @@ class ResidualsPlotter(object):
     a = reflections['delpsical.rad']*180/math.pi
     b = reflections['radial_displacements']
 
-    fake_coords = flex.vec2_double(a, b) * self.delta_scalar
+    fake_coords = flex.vec2_double(a, b) * self.params.residuals.delta_scalar
 
     x, y = panel.get_image_size_mm()
     offset = col((x, y))/2
@@ -902,8 +916,6 @@ class ResidualsPlotter(object):
       plt.xlabel(r"N reflections with $\Delta\Psi$ > 0")
       plt.ylabel(r"N reflections with $\Delta\Psi$ < 0")
 
-    self.delta_scalar = 50
-
     # Iterate through the detectors, computing detector statistics at the per-panel level (IE one statistic per panel)
     # Per panel dictionaries
     rmsds = {}
@@ -1083,7 +1095,7 @@ class ResidualsPlotter(object):
       if params.plots.repredict_from_reflection_energies: self.detector_plot_refls(detector, reflections, r'%s$\Delta\Psi$ from mean pixel energies'%tag,
                                                                                    show=False, plot_callback=self.plot_obs_colored_by_deltapsi_pxlambda, colorbar_units=r"$\circ$")
       if params.plots.deltaXY_by_deltaXY:                 self.detector_plot_refls(detector, reflections, r'%s$\Delta$XY*%s'%(tag,
-                                                                                   self.delta_scalar), show=False, plot_callback=self.plot_deltas)
+                                                                                   self.params.residuals.delta_scalar), show=False, plot_callback=self.plot_deltas)
       if params.plots.manual_cdf:                         self.detector_plot_refls(detector, reflections, '%sSP Manual CDF'%tag,
                                                                                    show=False, plot_callback=self.plot_cdf_manually)
       if params.plots.deltaXY_histogram:                  self.detector_plot_refls(detector, reflections, r'%s$\Delta$XY Histograms'%tag,
@@ -1094,6 +1106,25 @@ class ResidualsPlotter(object):
                                                                                    show=False, plot_callback=self.plot_difference_vector_norms_histograms)
       if params.plots.radial_difference_histograms:       self.detector_plot_refls(detector, reflections, r'%sRadial differences'%tag,
                                                                                    show=False, plot_callback=self.plot_radial_difference_histograms)
+
+      if params.plots.delta_vs_azimuthal_angle:
+        # Plot deltas (XY, radial, transverse) vs. azimuthal angle
+        xy = flex.vec3_double(reflections["s1"].parts()[0],
+                              reflections["s1"].parts()[1],
+                              flex.double(len(reflections), 0))
+        angle = xy.angle((0, 1, 0), deg=True)
+        sel = xy.parts()[0] >= 0
+        subset = angle.select(sel)
+        angle.set_selected(sel, 180 + (180 - subset))
+
+        for column_name, caption in zip(["difference_vector_norms", "radial_displacements", "transverse_displacements"],
+                                        ["XY", "radial", "transverse"]):
+          fig = plt.figure()
+          plt.hist2d(angle.as_numpy_array(), reflections[column_name].as_numpy_array() * 1000, bins=180, norm=LogNorm())
+          plt.title(r"2d histogram of $\Delta$ %s vs azimuthal angle"%caption)
+          plt.xlabel("Azimuthal angle (deg)")
+          plt.ylabel(r"$\Delta$ %s ($\mu$m)"%caption)
+          plt.colorbar()
 
       if params.plots.intensity_vs_radials_2dhist and 'intensity.sum.value' in reflections:
         # Plot intensity vs. radial_displacement
@@ -1157,7 +1188,6 @@ class ResidualsPlotter(object):
 
       if params.plots.deltaPsi_vs_2theta_2dhist:
         # Plot delta psi vs. 2theta
-        from matplotlib.colors import LogNorm
         x = reflections['two_theta_obs'].as_numpy_array()
         y = (reflections['delpsical.rad']*180/math.pi).as_numpy_array()
         fig = plt.figure()
@@ -1233,9 +1263,9 @@ class ResidualsPlotter(object):
           if expt_id == 0:
             fig = plt.figure()
             plt.scatter(two_thetas, offset)
-            plt.title(u"%d: Ewald offset ($\AA^{-1}$) vs $2\\theta$ on %d spots"%(expt_id, len(two_thetas)))
-            plt.xlabel(u"$2\\theta (\circ)$")
-            plt.ylabel(u"Ewald offset ($\AA^{-1}$)")
+            plt.title(r"%d: Ewald offset ($\AA^{-1}$) vs $2\theta$ on %d spots"%(expt_id, len(two_thetas)))
+            plt.xlabel(r"$2\theta (\circ)$")
+            plt.ylabel(r"Ewald offset ($\AA^{-1}$)")
 
           array = refls.as_miller_array(experiments[expt_id])
           binner = array.setup_binner(d_min=2.0, n_bins=n_bins)
@@ -1261,9 +1291,9 @@ class ResidualsPlotter(object):
             print (bin_id, binner.bin_d_range(bin_number), sel.count(True), x[-1], y[-1])
           plt.plot(x, y, '-')
         plt.legend(legend)
-        plt.title(u"Binned $I/\sigma_I$ vs. Ewald offset")
-        plt.xlabel(u"Ewald offset ($\AA^{-1}$)")
-        plt.ylabel(u"Median $I/\sigma_I$")
+        plt.title(r"Binned $I/\sigma_I$ vs. Ewald offset")
+        plt.xlabel(r"Ewald offset ($\AA^{-1}$)")
+        plt.ylabel(r"Median $I/\sigma_I$")
 
         plt.figure()
         plt.title('Ewald offsets vs. two theta')
@@ -1511,7 +1541,7 @@ class ResidualsPlotter(object):
     if sm is not None and color_vals is not None:
       if colorbar_units is None:
         colorbar_units = "mm"
-      cb = ax.figure.colorbar(sm, ticks=color_vals)
+      cb = ax.figure.colorbar(sm, ticks=color_vals, ax=ax)
       cb.ax.set_yticklabels(["%3.2f %s"%(i,colorbar_units) for i in color_vals])
 
     plt.title(title)

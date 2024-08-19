@@ -34,7 +34,8 @@ master_phil = libtbx.phil.parse("""
   ccp4_map_file = None
     .help = Input map file (CCP4/mrc format).
     .short_caption = Input map file
-    .type = str
+    .type = path
+    .style = file_type:ccp4_map bold input_file
   mask_file_name = None
     .help = Input mask file (CCP4/mrc format).
     .short_caption = Input mask file
@@ -182,7 +183,7 @@ master_phil = libtbx.phil.parse("""
   increase_box_cushion_and_atom_radius_for_soft_mask = True
     .type = bool
     .help = Expand cushion and atom radii by soft_mask_radius
-    .short_caption = Increase box cusion and atom radius for soft mask
+    .short_caption = Increase box cushion and atom radius for soft mask
 
   soft_mask_extract_unique = True
     .type = bool
@@ -370,6 +371,14 @@ master_phil = libtbx.phil.parse("""
     .help = Remove all output map labels
     .short_caption = Remove labels
 
+  invert_hand = False
+    .type = bool
+    .help = Just before writing out the map, swap the order of all sections \
+             in Z.  This will change the hand of the map. Note that this\
+             removes any correspondence to models (these are not inverted). \
+             If you use this, be sure to apply it to all your starting maps.\
+    .short_caption = Invert hand of map
+
   gui
     .help = "GUI-specific parameter required for output directory"
   {
@@ -397,10 +406,7 @@ def get_model_from_inputs(
   print_statistics.make_sub_header("pdb model", out = log)
 
   if pdb_hierarchy:  # convert to model object . XXX should come in this way
-    model =  mmtbx.model.manager(
-          model_input = pdb_hierarchy.as_pdb_input(),
-          crystal_symmetry = crystal_symmetry,
-          log = log)
+    model =  pdb_hierarchy.as_model_manager(crystal_symmetry = crystal_symmetry)
 
   if len(file_names)>0:
     file_name = file_names[0]
@@ -558,10 +564,9 @@ def check_parameters(inputs = None, params = None,
       raise Sorry("Please set resolution for extract_unique")
     if (not params.symmetry) and (not params.symmetry_file) and \
         (not ncs_object):
-      raise Sorry(
-        "Please supply a symmetry file or symmetry for extract_unique (you "+
-       "\ncan try symmetry = ALL if you do not know your symmetry or "+
-        "symmetry = C1 if \nthere is none)")
+      params.symmetry="ALL"
+      print("Setting symmetry=ALL as no symmetry information supplied",
+        file = log)
     if params.mask_atoms:
       raise Sorry("You cannot set mask_atoms with extract_unique")
 
@@ -670,6 +675,10 @@ def modify_params(params = None,
        "keep_map_size is False\n", file = log)
     params.output_format = remove_element(params.output_format, element = 'mtz')
 
+  if params.output_external_origin and (not params.keep_origin):
+    raise Sorry(
+      "If you specify an external origin you must set keep_origin=True")
+
   if (write_output_files) and ("mtz" in params.output_format) and (
        (params.extract_unique)):
     print("\nNOTE: Skipping write of mtz file as extract_unique = True\n",
@@ -682,6 +691,13 @@ def modify_params(params = None,
   if params.output_origin_match_this_file or params.bounds_match_this_file:
     params = get_origin_or_bounds_from_ccp4_file(params = params, log = log)
 
+
+  # Check that bounds are None or tuples of three
+
+  if params.lower_bounds and len(params.lower_bounds) != 3:
+    raise Sorry("Need 3 values for lower_bounds")
+  if params.upper_bounds and len(params.upper_bounds) != 3:
+    raise Sorry("Need 3 values for upper_bounds")
 
   if params.output_origin_grid_units is not None and params.keep_origin:
     params.keep_origin = False
@@ -848,6 +864,9 @@ def print_notes(params = None,
     print("Map unit cell as grid units:  (%s, %s, %s)" %(
       tuple(ccp4_map.map_data().all())), file = log)
 
+    if params.invert_hand:
+      print("\nOutput map will be inverted hand "+
+         "(swapping order of sections in Z)", file = log)
 
 def run(args,
      ncs_object = None,  # ncs object
@@ -1106,7 +1125,7 @@ def run(args,
        gridding = params.output_unit_cell_grid)
     if mam.map_manager().ncs_object():
       # mam.map_manager().ncs_object().display_all()
-      from scitbx.array_family import flex
+
       mam.map_manager().ncs_object().set_shift_cart(
         mam.map_manager().shift_cart())
 
@@ -1134,6 +1153,9 @@ def run(args,
   if params.remove_output_map_labels:
     mam.map_manager().remove_labels()
 
+  if params.invert_hand:
+    mam.map_manager().invert_hand()
+
   # Print out any notes about the output files
   print_notes(params = params, mam = mam,
     crystal_symmetry = crystal_symmetry,
@@ -1144,6 +1166,7 @@ def run(args,
   #  keep_origin == False leave origin at (0, 0, 0)
   #  keep_origin == True: we shift everything back to where it was,
   #  output_origin_grid_units = 10, 10, 10: output origin is at (10, 10, 10)
+  #  output_external_origin = 10,10,10; set output_external_origin value
 
   print("\nBox cell dimensions: (%.2f, %.2f, %.2f) A" %(
       mam.map_manager().crystal_symmetry().unit_cell().parameters()[:3]),
@@ -1177,7 +1200,8 @@ def run(args,
       box_crystal_symmetry = mam.map_manager().crystal_symmetry(),
       pdb_outside_box_msg = "",
       gridding_first = getattr(mam, 'gridding_first', (0, 0, 0)),
-      gridding_last = getattr(mam, 'gridding_last', mam.map_manager().map_data().all()),
+      gridding_last = getattr(mam,
+          'gridding_last', mam.map_manager().map_data().all()),
       solvent_content = params.solvent_content,
       origin_shift_grid_units = [
          -x for x in mam.map_manager().origin_shift_grid_units],
@@ -1187,17 +1211,27 @@ def run(args,
     map_manager = mam.map_manager()
     ncs_object = mam.map_manager().ncs_object()
     from iotbx.data_manager import DataManager
-    dm = DataManager(datatypes = ['model', 'ncs_spec', 'real_map', 'miller_array'])
+    dm = DataManager(datatypes = [
+       'model', 'ncs_spec', 'real_map', 'miller_array'])
     dm.set_overwrite(True)
+
+    if params.output_external_origin:
+      assert (isinstance(params.output_external_origin,tuple) or \
+             isinstance(params.output_external_origin,list)) and \
+             len(params.output_external_origin) == 3
+      map_manager.set_output_external_origin(params.output_external_origin)
+      print("Set output_external_origin to %s" %(
+       str(params.output_external_origin)), file = log)
 
     # Write PDB file
     if model:
       if(params.output_file_name_prefix is None):
         filename = "%s_box"%output_prefix
       else: filename = "%s"%params.output_file_name_prefix
-      dm.write_model_file(model, filename = filename, extension = ".pdb")
+      full_filename = dm.write_model_file(
+        model, filename = filename, format = "pdb")
       print("Writing boxed PDB with box unit cell to %s" %(
-          "%s.pdb" %filename), file = log)
+          "%s" %full_filename), file = log)
 
     # Write NCS file if NCS
     if ncs_object and ncs_object.max_operators()>0:

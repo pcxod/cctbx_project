@@ -119,6 +119,9 @@ phil_str = '''
     output_dir = "."
       .type = str
       .help = Directory for output files
+    add_output_dir_option = True
+      .type = bool
+      .help = If True, include output.output_dir on the command line.
     split_logs = True
       .type = bool
       .help = Option to split error and log files into separate per process
@@ -280,8 +283,15 @@ def get_submission_id(result, method):
     print('Submission', 'ID', 'is', submission_id)
     return submission_id
 
-def do_submit(command, submit_path, stdoutdir, mp_params, job_name, dry_run=False):
-  submit_command = get_submit_command_chooser(command, submit_path, stdoutdir, mp_params, job_name=job_name)
+def do_submit(command, submit_path, stdoutdir, mp_params, log_name="log.out", err_name="log.err", job_name=None, dry_run=False):
+  submit_command = get_submit_command_chooser(command,
+                                              submit_path,
+                                              stdoutdir,
+                                              mp_params,
+                                              log_name=log_name,
+                                              err_name=err_name,
+                                              job_name=job_name,
+                                              )
   if mp_params.method in ['lsf', 'sge', 'pbs']:
     parts = submit_command.split(" ")
     script = open(parts.pop(-1), "rb")
@@ -289,7 +299,6 @@ def do_submit(command, submit_path, stdoutdir, mp_params, job_name, dry_run=Fals
     command = " ".join(parts + [run_command.decode()])
   else:
     command = submit_command
-  print(command)
   submit_command = str(submit_command) # unicode workaround
 
   if dry_run:
@@ -301,8 +310,8 @@ def do_submit(command, submit_path, stdoutdir, mp_params, job_name, dry_run=Fals
     if submission_id > 0:
       return submission_id
     else:
-      stdout = os.open(os.path.join(stdoutdir, 'log.out'), os.O_WRONLY|os.O_CREAT|os.O_TRUNC); os.dup2(stdout, 1)
-      stderr = os.open(os.path.join(stdoutdir, 'log.err'), os.O_WRONLY|os.O_CREAT|os.O_TRUNC); os.dup2(stderr, 2)
+      stdout = os.open(os.path.join(stdoutdir, 'submit.log'), os.O_WRONLY|os.O_CREAT|os.O_TRUNC); os.dup2(stdout, 1)
+      stderr = os.open(os.path.join(stdoutdir, 'submit.err'), os.O_WRONLY|os.O_CREAT|os.O_TRUNC); os.dup2(stderr, 2)
       os.execv(command.split()[0], command.split())
   else:
     try:
@@ -357,7 +366,6 @@ class Script(object):
       print("Submitting run %d of experiment %s"%(int(params.input.run_num), params.input.experiment))
     else:
       print("Submitting run %s"%(params.input.run_num))
-
     trial, trialdir = get_trialdir(params.output.output_dir, params.input.run_num, params.input.trial, params.input.rungroup, params.input.task)
     params.input.trial = trial
     print("Using trial", params.input.trial)
@@ -454,21 +462,19 @@ class Script(object):
 
     for arg in dispatcher_args:
       extra_str += " %s" % arg
-
     if params.input.target is not None:
       extra_str += " %s" % params.input.target
 
     if hasattr(dispatcher_params, 'input') and hasattr(dispatcher_params.input, 'rungroup') and params.input.rungroup is not None:
       data_str += " input.rungroup=%d" % params.input.rungroup
 
-    command = "%s %s output.output_dir=%s %s %s" % (
-      params.input.dispatcher, data_str, output_dir,
-      logging_str, extra_str
-    )
+    command = f"{params.input.dispatcher} {data_str} {logging_str} {extra_str}"
+    if params.output.add_output_dir_option:
+      command += f" output.output_dir={output_dir}"
 
     job_name = "r%s"%params.input.run_num
 
-    submission_id = do_submit(command, submit_path, stdoutdir, params.mp, job_name=job_name, dry_run=params.dry_run)
+    submission_id = do_submit(command, submit_path, stdoutdir, params.mp, log_name="log.out", err_name="err.out", job_name=job_name, dry_run=params.dry_run)
     print("Job submitted.  Output in", trialdir)
     return submission_id
 

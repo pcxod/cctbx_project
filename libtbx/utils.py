@@ -801,7 +801,11 @@ def show_exception_info_if_full_testing(prefix="EXCEPTION_INFO: "):
     if (is_done()): continue
     out.write(msg)
     flush = getattr(out, "flush", None)
-    if (flush is not None): flush()
+    if (flush is not None):
+      try:
+        flush()
+      except Exception as e:
+        pass # can happen if stale file handle
     done.append(out)
   return msg
 
@@ -1523,7 +1527,8 @@ class multi_out(object):
         old_label,
         new_label,
         new_file_object,
-        new_atexit_send_to=None):
+        new_atexit_send_to=None,
+        close_old_stream=True):
     """
     Replaces a registered stream with a new file. Dumps everything accumulated
     in stream to the file.
@@ -1537,11 +1542,14 @@ class multi_out(object):
     new_label : str
     new_file_object : file
     new_atexit_send_to : file, optional
+    close_old_stream :  bool, close existing stream
     """
     i = self.labels.index(old_label)
     old_file_object = self.file_objects[i]
-    new_file_object.write(old_file_object.getvalue())
-    old_file_object.close()
+    if hasattr(old_file_object, 'getvalue'):
+      new_file_object.write(old_file_object.getvalue())
+    if close_old_stream:
+      old_file_object.close()
     self.labels[i] = new_label
     self.file_objects[i] = new_file_object
     self.atexit_send_to[i] = new_atexit_send_to
@@ -1559,7 +1567,11 @@ class multi_out(object):
   def flush(self):
     for file_object in self.file_objects:
       flush = getattr(file_object, "flush", None)
-      if (flush is not None): flush()
+      if (flush is not None):
+        try:
+          flush()
+        except Exception as e:
+          pass # was closed
 
   def write(self, str):
     for file_object in self.file_objects:
@@ -2352,7 +2364,11 @@ def try_send_to_trash(path_name, delete_if_not_available=False,
         raise Sorry("This function not supported because the required module is "+
           "not installed.")
     else :
-      send2trash.send2trash(path_name)
+      try:
+        send2trash.send2trash(path_name)
+      except Exception as e:
+        print("Unable to send the directory %s to trash" %(path_name))
+        return 1 # indicate failure
 
 if sys.hexversion >= 0x03000000:
   unicode = str
@@ -2508,3 +2524,99 @@ git lfs install --local
 git lsf pull
 """%path)
   return not test
+
+def display_context(text, file_name = 'file name', n_context = 5,
+   search_word = None, required_word= None,
+   excluded_words = None, category = None,
+    quiet = None,
+   always_excluded_words = None):
+  ''' Search lines in text for search_word and select blocks of size
+    n_context on either side. If context_word appears, mark that line
+
+    params: text: block of text
+    params: n_context: number of lines on either side of search word to keep
+    params: search_word:  word to find
+    params: required_word: another word to find (must have both in block
+            if required_word is set)
+    params: excluded_words: if any are present in text_block, skip it
+    params: category: category to pass on in group_args
+    params: file_name: file_name (title or name of file) to pass on in group_args
+    params: always_excluded_words: add to excluded words
+  '''
+
+  text_block_list = []
+  from libtbx import group_args
+  lines = text.splitlines()
+  if not quiet:
+    print("\n"+79*"=")
+    print(
+    "Searching %s with Search word: %s  Required word: %s Excluded word: %s" %(
+           file_name, search_word, required_word, excluded_words))
+    print("\n"+79*"=")
+
+
+  if not excluded_words: excluded_words = []
+  if not always_excluded_words: always_excluded_words = []
+  max_working_lines = 2*n_context
+  working_lines = []
+  for i in range(len(lines)):
+    working_lines.append(lines[i])
+    if len(working_lines) > max_working_lines:
+      working_lines = working_lines[1:]
+    working_lines_text = "\n".join(working_lines)
+    if lines[i].find(search_word)>-1  and (
+       not lines[i].strip().startswith("#")):
+      text_block = ""
+      first_line_number = max(0,i-n_context)
+      last_line_number = min(len(lines), i+n_context+1)
+      for ll in lines[first_line_number: last_line_number]:
+        if ll.find(search_word)> -1:
+          text_block += "  ** %s\n" %(ll)
+        else:
+          text_block += "     %s\n" %(ll)
+      skip = False
+      for x in excluded_words + always_excluded_words:
+        if text_block.find(x) > -1:
+          skip = True
+        if working_lines_text.find(x) > -1: # allow backwards further
+          skip = True
+      if skip:
+        continue
+      if required_word and  (text_block.find(required_word) < 0):
+        continue
+
+      if not quiet:
+        print("\n%s at line %s. Search word: %s  Required word: %s" %(
+          file_name, first_line_number+1, search_word, required_word))
+        print(text_block)
+      info = group_args(group_args_type = 'text block',
+        category = category,
+        file_name = file_name,
+        search_word = search_word,
+        required_word = required_word,
+        excluded_words = excluded_words,
+        always_excluded_words = always_excluded_words,
+        text_block = text_block,
+        line_number = i+1,
+        )
+      text_block_list.append(info)
+  return text_block_list
+
+
+class timer:
+  '''
+  Context manager for timing blocks of code
+  https://stackoverflow.com/questions/33987060/python-context-manager-that-measures-time
+
+  from libtbx.utils import timer
+
+  with timer():
+    <block of code to be timed>
+  '''
+  def __enter__(self):
+    self.time = time.perf_counter()
+    return self
+
+  def __exit__(self, type, value, traceback):
+    self.time = time.perf_counter() - self.time
+    print('Elapsed time (s): {}'.format(self.time))

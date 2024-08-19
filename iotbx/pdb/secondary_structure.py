@@ -48,7 +48,7 @@ from __future__ import absolute_import, division, print_function
 #
 
 from libtbx.utils import Sorry
-import libtbx.phil
+
 from libtbx import adopt_init_args
 import sys
 from iotbx.pdb.hybrid_36 import hy36encode, hy36decode
@@ -81,7 +81,7 @@ def segments_are_similar(atom_selection_1=None,
     asc=hierarchy.atom_selection_cache()
     sel=asc.selection(string = atom_selection_1)
     try:
-      h1=hierarchy.deep_copy().select(sel)  # keep original hierarchy too
+      h1=hierarchy.select(sel, copy_atoms=True)  # detach from original hierarchy
       number_self=h1.overall_counts().n_residues
     except Exception as e:
       return False
@@ -89,7 +89,7 @@ def segments_are_similar(atom_selection_1=None,
     asc=hierarchy.atom_selection_cache()
     sel=asc.selection(string = atom_selection_2)
     try:
-      h2=hierarchy.deep_copy().select(sel)
+      h2=hierarchy.select(sel, copy_atoms=True)
       number_other=h2.overall_counts().n_residues
     except Exception as e:
       return False
@@ -102,7 +102,7 @@ def segments_are_similar(atom_selection_1=None,
     atom_selection="(%s) and (%s)" %(atom_selection_1,atom_selection_2)
     sel=asc.selection(string = atom_selection)
     try:
-      h12=hierarchy.deep_copy().select(sel)
+      h12=hierarchy.select(sel, copy_atoms=True)
       number_both=h12.overall_counts().n_residues
     except Exception as e:
       return False
@@ -273,7 +273,7 @@ class registration_atoms:
        self.strand_1b.as_atom_selections(), self.strand_2b.as_atom_selections())
     asc=self.hierarchy.atom_selection_cache()
     sel=asc.selection(string = atom_selection)
-    ph=self.hierarchy.deep_copy().select(sel)  # keep original hierarchy too
+    ph=self.hierarchy.select(sel, copy_atoms=True)  # detach from original hierarchy
     # now ph is list of CA by residue.  Find the position of our N or O
 
     if not self.registration_1 or not self.registration_2:
@@ -358,8 +358,11 @@ class structure_base(object):
   def as_pdb_str(self):
     return None
 
+  def as_pdb_or_mmcif_str(self):
+    return None
+
   def __str__(self):
-    return self.as_pdb_str()
+    return self.as_pdb_or_mmcif_str()
 
   @staticmethod
   def convert_resseq(resseq):
@@ -473,7 +476,7 @@ class structure_base(object):
 
     asc=hierarchy.atom_selection_cache()
     sel = asc.selection(string = atom_selection)
-    ph=hierarchy.deep_copy().select(sel)
+    ph=hierarchy.select(sel, copy_atoms=True)
     return ph.overall_counts().n_residues
 
   def present_in_hierarchy(self, hierarchy):
@@ -495,6 +498,35 @@ class structure_base(object):
             return True
     return False
 
+  def _change_residue_numbering_in_place_helper(self, renumbering_dictionary, se=["start", "end"]):
+    """ Changes residue numbers and insertion codes in annotations.
+    For cases where one needs to renumber hierarchy and keep annotations
+    consisten with the new numbering.
+    Not for cases where residues removed or added.
+    Therefore residue name stays the same.
+
+    Called from derived classes.
+
+    Args:
+        renumbering_dictionary (_type_): data structure to match old and new numbering:
+        {'chain id':
+          {(old resseq, icode):(new resseq, icode)}
+        }
+        se: labels for start and end. Also can be ["cur", "prev"] in sheet registrations
+    """
+    for start_end in se:
+      chain_id_attr = "%s_chain_id" % start_end
+      resseq_attr  = "%s_resseq" % start_end
+      icode_attr = "%s_icode" % start_end
+      chain_dic = renumbering_dictionary.get(getattr(self, chain_id_attr), None)
+      if chain_dic is not None:
+          resseq, icode = getattr(self, resseq_attr), getattr(self, icode_attr)
+          new_resseq, new_icode = chain_dic.get((resseq, icode), (None, None))
+          if new_resseq is not None and new_icode is not None:
+              setattr(self, resseq_attr, new_resseq)
+              setattr(self, icode_attr, new_icode)
+
+
   def count_h_bonds(self,hierarchy=None,
        max_h_bond_length=None,ss_by_chain=False):
     "Count good and poor H-bonds in this hierarchy"
@@ -511,12 +543,12 @@ class structure_base(object):
 
     asc=hierarchy.atom_selection_cache()
     sel = asc.selection(string = atom_selection)
-    ph=hierarchy.deep_copy().select(sel)
+    ph=hierarchy.select(sel, copy_atoms=True)
 
     from mmtbx.secondary_structure.find_ss_from_ca import \
       find_secondary_structure
     fss=find_secondary_structure(hierarchy=ph,
-      user_annotation_text=self.as_pdb_str(),
+      user_annotation_text=self.as_pdb_or_mmcif_str(),
       force_secondary_structure_input=True,
       combine_annotations=False,
       ss_by_chain=ss_by_chain,
@@ -589,10 +621,11 @@ class structure_base(object):
     if atom_selection:
       asc=hierarchy.atom_selection_cache()
       sel = asc.selection(string = atom_selection)
-      ph=hierarchy.deep_copy().select(sel)  #ph = needed part of hierarchy
+      ph=hierarchy.select(sel, copy_atoms=True)  #ph = needed part of hierarchy
       if ph.overall_counts().n_residues>0:
         return True
     return False
+
 
 
 class annotation(structure_base):
@@ -643,11 +676,11 @@ class annotation(structure_base):
       for helix_row in helix_loop.iterrows():
         try:
           h = pdb_helix.from_cif_row(helix_row, serial)
-          serial += 1
+          if h is not None:
+            helices.append(h)
+            serial += 1
         except ValueError:
           print("Bad HELIX records!", file=log)
-        else:
-          helices.append(h)
     sheets = []
     struct_sheet_loop = cif_block.get_loop_or_row("_struct_sheet")
     struct_sheet_order_loop = cif_block.get_loop_or_row("_struct_sheet_order")
@@ -1067,6 +1100,24 @@ class annotation(structure_base):
         filtered_helices.append(h)
     self.helices = filtered_helices
 
+  def change_residue_numbering_in_place(self, renumbering_dictionary):
+    """ Changes residue numbers and insertion codes in annotations.
+    For cases where one needs to renumber hierarchy and keep annotations
+    consisten with the new numbering.
+    Not for cases where residues removed or added.
+    Therefore residue name stays the same.
+
+    Args:
+        renumbering_dictionary (_type_): data structure to match old and new numbering:
+        {'chain id':
+          {(old resseq, icode):(new resseq, icode)}
+        }
+    """
+    for h in self.helices:
+      h.change_residue_numbering_in_place(renumbering_dictionary)
+    for sh in self.sheets:
+      sh.change_residue_numbering_in_place(renumbering_dictionary)
+
   def as_cif_loops(self):
     """
     Returns list of loops needed to represent SS annotation. The first for
@@ -1194,6 +1245,30 @@ class annotation(structure_base):
       loops.append(struct_sheet_hbond_loop)
     return loops
 
+  def as_mmcif_str(self, data_block_name=None):
+    cif_object = iotbx.cif.model.cif()
+    if data_block_name is None:
+      data_block_name = "phenix"
+    cif_object[data_block_name] = self.as_cif_block()
+    from six.moves import cStringIO as StringIO
+    f = StringIO()
+    cif_object.show(out = f)
+    return f.getvalue()
+
+  def as_cif_block(self):
+    cif_block = iotbx.cif.model.block()
+    ss_cif_loops = self.as_cif_loops()
+    for loop in ss_cif_loops:
+      cif_block.add_loop(loop)
+    return cif_block
+
+  def fits_in_pdb_format(self):
+    for helix in self.helices :
+      if (not helix.fits_in_pdb_format()):  return False
+    for sheet in self.sheets :
+      if (not sheet.fits_in_pdb_format()):  return False
+    return True
+
   def as_pdb_str(self):
     records = []
     for helix in self.helices :
@@ -1201,6 +1276,13 @@ class annotation(structure_base):
     for sheet in self.sheets :
       records.append(sheet.as_pdb_str())
     return "\n".join(records)
+
+  def as_pdb_or_mmcif_str(self, target_format = 'pdb'):
+    # Return str in target format if possible, otherwise in mmcif
+    if target_format == 'pdb' and self.fits_in_pdb_format():
+      return self.as_pdb_str()
+    else:
+      return self.as_mmcif_str()
 
   def as_restraint_groups(self, log=sys.stdout, prefix_scope="",
       add_segid=None):
@@ -1331,11 +1413,10 @@ class annotation(structure_base):
   def split_sheets(self):
     "Split all multi-strand sheets into 2-strand sheets"
     new_sheets=[]
-    from copy import deepcopy
     for sheet in self.sheets:
       new_sheets+=sheet.split(starting_sheet_id_number=len(new_sheets)+1)
     return annotation(
-      helices=deepcopy(self.helices),
+      helices=copy.deepcopy(self.helices),
       sheets=new_sheets)
 
   def merge_sheets(self):
@@ -1343,7 +1424,6 @@ class annotation(structure_base):
     # Assumes that all the sheets are non-overlapping
     # First run sheet.split() on all sheets or split_sheets on the annotation
     #  as this requires 2-strand sheets (not 3 or more)
-    from copy import deepcopy
 
     sheet_pointer_0={}
     sheet_pointer_1={}
@@ -1370,7 +1450,7 @@ class annotation(structure_base):
         if key in sheet_pointer_0.keys() and (
             iter==1 or not key in sheet_pointer_1.keys()):
           used_strand_selections.append(key)
-          working_sheet=deepcopy(sheet_pointer_0.get(key))
+          working_sheet=copy.deepcopy(sheet_pointer_0.get(key))
           new_sheets.append(working_sheet)  # now we will extend this sheet
 
           second_strand=working_sheet.strands[1] # second strand
@@ -1383,8 +1463,8 @@ class annotation(structure_base):
             if not next_sheet: break
             used_strand_selections.append(next_key)
 
-            next_strand=deepcopy(next_sheet.strands[1])
-            next_registration=deepcopy(next_sheet.registrations[1])
+            next_strand=copy.deepcopy(next_sheet.strands[1])
+            next_registration=copy.deepcopy(next_sheet.registrations[1])
 
             working_sheet.add_strand(next_strand)
             working_sheet.add_registration(next_registration)
@@ -1404,7 +1484,7 @@ class annotation(structure_base):
         strand.strand_id=strand_number
 
     # Now new_sheets has strands arranged in sheets.
-    new_annotation=deepcopy(self)
+    new_annotation=copy.deepcopy(self)
     new_annotation.sheets=new_sheets
     return new_annotation
 
@@ -1449,7 +1529,7 @@ class annotation(structure_base):
       return None # nothing to do
     asc=hierarchy.atom_selection_cache()
     sel = asc.selection(string = atom_selection)
-    ph=hierarchy.deep_copy().select(sel)  #ph = needed part of hierarchy
+    ph=hierarchy.select(sel, copy_atoms=True)  #ph = needed part of hierarchy
     # Split all sheets into pairs
     a1=self.split_sheets()
     a2=other.split_sheets()
@@ -1518,10 +1598,9 @@ class annotation(structure_base):
       sheet_or_helix_list=self.sheets)
     new_helices=self.select_best_overlapping_annotations(hierarchy=hierarchy,
       sheet_or_helix_list=self.helices)
-    from copy import deepcopy
     new_annotation=annotation(
-      helices=deepcopy(new_helices),
-      sheets=deepcopy(new_sheets))
+      helices=copy.deepcopy(new_helices),
+      sheets=copy.deepcopy(new_sheets))
     return new_annotation.merge_sheets()
 
   def select_best_overlapping_annotations(self,hierarchy=None,
@@ -1747,7 +1826,7 @@ class annotation(structure_base):
     def sort_strings(h):
       sorted=[]
       for x in h:
-        sorted.append(x.as_pdb_str(set_id_zero=True))
+        sorted.append(x.as_pdb_str(set_id_zero=True, force_format = True))
       sorted.sort()
       return sorted
 
@@ -1796,6 +1875,7 @@ class annotation(structure_base):
 class pdb_helix(structure_base):
   _helix_class_array = ['unknown','alpha', 'unknown', 'pi', 'unknown',
         '3_10', 'unknown', 'unknown', 'unknown', 'unknown', 'unknown']
+  _cif_helix_classes = {'HELX_RH_AL_P': 1, 'HELX_RH_PI_P':3, 'HELX_RH_3T_P':5}
 
   def __init__(self,
         serial,
@@ -1847,9 +1927,22 @@ class pdb_helix(structure_base):
   def helix_class_to_str(cls, h_class):
     return cls._helix_class_array[h_class]
 
+  @classmethod
+  def get_helix_class(cls, cif_row):
+    conf_type_class = cif_row.get('_struct_conf.conf_type_id', None)
+    if conf_type_class not in ['HELX_P', 'HELX_RH_AL_P', 'HELX_RH_PI_P', 'HELX_RH_3T_P']:
+      return None
+    if conf_type_class == 'HELX_P':
+      pdbx_class = int(cif_row.get('_struct_conf.pdbx_PDB_helix_class', 0))
+      return cls._helix_class_array[pdbx_class]
+    else:
+      return cls._helix_class_array[cls._cif_helix_classes[conf_type_class]]
 
   @classmethod
   def from_cif_row(cls, cif_row, serial):
+    h_class = cls.get_helix_class(cif_row)
+    if h_class is None:
+      return None
     start_resname = choose_correct_cif_record(
         cif_row,
         '_struct_conf.beg_auth_comp_id',
@@ -1899,7 +1992,7 @@ class pdb_helix(structure_base):
       end_chain_id=end_chain_id,
       end_resseq=cls.convert_resseq(end_resseq),
       end_icode=cls.parse_cif_insertion_code(cif_row.get('_struct_conf.pdbx_end_PDB_ins_code', '.')),
-      helix_class=cls.helix_class_to_str(int(cif_row.get('_struct_conf.pdbx_PDB_helix_class',0))),
+      helix_class=h_class,
       helix_selection=None,
       comment=comment,
       length=length)
@@ -2061,7 +2154,30 @@ class pdb_helix(structure_base):
     result['pdbx_PDB_helix_length'] = self.length
     return result
 
-  def as_pdb_str(self, set_id_zero=False):
+  def as_pdb_or_mmcif_str(self, target_format = 'pdb'):
+    # Return str in target format if possible, otherwise in mmcif
+    if target_format == 'pdb' and self.fits_in_pdb_format():
+      return self.as_pdb_str()
+    else:
+      return self.as_mmcif_str()
+
+  def fits_in_pdb_format(self):
+    if len(self.start_resname.strip()) > 3: return False
+    if len(self.end_resname.strip()) > 3: return False
+    if len(self.start_chain_id.strip()) > 2: return False
+    if len(self.end_chain_id.strip()) > 2: return False
+    return True
+
+  def as_mmcif_str(self):
+    ann = annotation(helices = [self], sheets = [])
+    text = ann.as_mmcif_str()
+    return text
+
+  def as_pdb_str(self, set_id_zero=False, force_format = False):
+    if (not force_format) and (not self.fits_in_pdb_format()):
+      raise AssertionError(
+       "Helix does not fit in PDB format. "+
+       "Please fix code to use as_pdb_or_mmcif_str instead of as_pdb_str")
     def h_class_to_pdb_int(h_class):
       h_class_int = self.helix_class_to_int(h_class)
       if h_class_int == 0:
@@ -2146,6 +2262,10 @@ class pdb_helix(structure_base):
       if getattr(self,key,None) != getattr(other,key,None):
         return False
     return True
+
+  def change_residue_numbering_in_place(self, renumbering_dictionary):
+    self._change_residue_numbering_in_place_helper(renumbering_dictionary)
+
 
 #=============================================================================
 #       ad88888ba  88        88 88888888888 88888888888 888888888888
@@ -2249,6 +2369,9 @@ class pdb_strand(structure_base):
   def set_new_chain_ids(self, new_chain_id):
     self.start_chain_id = new_chain_id
     self.end_chain_id = new_chain_id
+
+  def change_residue_numbering_in_place(self, renumbering_dictionary):
+    self._change_residue_numbering_in_place_helper(renumbering_dictionary)
 
   def sense_as_cif(self):
     if self.sense == 0:
@@ -2438,6 +2561,9 @@ class pdb_strand_register(structure_base):
         resid_prev, self.prev_atom.strip())
     return sele_curr, sele_prev
 
+  def change_residue_numbering_in_place(self, renumbering_dictionary):
+    self._change_residue_numbering_in_place_helper(renumbering_dictionary, se=["cur", "prev"])
+
   def is_same_as(self,other=None):
 
     if not other: return False
@@ -2460,8 +2586,7 @@ class pdb_strand_register(structure_base):
 
   def reversed(self):
     # swap cur and prev
-    from copy import deepcopy
-    new_register=deepcopy(self)
+    new_register=copy.deepcopy(self)
     for key in [
         'atom',
         'resname',
@@ -2726,6 +2851,14 @@ class pdb_sheet(structure_base):
         self.renumber_strands()
         self.erase_hbond_list()
 
+  def change_residue_numbering_in_place(self, renumbering_dictionary):
+    self.erase_hbond_list()
+    for st in self.strands:
+      st.change_residue_numbering_in_place(renumbering_dictionary)
+    for reg in self.registrations:
+      if reg is not None:
+        reg.change_residue_numbering_in_place(renumbering_dictionary)
+
   def deep_copy(self):
     return copy.deepcopy(self)
 
@@ -2756,7 +2889,30 @@ class pdb_sheet(structure_base):
       return len(self.hbond_list)
     return 0
 
-  def as_pdb_str(self, strand_id=None, set_id_zero=False):
+  def as_pdb_or_mmcif_str(self, target_format = 'pdb'):
+    # Return str in target format if possible, otherwise in mmcif
+    if target_format == 'pdb' and self.fits_in_pdb_format():
+      return self.as_pdb_str()
+    else:
+      return self.as_mmcif_str()
+
+  def fits_in_pdb_format(self):
+    for strand in self.strands:
+      if len(strand.start_resname.strip()) > 3: return False
+      if len(strand.end_resname.strip()) > 3: return False
+      if len(strand.start_chain_id.strip()) > 2: return False
+      if len(strand.end_chain_id.strip()) > 2: return False
+    return True
+
+  def as_mmcif_str(self):
+    ann = annotation(helices = [], sheets = [self])
+    text = ann.as_mmcif_str()
+    return text
+
+  def as_pdb_str(self, strand_id=None, set_id_zero=False, force_format = False):
+    if (not force_format) and (not self.fits_in_pdb_format()):
+      raise AssertionError("Sheet does not fit in PDB format"+
+       "Please fix code to use as_pdb_or_mmcif_str instead of as_pdb_str")
     assert len(self.strands) == len(self.registrations)
     lines = []
     for strand, reg in zip(self.strands, self.registrations):
@@ -2933,19 +3089,18 @@ class pdb_sheet(structure_base):
   def split(self,starting_sheet_id_number=1):
     assert len(self.strands)==len(self.registrations)
     new_sheets=[]
-    from copy import deepcopy
     for s1,s2,r2 in zip(
       self.strands[:-1],
       self.strands[1:],self.registrations[1:]):
       self_id="%d" %(len(new_sheets)+1)
-      new_s1=deepcopy(s1)
+      new_s1=copy.deepcopy(s1)
       new_s1.sense=0
       new_s1.strand_id=1
       new_s1.sheet_id="%d" %(starting_sheet_id_number)
-      new_s2=deepcopy(s2)
+      new_s2=copy.deepcopy(s2)
       new_s2.strand_id=2
       new_s2.sheet_id="%d" %(starting_sheet_id_number)
-      new_r2=deepcopy(r2)
+      new_r2=copy.deepcopy(r2)
       new_sheet=pdb_sheet(
              sheet_id="%d" %(starting_sheet_id_number),
              n_strands=2,
@@ -2991,13 +3146,13 @@ class pdb_sheet(structure_base):
           atom_selection=self.combine_atom_selections(pair_1,require_all=True)
           if not atom_selection: continue
           sel = asc.selection(string = atom_selection)
-          ph=hierarchy.deep_copy().select(sel)  #ph = needed part of hierarchy
+          ph=hierarchy.select(sel, copy_atoms=True)  #ph = needed part of hierarchy
           if ph.overall_counts().n_residues==0: continue
 
           atom_selection=self.combine_atom_selections(pair_2,require_all=True)
           if not atom_selection: continue
           sel = asc.selection(string = atom_selection)
-          ph=hierarchy.deep_copy().select(sel)  #ph = needed part of hierarchy
+          ph=hierarchy.select(sel, copy_atoms=True)  #ph = needed part of hierarchy
           if ph.overall_counts().n_residues>0:
             return True  # both match
     return False

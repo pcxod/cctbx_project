@@ -1,15 +1,18 @@
 
 from __future__ import absolute_import, division, print_function
 import os
-from libtbx.utils import null_out
-from libtbx import group_args
 from six.moves import cStringIO as StringIO
+from libtbx.utils import null_out
+from libtbx import group_args, Auto
+import iotbx.pdb
+import mmtbx.ions.identify
+from mmtbx.ions.svm.dump_sites import master_phil
+from iotbx.data_manager import DataManager
+
 
 def exercise():
   from mmtbx.regression import make_fake_anomalous_data
-  import mmtbx.command_line.water_screen
   import mmtbx.ions.utils
-  from iotbx.file_reader import any_file
   pdb_in = """\
 CRYST1   51.491   51.491   35.389  90.00  90.00 120.00 P 31 2 1
 SCALE1      0.019421  0.011213  0.000000        0.00000
@@ -110,9 +113,9 @@ TER
   file_base = "tst_symmetry_axis"
   with open(file_base + ".pdb", "w") as f:
     f.write(pdb_in)
-  f = any_file(file_base + ".pdb")
-  hierarchy = f.file_object.hierarchy
-  xrs = f.file_object.xray_structure_simple()
+  pdb_inp = iotbx.pdb.input(file_base + ".pdb")
+  hierarchy = pdb_inp.construct_hierarchy()
+  xrs = pdb_inp.xray_structure_simple()
   hierarchy, n = mmtbx.ions.utils.anonymize_ions(hierarchy, log=null_out())
   assert (n == 3)
   with open(file_base + "_in.pdb", "w") as f:
@@ -124,23 +127,53 @@ TER
       selection="element CA",
       fp=0.0,
       fdp=0.4)])
-  args = [
-    file_base + "_in.pdb",
-    file_base + ".mtz",
-    "wavelength=0.9792",
-    "use_phaser=False",
-    "nproc=1",
-    "skip_twin_test=True",
-    "elements=CA",
-  ]
+
+  dm = DataManager()
+  m = dm.get_model(file_base + "_in.pdb")
+  dm.process_miller_array_file(mtz_file)
+  fmo = dm.get_fmodel(scattering_table="n_gaussian")
+  params = master_phil().extract()
+  params.use_phaser=False
+  #params.skip_twin_test=True
+  params.elements='CA'
+  params.input.wavelength = 0.9792
   out = StringIO()
-  mmtbx.command_line.water_screen.run(args=args, out=out)
+  results = get_analyze_waters_result(m,fmo,params,out)
   assert "Valence sum:  1.916" in out.getvalue()
   assert out.getvalue().count("Probable cation: CA+2") >= 1
   os.remove(file_base + ".pdb")
   os.remove(file_base + "_in.pdb")
   os.remove(file_base + ".mtz")
   os.remove(file_base + "_fmodel.eff")
+
+
+def get_analyze_waters_result(m,fmo,params,out,manager_class = None):
+  m.process(make_restraints=True)
+  grm = m.get_restraints_manager()
+  manager = mmtbx.ions.identify.create_manager(
+    pdb_hierarchy = m.get_hierarchy(),
+    fmodel = fmo,
+    geometry_restraints_manager = grm.geometry,
+    wavelength = params.input.wavelength,
+    params = params,
+    nproc = params.nproc,
+    log = out,
+    manager_class = manager_class)
+  candidates = Auto
+  if (params.elements is not Auto) and (params.elements is not None):
+    from cctbx.eltbx import chemical_elements
+    lu = chemical_elements.proper_upper_list()
+    elements = params.elements.replace(",", " ")
+    candidates = elements.split()
+    for elem in candidates :
+      if (elem.upper() not in lu):
+        raise Sorry("Unrecognized element '%s'" % elem)
+
+  results = manager.analyze_waters(
+    out = out,
+    candidates = candidates)
+
+  return results
 
 if (__name__ == "__main__"):
   exercise()

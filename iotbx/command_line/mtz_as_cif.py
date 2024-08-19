@@ -276,6 +276,12 @@ class mtz_as_cif_blocks(object):
           array=r_free, column_name='_refln.pdbx_r_free_flag')
 
       if input_obs is None or r_free is None: continue
+      # it may happen that there is an Rfree array but the values are all identical
+      if (r_free.data().all_eq(r_free.data()[0])):
+        refln_status = r_free.array(data=flex.std_string(r_free.size(), "o"))
+        self.cif_blocks[data_type].add_miller_array(
+          array=refln_status, column_name="_refln.status")
+        continue
       if (test_flag_value is None):
         test_flag_value = reflection_file_utils.guess_r_free_flag_value(
           miller_array=r_free)
@@ -302,14 +308,13 @@ class mtz_as_cif_blocks(object):
       return column_names
     else:
       result = []
-      assert array.anomalous_flag()
-      ref_type = 'F'
+      #  assert array.anomalous_flag()  # No it is not anomalous (only one
+      #    number per reflection...it is anomalous data though
+      result = ["_refln.pdbx_anom_difference",
+                "_refln.pdbx_anom_difference_sigma",]
+
       if labels[0].lower().find('i-obs') >= 0:
-        ref_type = 'I'
-      result = ["_refln.pdbx_%s_plus" % ref_type,
-          "_refln.pdbx_%s_plus_sigma" % ref_type,
-          "_refln.pdbx_%s_minus" % ref_type,
-          "_refln.pdbx_%s_minus_sigma" % ref_type]
+        raise Sorry("Cannot convert anomalous differences on intensity to CIF")
       return result
 
 

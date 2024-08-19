@@ -9,13 +9,15 @@ from scitbx.dtmin.reparams import Reparams
 from scitbx.dtmin.bounds import Bounds
 from cctbx import adptbx
 from libtbx import group_args
+from libtbx.utils import Sorry
 from iotbx.map_model_manager import map_model_manager
 from iotbx.data_manager import DataManager
 import sys
 
 class RefineCryoemSignal(RefineBase):
   # Set up refinement class for dtmin minimiser (based on Phaser minimiser)
-  def __init__(self, sumfsqr_lm, f1f2cos_lm, r_star, ssqr_bins, target_spectrum, start_x):
+  def __init__(self, sumfsqr_lm, f1f2cos_lm, deltafsqr_lm,
+               r_star, ssqr_bins, target_spectrum, start_x):
     RefineBase.__init__(self)
     # Prepare data that will be used repeatedly for fgh evaluation
     # Sample local mean with spacing derived from averaging radius
@@ -40,6 +42,8 @@ class RefineCryoemSignal(RefineBase):
     self.sumfsqr_miller.use_binning_of(sumfsqr_lm) # Matches subset
     self.f1f2cos_miller = f1f2cos_lm.select(sel)
     self.f1f2cos_miller.use_binner_of(self.sumfsqr_miller)
+    self.sigmaE_miller = (deltafsqr_lm.select(sel)) / 2. # Half of deltafsqr power
+    self.sigmaE_miller.use_binner_of(self.sumfsqr_miller)
 
     self.n_bins = self.sumfsqr_miller.binner().n_bins_used()  # Assume consistent binning
     self.ssqr_bins = ssqr_bins
@@ -64,7 +68,7 @@ class RefineCryoemSignal(RefineBase):
     self.large_shifts_beta = list(cell_tensor*math.log(2.)*d_min**2)
 
     # Apply a relatively weak restraint to sphericity of beta
-    self.sigmaSphericityBeta = cell_tensor * 5*d_min**2
+    self.sigmaSphericityBeta = cell_tensor * 2*d_min**2
     # sigmaSphericityBiso = adptbx.u_as_b(adptbx.beta_as_u_cart(self.unit_cell, tuple(self.sigmaSphericityBeta)))
     # print("sigmaSphericityBiso: ",tuple(sigmaSphericityBiso))
 
@@ -134,33 +138,27 @@ class RefineCryoemSignal(RefineBase):
     h.reshape(flex.grid(self.nmp, self.nmp))
 
     # Loop over bins to accumulate target, gradient, Hessian
-    sumfsqr_miller = self.sumfsqr_miller
     i_bin_used = 0 # Keep track in case full range of bins not used
-    for i_bin in sumfsqr_miller.binner().range_used():
-      sel = sumfsqr_miller.binner().selection(i_bin)
-      sumfsqr_sel = sumfsqr_miller.select(sel)
+    for i_bin in self.sumfsqr_miller.binner().range_used():
+      sel = self.sumfsqr_miller.binner().selection(i_bin)
+      sumfsqr_miller_sel = self.sumfsqr_miller.select(sel)
+      sumfsqr = sumfsqr_miller_sel.data()
+      f1f2cos = self.f1f2cos_miller.data().select(sel)
+      sigmaE_terms = self.sigmaE_miller.data().select(sel)
 
       # Make Miller array as basis for computing aniso corrections in bin
       # Let u = A^2*sigmaT to simplify computation of derivatives
-      ones_array = flex.double(sumfsqr_sel.size(), 1)
-      all_ones = sumfsqr_sel.customized_copy(data=ones_array)
+      ones_array = flex.double(sumfsqr.size(), 1)
+      all_ones = sumfsqr_miller_sel.customized_copy(data=ones_array)
       beta_miller_Asqr = all_ones.apply_debye_waller_factors(
         u_star=adptbx.beta_as_u_star(asqr_beta))
       u_terms = (asqr_scale * sigmaT_bins[i_bin_used]
         * self.target_spectrum[i_bin_used]) * beta_miller_Asqr.data()
 
-      # Noise is total power minus signal, but make sure it is positive
-      f1f2cos = self.f1f2cos_miller.data().select(sel)
-      sumfsqr = self.sumfsqr_miller.data().select(sel)
-      sigmaE_terms = sumfsqr/2 - f1f2cos
-      # Make sure sigmaE is positive
-      min_sigE = sumfsqr/100000
-      sigmaE_terms = (sigmaE_terms+min_sigE + flex.abs(sigmaE_terms - min_sigE))/2
-
       # Use local sphere fsc to compute relative weight of local vs global fitting
       # Steepness of sigmoid controlled by factor applied to fsc.
       # Mean value of f1f2cos should dominate sigmaS_terms calculation when signal
-      # is good but should be completely determined by the anisotropic error model
+      # is good but it should be completely determined by the anisotropic error model
       # when there is little signal.
       # Keep some influence of anisotropic error model throughout for training.
       # wt_terms weight the anisotropy model in sigmaS calculation, with this
@@ -168,10 +166,13 @@ class RefineCryoemSignal(RefineBase):
       # Behaviour of wt as a function of fsc determined by steepness parameter for
       # the sigmoid function and the maximum fractional weight for the local
       # statistics. Values of local_weight near 1 seem to be better than lower
-      # values: setting it to 1 would probably be fine too.
+      # values.
       steep = 9.
       local_weight = 0.95
-      fsc = f1f2cos/(f1f2cos + sigmaE_terms)
+      fsc = f1f2cos/(sumfsqr/2.)
+      # Make sure fsc is in range 0 to 1
+      fsc = (fsc + flex.abs(fsc)) / 2
+      fsc = (fsc + 1 - flex.abs(fsc - 1)) / 2
       wt_terms = flex.exp(steep*fsc)
       wt_terms = 1. - local_weight * (wt_terms/(math.exp(steep/2) + wt_terms))
       meanwt = flex.mean_default(wt_terms,0.)
@@ -201,7 +202,7 @@ class RefineCryoemSignal(RefineBase):
           dmLL_by_du_terms = wt_terms * dmLL_by_dsigmaS_terms
         if self.refine_Asqr_beta:
           h_as_double, k_as_double, l_as_double = (
-            sumfsqr_sel.indices().as_vec3_double().parts())
+            sumfsqr_miller_sel.indices().as_vec3_double().parts())
           hh = flex.pow2(h_as_double)
           kk = flex.pow2(k_as_double)
           ll = flex.pow2(l_as_double)
@@ -365,9 +366,7 @@ class RefineCryoemSignal(RefineBase):
       pass
 
     else:
-      print("Macrocycle protocol", macrocycle_protocol, " not recognised")
-      sys.stdout.flush()
-      exit
+      raise Sorry("Macrocycle protocol", macrocycle_protocol, " not recognised")
 
     # Now accumulate mask
     self.nmp = 0
@@ -814,63 +813,32 @@ def default_target_spectrum(ssqr):
 
 def sphere_enclosing_model(model):
   sites_cart = model.get_sites_cart()
-  cart_min = flex.double(sites_cart.min())
-  cart_max = flex.double(sites_cart.max())
-  model_midpoint = (cart_max + cart_min) / 2
-  dsqrmax = flex.max((sites_cart - tuple(model_midpoint)).norms()) ** 2
+  model_centre = sites_cart.mean()
+  dsqrmax = flex.max((sites_cart - tuple(model_centre)).norms()) ** 2
   model_radius = math.sqrt(dsqrmax)
-  return model_midpoint, model_radius
+  return model_centre, model_radius
 
-def sphere_sampling_model(model):
-  sites_cart = model.get_sites_cart()
-  cart_min = flex.double(sites_cart.min())
-  cart_max = flex.double(sites_cart.max())
-  model_midpoint = (cart_max + cart_min) / 2
-  meansqr = flex.mean((sites_cart - tuple(model_midpoint)).norms() ** 2)
-  rms_model_radius = math.sqrt(meansqr)
-  return model_midpoint, rms_model_radius
+def mask_fixed_model_region(mmm, d_min,
+                                 fixed_model=None,
+                                 ordered_mask_id='ordered_volume_mask',
+                                 fixed_mask_id='mask_around_atoms'):
+  # Flatten the region of the ordered volume mask covered by the fixed model
+  # and keep the mask for the fixed model.
 
-def flatten_model_region(mmm, d_min):
-  # Flatten the region covered by the model
-  # For map_manager, replace it by the mask-weighted mean within this region
-  # For half-maps, replace by the mean and put back the original half-map
-  # map difference to preserve the error signal.
-  mm = mmm.map_manager()
-  mm1 = mmm.map_manager_1()
-  mm2 = mmm.map_manager_2()
-  delta_mm = mm1.customized_copy(map_data = mm1.map_data() - mm2.map_data())
-  model = mmm.model()
-  mmm.create_mask_around_atoms(model=model, soft_mask=True, soft_mask_radius=d_min/2)
-  working_mmm = mmm.deep_copy() # Save a copy before masking to work on later
+  # Do nothing if no fixed model
+  if fixed_model is None:
+    return
 
-  working_mmm.add_map_manager_by_id(delta_mm, map_id = 'delta_map')
-
-  # Invert original mask and apply to original maps to flatten density under model
-  mask_mm_inverse = mmm.get_map_manager_by_id('mask')
-  mask_mm_inverse.set_map_data(map_data = 1. - mask_mm_inverse.map_data())
-  mmm.apply_mask_to_maps(set_outside_to_mean_inside = False)
-
-  # Apply original mask to working_mmm to get density and difference density under model
-  mask_mm = working_mmm.get_map_manager_by_id('mask')
-  working_mmm.apply_mask_to_maps(set_outside_to_mean_inside = False)
-
-  # Get mean density for part of each map under model, to add back to
-  # flattened region of each map
-  mask_info = working_mmm.mask_info()
-  weighted_points = mask_info.size*mask_info.mean
-  wmm = working_mmm.map_manager()
-  mean_map = flex.sum(wmm.map_data()) / weighted_points
-  mask_data = mask_mm.map_data()
-  mm.set_map_data(map_data = mm.map_data() + mean_map * mask_data)
-  wmm1 = working_mmm.map_manager_1()
-  mean_map1 = flex.sum(wmm1.map_data()) / weighted_points
-  mm1.set_map_data(map_data = mm1.map_data() +
-      mean_map1 * mask_data + delta_mm.map_data()/2)
-  wmm2 = working_mmm.map_manager_2()
-  mean_map2 = flex.sum(wmm2.map_data()) / weighted_points
-  mm2.set_map_data(map_data = mm2.map_data() +
-      mean_map2 * mask_data - delta_mm.map_data()/2)
-  mmm.remove_map_manager_by_id('mask')
+  radius = 3.
+  if d_min is not None:
+    radius = max(radius, d_min)
+  mmm.create_mask_around_atoms(model=fixed_model, mask_atoms_atom_radius=radius, mask_id=fixed_mask_id)
+  fixed_model_mask = mmm.get_map_manager_by_id(map_id=fixed_mask_id)
+  # Invert fixed_model_mask before flattening
+  fixed_model_mask.set_map_data(map_data = 1. - fixed_model_mask.map_data())
+  mmm.apply_mask_to_map(map_id=ordered_mask_id, mask_id=fixed_mask_id)
+  # Invert back so we can use to assess fraction of fixed model in masked sphere
+  fixed_model_mask.set_map_data(map_data = 1. - fixed_model_mask.map_data())
 
 def add_local_squared_deviation_map(
     mmm, coeffs_in, radius, d_min, map_id_out):
@@ -900,14 +868,42 @@ def add_local_squared_deviation_map(
     offset = -min_map_value
     mm_out.set_map_data(map_data = mm_out.map_data() + offset)
 
-def auto_sharpen_isotropic(mc1, mc2):
+def auto_sharpen_by_FSC(mc1, mc2):
+  # Simply sharpen by bin-wise <F^2> and multiply by FSC
+  # This didn't work as well as auto_sharpen_isotropic, but may be worth trying
+  # again with a smooth curve over resolution instead of bins
 
-  nref = mc1.size()
-  num_per_bin = 1000
-  max_bins = 50
-  min_bins = 6
-  n_bins = int(round(max(min(nref / num_per_bin, max_bins), min_bins)))
-  mc1.setup_binner(n_bins=n_bins)
+  mapCC = mc1.map_correlation(other=mc2)
+  if mapCC >= 1.:
+    raise Sorry("Half-maps must be non-identical")
+  mc1.setup_binner_d_star_sq_bin_size()
+  mc2.use_binner_of(mc1)
+  mc1s = mc1.customized_copy(data = mc1.data())
+  mc2s = mc2.customized_copy(data = mc2.data())
+
+  for i_bin in mc1.binner().range_used():
+    sel = mc1.binner().selection(i_bin)
+    mc1sel = mc1.select(sel)
+    mc2sel = mc2.select(sel)
+    mapCC = mc1sel.map_correlation(other=mc2sel)
+    mapCC = max(mapCC,0.001) # Avoid zero or negative values
+    FSCref = math.sqrt(2./(1.+1./mapCC))
+    fsq = flex.pow2(flex.abs(mc1sel.data()))
+    meanfsq = flex.mean_default(fsq, 1.e-10)
+    mc1s.data().set_selected(sel, mc1.data().select(sel) * FSCref/math.sqrt(meanfsq))
+    mc2s.data().set_selected(sel, mc2.data().select(sel) * FSCref/math.sqrt(meanfsq))
+
+  return mc1s, mc2s
+
+def auto_sharpen_isotropic(mc1, mc2):
+  # Use Wilson plot in which <F^2> is divided by FSC^2, so that sharpening
+  # downweights data with poor FSC. Results of fit to Wilson plot could be
+  # odd if stated d_min goes much beyond real signal.
+
+  mapCC = mc1.map_correlation(other=mc2)
+  if mapCC >= 1.:
+    raise Sorry("Half-maps must be non-identical")
+  mc1.setup_binner_d_star_sq_bin_size()
   mc2.use_binner_of(mc1)
 
   sumw = 0
@@ -919,8 +915,9 @@ def auto_sharpen_isotropic(mc1, mc2):
     sel = mc1.binner().selection(i_bin)
     mc1sel = mc1.select(sel)
     mc2sel = mc2.select(sel)
+    if mc1sel.size() < 2:
+      continue
     mapCC = mc1sel.map_correlation(other=mc2sel)
-    assert (mapCC < 1.) # Ensure these are really independent half-maps
     mapCC = max(mapCC,0.001) # Avoid zero or negative values
     FSCref = math.sqrt(2./(1.+1./mapCC))
     ssqr = mc1sel.d_star_sq().data()
@@ -928,14 +925,13 @@ def auto_sharpen_isotropic(mc1, mc2):
     fsq = flex.pow2(flex.abs(mc1sel.data()))
     meanfsq = flex.mean_default(fsq, 0)
     y = math.log(meanfsq/(FSCref*FSCref))
-    w = fsq.size()
+    w = fsq.size() * FSCref
     sumw += w
     sumwx += w * x
     sumwy += w * y
     sumwx2 += w * x**2
     sumwxy += w * x * y
 
-  assert (nref == sumw) # Check no Fourier terms lost outside bins
   slope = (sumw * sumwxy - (sumwx * sumwy)) / (sumw * sumwx2 - sumwx**2)
   b_sharpen = 2 * slope # Divided by 2 to apply to amplitudes
   all_ones = mc1.customized_copy(data = flex.double(mc1.size(), 1))
@@ -950,8 +946,8 @@ def add_ordered_volume_mask(
     map_id_out='ordered_volume_mask'):
   """
   Add map defining mask covering the volume of most ordered density required
-  to contain the specified content of protein and nucleic acid, judged by ratio
-  of local map variance and local noise variance.
+  to contain the specified content of protein and nucleic acid, judged by
+  local map variance.
 
   Compulsory arguments:
   mmm: map_model_manager containing input half-maps in default map_managers
@@ -968,84 +964,80 @@ def add_ordered_volume_mask(
     and that the map must be complete
   """
 
-  assert (protein_mw is not None) or (nucleic_mw is not None)
-  assert mmm.map_manager().unit_cell_grid == mmm.map_manager().map_data().all()
+  if (protein_mw is None) and (nucleic_mw is None):
+    raise Sorry("At least one of protein_mw and nucleic_mw must be defined")
+  if (not mmm.map_manager_1().is_full_size()) or  (
+      not mmm.map_manager_2().is_full_size()):
+    raise Sorry("Please supply half-maps that are full-size, not cut out from a larger box")
+
+  if d_min is None or d_min <= 0:
+    spacings = get_grid_spacings(mmm.map_manager().unit_cell(),
+                                 mmm.map_manager().unit_cell_grid)
+    d_min = 2.5 * max(spacings)
 
   # Compute local average of squared density, using a sphere that will cover a
   # sufficient number of independent points. A rad_factor of 2 should yield
   # 4*Pi/3 * (2*2)^3 or about 270 independent points for the average; fewer
   # if the higher resolution data barely contribute. Larger values give less
   # noise but lower resolution for producing a mask. A minimum radius of 5
-  # is enforced to explore next-nearest-neighbour density.
-  radius = max(d_min*rad_factor, 5.)
+  # is enforced to explore next-nearest-neighbour density. A maximum of 20
+  # is enforced to keep some data at very low resolution
+  radius = min(max(d_min*rad_factor, 5.),20.)
 
-  d_work = (d_min + radius) / 2 # Save some time by lowering resolution
+  d_work = (d_min + radius) # Save some time by lowering resolution
   mm1 = mmm.map_manager_1()
   mc1_in = mm1.map_as_fourier_coefficients(d_min=d_work)
   mm2 = mmm.map_manager_2()
   mc2_in = mm2.map_as_fourier_coefficients(d_min=d_work)
-  mc1s, mc2s = auto_sharpen_isotropic(mc1_in, mc2_in)
+  if d_min < 10.: # Auto-sharpen unless very low resolution
+    mc1s, mc2s = auto_sharpen_isotropic(mc1_in, mc2_in)
+  else:
+    mc1s = mc1_in
+    mc2s = mc2_in
   mcs_mean  = mc1s.customized_copy(data = (mc1s.data() + mc2s.data())/2)
-  mcs_delta = mc1s.customized_copy(data = (mc1s.data() - mc2s.data()) )
 
   add_local_squared_deviation_map(mmm, mcs_mean, radius, d_work,
       map_id_out='map_variance')
   mvmm = mmm.get_map_manager_by_id('map_variance')
-  add_local_squared_deviation_map(mmm, mcs_delta, radius, d_work,
-      map_id_out='noise_variance')
-  nvmm = mmm.get_map_manager_by_id('noise_variance')
-
-  # When maps are masked near the corners and edges, both signal and noise can
-  # approach zero. Avoid getting close to dividing zero by zero, by adding a
-  # small offset to the noise variance.
-  # At the same time, correct noise variance by factor of two for averaging
-  nvmm_min = min(flex.min(nvmm.map_data()) , 0.)
-  nvmm_max = flex.max(nvmm.map_data())
-  nvmm.set_map_data(map_data = (nvmm.map_data() - nvmm_min + nvmm_max/100.) / 2.)
-
-  # Compute square of Z-score where values much greater than 1 indicate signal
-  mm_Zscore_sqr = mvmm.customized_copy(
-      map_data = mvmm.map_data()/nvmm.map_data())
+  # mvmm.write_map("mvmm.map") # Uncomment to check intermediate result
 
   # Choose enough points in averaged squared density map to covered expected
   # ordered structure. An alternative that could be implemented is to assign
   # any parts of map unlikely to arise from noise as ordered density, without
-  # reference to expected content. This might require figuring out
-  # the effective number of independent points in the averaging sphere to
-  # calibrate the chi-square distribution.
+  # reference to expected content, possibly like the false discovery rate approach.
   map_volume = mmm.map_manager().unit_cell().volume()
-  Zscore_sqr_map_data = mm_Zscore_sqr.map_data()
-  numpoints = Zscore_sqr_map_data.size()
+  mvmm_map_data = mvmm.map_data()
+  numpoints = mvmm_map_data.size()
   # Convert content into volume using partial specific volumes
   target_volume = 0.
   if protein_mw is not None:
     target_volume += protein_mw*1.229
   if nucleic_mw is not None:
     target_volume += nucleic_mw*0.945
-  # Expand volume by amount needed for sphere expanded by d_min in radius
+  # Expand volume by amount needed for sphere expanded by 1.5*d_min in radius
   equivalent_radius = math.pow(target_volume / (4*math.pi/3.),1./3)
-  volume_factor = ((equivalent_radius+d_min)/equivalent_radius)**3
+  volume_factor = ((equivalent_radius+1.5*d_min)/equivalent_radius)**3
   expanded_target_volume = target_volume*volume_factor
   target_points = int(expanded_target_volume/map_volume * numpoints)
 
   # Find threshold for target number of masked points
   from cctbx.maptbx.segment_and_split_map import find_threshold_in_map
   threshold = find_threshold_in_map(target_points = target_points,
-      map_data = Zscore_sqr_map_data)
-  temp_bool_3D = (Zscore_sqr_map_data >=  threshold)
+      map_data = mvmm_map_data)
+  temp_bool_3D = (mvmm_map_data >=  threshold)
   # as_double method doesn't work for multidimensional flex.bool
   mask_shape = temp_bool_3D.all()
   overall_mask = temp_bool_3D.as_1d().as_double()
   overall_mask.reshape(flex.grid(mask_shape))
   new_mm = mmm.map_manager().customized_copy(map_data=overall_mask)
 
-  # Clean up temporary maps, then add ordered volume mask
+  # Clean up temporary map, then add ordered volume mask
   mmm.remove_map_manager_by_id('map_variance')
-  mmm.remove_map_manager_by_id('noise_variance')
   mmm.add_map_manager_by_id(new_mm,map_id=map_id_out)
 
 def get_grid_spacings(unit_cell, unit_cell_grid):
-  assert unit_cell.parameters()[3:] == (90,90,90) # Required for this method
+  if unit_cell.parameters()[3:] != (90,90,90):
+    raise Sorry("Unit cell must be orthogonal") # Required for this method
   sp = []
   for a,n in zip(unit_cell.parameters()[:3], unit_cell_grid):
     sp.append(a/n)
@@ -1058,6 +1050,9 @@ def get_distance_from_center(c, unit_cell, unit_cell_grid = None,
   center of the map.
   Code provided by Tom Terwilliger
   """
+  if unit_cell.parameters()[3:] != (90,90,90):
+    raise Sorry("Unit cell must be orthogonal") # Required for this method
+
   acc = c.accessor()
   if not unit_cell_grid: # Assume c contains complete unit cell
     unit_cell_grid = acc.all()
@@ -1092,7 +1087,8 @@ def get_distance_from_center(c, unit_cell, unit_cell_grid = None,
 def get_maximal_mask_radius(mm_ordered_mask):
 
   # Check assumption that this is a full map
-  assert mm_ordered_mask.unit_cell_grid == mm_ordered_mask.map_data().all()
+  if not mm_ordered_mask.is_full_size():
+    raise Sorry("Provided map or mask must be full-size")
 
   unit_cell = mm_ordered_mask.unit_cell()
   om_data = mm_ordered_mask.map_data()
@@ -1109,8 +1105,9 @@ def get_mask_radius(mm_ordered_mask,frac_coverage):
   ordered density
   """
 
-  # Test assumption that this is a full map
-  assert mm_ordered_mask.unit_cell_grid == mm_ordered_mask.map_data().all()
+  # Check assumption that this is a full map
+  if not mm_ordered_mask.is_full_size():
+    raise Sorry("Provided map or mask must be full-size")
 
   unit_cell = mm_ordered_mask.unit_cell()
   om_data = mm_ordered_mask.map_data()
@@ -1134,8 +1131,9 @@ def get_ordered_volume_exact(mm_ordered_mask,sphere_center,sphere_radius):
   sphere_radius: radius of sphere
   """
 
-  # Test assumption that this is a full map
-  assert mm_ordered_mask.unit_cell_grid == mm_ordered_mask.map_data().all()
+  # Check assumption that this is a full map
+  if not mm_ordered_mask.is_full_size():
+    raise Sorry("Provided map or mask must be full-size")
 
   unit_cell = mm_ordered_mask.unit_cell()
   om_data = mm_ordered_mask.map_data()
@@ -1151,15 +1149,6 @@ def get_ordered_volume_exact(mm_ordered_mask,sphere_center,sphere_radius):
   ordered_in_sphere = om_data_sel.select(sel)
   ordered_volume = (ordered_in_sphere.size()/om_data.size()) * unit_cell.volume()
   return ordered_volume
-
-def get_d_star_sq_step(f_array, num_per_bin = 1000, max_bins = 50, min_bins = 6):
-  d_star_sq = f_array.d_star_sq().data()
-  num_tot = d_star_sq.size()
-  n_bins = round(max(min(num_tot / num_per_bin, max_bins),min_bins))
-  d_star_sq_min = flex.min(d_star_sq)
-  d_star_sq_max = flex.max(d_star_sq) * 1.00001
-  d_star_sq_step = (d_star_sq_max - d_star_sq_min) / n_bins
-  return d_star_sq_step
 
 def get_flex_max(a,b):
   c = a.deep_copy()
@@ -1193,7 +1182,7 @@ def next_allowed_grid_size(i, largest_prime=5):
     j += 2
   return j
 
-def get_sharpening_b(miller_intensities):
+def get_sharpening_b(intensities):
 
   # Initialise data for Wilson plot
   sumw = 0.
@@ -1203,9 +1192,11 @@ def get_sharpening_b(miller_intensities):
   sumwx2 = 0.
 
   # Assume that binning has been defined and get data in bins
-  for i_bin in miller_intensities.binner().range_used():
-    sel = miller_intensities.binner().selection(i_bin)
-    int_sel = miller_intensities.select(sel)
+  int_binned = intensities.customized_copy(data = intensities.data())
+  int_binned.setup_binner_d_star_sq_bin_size()
+  for i_bin in int_binned.binner().range_used():
+    sel = int_binned.binner().selection(i_bin)
+    int_sel = int_binned.select(sel)
     ssqr = int_sel.d_star_sq().data()
     x = flex.mean_default(ssqr, 0) # Mean 1/d^2 for bin
     mean_int_sel_data = flex.mean_default(int_sel.data(),0)
@@ -1294,7 +1285,7 @@ def expanded_map_as_intensities(rmm, marray, h_map_indices, k_map_indices, l_map
   miller_array = marray.customized_copy(data = miller_data)
   return miller_array
 
-def local_mean_intensities(mm, d_min, intensities, r_star):
+def local_mean_intensities(mm, d_min, intensities, r_star, b_sharpen):
   """
   Compute local means of input intensities (or amplitudes) using a convolution
   followed optionally by a resolution-dependent renormalisation
@@ -1311,16 +1302,11 @@ def local_mean_intensities(mm, d_min, intensities, r_star):
   assert d_star_sq_max > 1/d_min**2
 
   # Sharpen intensities to reduce dynamic range for numerical stability
-  # Save the overall B to put back at end
-  d_star_sq_step = get_d_star_sq_step(intensities, max_bins=100)
+  # Put the overall B back at end
   int_sharp = intensities.customized_copy(data = intensities.data())
-  int_sharp.setup_binner_d_star_sq_step(d_star_sq_step=d_star_sq_step)
-  b_sharpen = get_sharpening_b(int_sharp)
   all_ones = int_sharp.customized_copy(data = flex.double(int_sharp.size(), 1))
   b_terms_miller = all_ones.apply_debye_waller_factors(b_iso = b_sharpen)
   int_sharp = int_sharp.customized_copy(data = intensities.data()*b_terms_miller.data())
-  # Customized_copy loses binner
-  int_sharp.setup_binner_d_star_sq_step(d_star_sq_step=d_star_sq_step)
 
   # Turn intensity values into a spherical map inside a cube
   results = intensities_as_expanded_map(mm,int_sharp)
@@ -1402,13 +1388,14 @@ def local_mean_density(mm, radius):
 
 def assess_cryoem_errors(
     mmm, d_min,
-    map_1_id="map_manager_1", map_2_id="map_manager_2",
     determine_ordered_volume=True,
     ordered_mask_id='ordered_volume_mask', sphere_points=500,
     sphere_cent=None, radius=None,
-    verbosity=1, shift_map_origin=True, keep_full_map=False):
+    verbosity=1, shift_map_origin=True, keep_full_map=False, log=sys.stdout):
   """
   Refine error parameters from half-maps, make weighted map coeffs for region.
+  Assume (but check) that half-maps come from full cell, not boxed.
+  Origin can be arbitrary, as long as full cell is given.
 
   Compulsory arguments:
   mmm: map_model_manager object containing two half-maps from reconstruction
@@ -1416,18 +1403,18 @@ def assess_cryoem_errors(
     target region
 
   Optional arguments:
-  map_1_id: identifier of first half-map, if different from default of
-    map_manager_1
-  map_2_id: same for second half-map
   determine_ordered_volume: flag for whether ordered volume should be assessed
   ordered_mask_id: identifier for mask defining ordered volume
   sphere_cent: center of sphere defining target region for analysis
     default is center of map
   radius: radius of sphere
-    default (when sphere center not defined either) is 1/4 narrowest map width
+    default (when sphere center not defined either) is 1/3 narrowest map width
   sphere_points: number of reflections to use for local spherical average
   shift_map_origin: should map coefficients be shifted to correspond to
     original origin, rather than the origin being the corner of the box,
+    default True
+  define_ordered_volume: should ordered volume over full map be evaluated, to
+    compare with cutout volume,
     default True
   keep_full_map: don't mask or box the input map
     default False, use with caution
@@ -1435,45 +1422,100 @@ def assess_cryoem_errors(
   """
 
   from libtbx import group_args
-  from iotbx.map_model_manager import map_model_manager
 
   if verbosity > 0:
-    print("\nPrepare map for docking by analysing signal and errors")
+    print("\nPrepare map for docking by analysing signal and errors", file=log)
 
   # Start from two half-maps and ordered volume mask in map_model_manager
   # Determine ordered volume in whole reconstruction and fraction that will be in sphere
   unit_cell = mmm.map_manager().unit_cell()
-  unit_cell_grid = mmm.map_data().accessor().all()
+  unit_cell_grid = mmm.map_manager().unit_cell_grid
+  map_grid = mmm.map_manager().map_data().all()
+  if (not mmm.map_manager().is_full_size()):
+    print("\nERROR: Unit cell grid does not match map dimensions:")
+    print("Unit cell grid: ", unit_cell_grid)
+    print("Map dimensions: ", map_grid)
+    raise Sorry("Provided maps must be full-size")
   spacings = get_grid_spacings(unit_cell,unit_cell_grid)
   ucpars = unit_cell.parameters()
+  # Determine voxel count for fixed model mask
+  mm_model_mask = mmm.get_map_manager_by_id('mask_around_atoms')
+  voxels_in_model = 0
+  if mm_model_mask is not None:
+    model_mask_data = mm_model_mask.map_data()
+    mask_sel = model_mask_data > 0
+    voxels_in_model = mask_sel.count(True)
+
+  # Keep track of shifted origin
+  origin_shift = mmm.map_manager().origin_shift_grid_units
+  if flex.sum(flex.abs(flex.double(origin_shift))) > 0:
+    shifted_origin = True
+  else:
+    shifted_origin = False
   if sphere_cent is None:
     # Default to sphere in center of cell extending 2/3 distance to nearest edge
-    sphere_cent = flex.double((ucpars[0], ucpars[1], ucpars[2]))/2.
+    # sphere_cent_grid and sphere_cent_map are relative to map origin
+    sphere_cent_grid = [round(n/2) for n in unit_cell_grid]
+    sphere_cent = [(g * s) for g,s in zip(sphere_cent_grid, spacings)]
     if radius is None:
       radius = min(ucpars[0], ucpars[1], ucpars[2])/3.
   else:
-    assert radius is not None
-    sphere_cent = flex.double(sphere_cent)
+    if radius is None:
+      raise Sorry("Radius must be provided if sphere_cent is defined")
+    # Force sphere center to be on a map grid point for easier comparison of different spheres
+    # Account for origin shift if present in input maps
+    sphere_cent_frac = unit_cell.fractionalize(sphere_cent)
+    sphere_cent_grid = [round(n * f) for n,f in zip(unit_cell_grid, sphere_cent_frac)]
+    if shifted_origin:
+      sphere_cent_grid = [(c - o) for c,o in zip(sphere_cent_grid, origin_shift)]
+  for i in range(3):
+    if sphere_cent_grid[i] > map_grid[i] or sphere_cent_grid[i] < 0:
+      raise Sorry("Sphere centre is outside map grid")
+  sphere_cent_map = [(g * s) for g,s in zip(sphere_cent_grid, spacings)]
+  sphere_cent_map = flex.double(sphere_cent_map)
+
+  # Set first guess of d_min if no value provided
+  # The majority of cryo-EM deposits have a ratio of nominal resolution to pixel
+  # size between 2.5 and 3.5. If the correct ratio is higher than the 2.5 used
+  # here, this will waste some time, but if the ratio is lower the highest
+  # resolution consistent with Shannon sampling (ratio of 2) will be tested below.
+  if d_min is None or d_min <= 0.:
+    guess_d_min = True
+    d_min = 2.5 * max(spacings)
+  else:
+    guess_d_min = False
 
   if determine_ordered_volume:
     ordered_mm = mmm.get_map_manager_by_id(map_id=ordered_mask_id)
     total_ordered_volume = flex.mean(ordered_mm.map_data()) * unit_cell.volume()
-    ordered_volume_in_sphere = get_ordered_volume_exact(ordered_mm, sphere_cent, radius)
+    ordered_volume_in_sphere = get_ordered_volume_exact(ordered_mm, sphere_cent_map, radius)
     fraction_scattering = ordered_volume_in_sphere / total_ordered_volume
   else:
     fraction_scattering = None
 
   # Get map coefficients for maps after spherical masking
   # Define box big enough to hold sphere plus soft masking
+  # Warn if sphere too near edge of full map for soft mask to reach zero
+  # or if less than about 85% of sphere would be within full map
+  # (outside by >= half-radius)
   boundary_to_smoothing_ratio = 2
   soft_mask_radius = d_min
   padding = soft_mask_radius * boundary_to_smoothing_ratio
   cushion = flex.double(3,radius+padding)
-  cart_min = flex.double(sphere_cent) - cushion
-  cart_max = flex.double(sphere_cent) + cushion
-  for i in range(3): # Keep within input map
-    cart_min[i] = max(cart_min[i],0)
-    cart_max[i] = min(cart_max[i],ucpars[i]-spacings[i])
+  cart_min = flex.double(sphere_cent_map) - cushion
+  cart_max = flex.double(sphere_cent_map) + cushion
+  max_outside = 0.
+  for i in range(3):
+    if cart_min[i] < 0:
+      max_outside = max(max_outside, -cart_min[i])
+    if cart_max[i] > ucpars[i]-spacings[i]:
+      max_outside = max(max_outside, cart_max[i]-(ucpars[i]-spacings[i]))
+  if max_outside > padding + radius/2:
+    print("\nWARNING: substantial fraction of sphere is outside map volume", file=log)
+  elif max_outside > padding:
+    print("\nWARNING: sphere is partially outside map volume", file=log)
+  elif max_outside > 0:
+    print("\nWARNING: sphere too near map edge to allow full extent of smooth masking", file=log)
 
   cs = mmm.crystal_symmetry()
   uc = cs.unit_cell()
@@ -1501,9 +1543,17 @@ def assess_cryoem_errors(
     working_mmm.apply_mask_to_maps()
     mask_info = working_mmm.mask_info()
 
+    working_map_size = working_mmm.map_data().size()
     box_volume = uc.volume() * (
-        working_mmm.map_data().size()/mmm.map_data().size())
+        working_map_size/mmm.map_data().size())
     weighted_masked_volume = box_volume * mask_info.mean
+
+    voxels_in_masked_model = 0
+    if voxels_in_model > 0:
+      mask_info = working_mmm.mask_info(mask_id='mask_around_atoms')
+      mm_model_mask = working_mmm.get_map_manager_by_id('mask_around_atoms')
+      model_mask_data = mm_model_mask.map_data()
+      voxels_in_masked_model = working_map_size * mask_info.mean
 
     # Calculate an oversampling ratio defined as the ratio between the size of
     # the cut-out cube and the size of a cube that could contain a sphere
@@ -1527,12 +1577,28 @@ def assess_cryoem_errors(
   work_mm = working_mmm.map_manager()
   v_star = 1./wuc.volume()
   r_star = math.pow(3*sphere_points*v_star/(4*math.pi),1./3.)
+  minimum_possible_d_min = 2.*max(spacings)
+  d_min = max(d_min, minimum_possible_d_min)
   d_min_extended = 1./(1./d_min + r_star)
-  map_sampling = flex.max(flex.double(wuc.parameters()[:3])/flex.double(work_mm.map_data().all()))
-  d_min_extended = max(d_min_extended, 2*map_sampling)
+  mc1 = working_mmm.map_manager_1().map_as_fourier_coefficients(d_min=d_min_extended, d_max=d_max)
+  mc2 = working_mmm.map_manager_2().map_as_fourier_coefficients(d_min=d_min_extended, d_max=d_max)
 
-  mc1 = working_mmm.map_as_fourier_coefficients(d_min=d_min_extended, d_max=d_max, map_id=map_1_id)
-  mc2 = working_mmm.map_as_fourier_coefficients(d_min=d_min_extended, d_max=d_max, map_id=map_2_id)
+  success = False
+  while guess_d_min and not success:
+    # Check whether signal goes to higher resolution than initial guess
+    d_min_from_fsc = mc1.d_min_from_fsc(other=mc2, bin_width=1000, fsc_cutoff=0.05).d_min
+    # d_min_from_fsc returns None if the fsc_cutoff has not been passed by resolution limit
+    if d_min_from_fsc is not None:
+      d_min = max(d_min_from_fsc,minimum_possible_d_min)
+      success = True
+    else:
+      if d_min > minimum_possible_d_min: # Set d_min to highest possible value and repeat
+        d_min = minimum_possible_d_min
+      else:
+        success = True # d_min is already highest possible value
+    d_min_extended = 1./(1./d_min + r_star)
+    mc1 = working_mmm.map_manager_1().map_as_fourier_coefficients(d_min=d_min_extended, d_max=d_max)
+    mc2 = working_mmm.map_manager_2().map_as_fourier_coefficients(d_min=d_min_extended, d_max=d_max)
 
   f1 = flex.abs(mc1.data())
   f2 = flex.abs(mc2.data())
@@ -1540,32 +1606,35 @@ def assess_cryoem_errors(
   p2 = mc2.phases().data()
   sumfsqr = mc1.customized_copy(data = flex.pow2(f1) + flex.pow2(f2))
   f1f2cos = mc1.customized_copy(data = f1 * f2 * flex.cos(p2 - p1))
+  deltafsqr = mc1.customized_copy(data = flex.pow2(flex.abs(mc1.data()-mc2.data())))
 
   # Local mean calculations of covariance terms use data to extended resolution
   # but return results to desired resolution
-  sumfsqr_local_mean = local_mean_intensities(work_mm, d_min, sumfsqr, r_star)
-  f1f2cos_local_mean = local_mean_intensities(work_mm, d_min, f1f2cos, r_star)
+  # Calculating sumfsqr_local_mean from f1f2cos and deltafsqr local means turns out to have
+  # improved numerical stability, i.e. don't end up with negative or zero deltafsqr_local_mean
+  b_sharpen = get_sharpening_b(sumfsqr)
+  f1f2cos_local_mean = local_mean_intensities(work_mm, d_min, f1f2cos,
+                                              r_star, b_sharpen)
+  deltafsqr_local_mean = local_mean_intensities(work_mm, d_min, deltafsqr,
+                                                r_star, b_sharpen)
+  sumfsqr_local_mean = f1f2cos_local_mean.customized_copy(data = 2*f1f2cos_local_mean.data() + deltafsqr_local_mean.data())
 
-  # Sum of f1^2 and f2^2 is always >= 2*f1*f2*cos(delta), but
-  # this may be violated by numerical errors in calculation of local mean
-  # Fix to avoid downstream numerical problems.
-  sumfsqr_local_mean = sumfsqr_local_mean.customized_copy(
-    data=get_flex_max(sumfsqr_local_mean.data(),2*f1f2cos_local_mean.data()))
-
-  # Trim starting data back to desired resolution limit, setup binning
+  # Trim starting sumfsqr back to desired resolution limit, setup binning
+  # NB: f1f2cos and deltafsqr aren't used any more
   mc1 = mc1.select(mc1.d_spacings().data() >= d_min)
   assert (mc1.size() == sumfsqr_local_mean.size())
   mc2 = mc2.select(mc2.d_spacings().data() >= d_min)
   sumfsqr = sumfsqr.select(sumfsqr.d_spacings().data() >= d_min)
-  # f1f2cos = f1f2cos.select(f1f2cos.d_spacings().data() >= d_min)
-  d_star_sq_step = get_d_star_sq_step(mc1)
-  mc1.setup_binner_d_star_sq_step(d_star_sq_step=d_star_sq_step)
+  mc1.setup_binner_d_star_sq_bin_size()
   mc2.use_binner_of(mc1)
   sumfsqr.use_binner_of(mc1)
   sumfsqr_local_mean.use_binner_of(mc1)
   f1f2cos_local_mean.use_binner_of(mc1)
 
   # Prepare starting parameters for signal refinement
+  mapCC = mc1.map_correlation(other=mc2)
+  if mapCC >= 1.:
+    raise Sorry("Half-maps must be non-identical")
   mapCC_bins = flex.double()
   ssqr_bins = flex.double()
   target_spectrum = flex.double()
@@ -1578,38 +1647,24 @@ def assess_cryoem_errors(
     sel = sumfsqr.binner().selection(i_bin)
     mc1sel = mc1.select(sel)
     mc2sel = mc2.select(sel)
+    if mc1sel.size() == 0:
+      continue
     mapCC = mc1sel.map_correlation(other=mc2sel)
-    assert (mapCC < 1.) # Ensure these are really independent half-maps
     mapCC_bins.append(mapCC) # Store for before/after comparison
-    # Adjust very low sumfsqr_local_mean values, then divide sum by 2 to get mean)
     sumfsqsel = sumfsqr.select(sel)
-    mean_sumfsqr_bin = flex.mean_default(sumfsqsel.data(),0.)
-    sfsqlm_sel = sumfsqr_local_mean.select(sel)
-    min_sfsqlm_bin = mean_sumfsqr_bin / 10000
-    sfsqlm_sel = sfsqlm_sel.customized_copy(data =
-      (sfsqlm_sel.data()+min_sfsqlm_bin + flex.abs(sfsqlm_sel.data()-min_sfsqlm_bin))/2.)
-    sumfsqr_local_mean.data().set_selected(sel, sfsqlm_sel.data())
-
-    # # for debugging of local mean algorithm
-    # f1f2cos_sel = f1f2cos.select(sel)
-    # mean_f1f2cos_bin = flex.mean_default(f1f2cos_sel.data(),0.)
-    # f1f2cos_lm_sel = f1f2cos_local_mean.select(sel)
-    # mean_f1f2coslm_bin = flex.mean_default(f1f2cos_lm_sel.data(),0.)
-    # mean_sfsqlm_bin = flex.mean_default(sfsqlm_sel.data(),0.)
-    # print("Bin, mean(sumfsq), mean(local_mean), mean(f1f2cos), mean(local_mean): ",
-    #     i_bin, mean_sumfsqr_bin, mean_sfsqlm_bin, mean_f1f2cos_bin, mean_f1f2coslm_bin)
-
-    ssqr = sumfsqsel.d_star_sq().data()
+    meanfsq = flex.mean_default(sumfsqsel.data(),0.) / 2
+    ssqr = mc1sel.d_star_sq().data()
     x = flex.mean_default(ssqr, 0) # Mean 1/d^2 for bin
     ssqr_bins.append(x)  # Save for later
-    meanfsq = mean_sumfsqr_bin / 2
     target_power = default_target_spectrum(x) # Could have a different target
     target_spectrum.append(target_power)
-    if mapCC < 0.143: # Only fit initial signal estimate where clear overall
+    if mapCC < 0.143 and i_bin > 3: # Only fit initial signal estimate where clear overall
       continue
     signal = meanfsq * mapCC / target_power
+    if signal <= 0.:
+      continue
     y = math.log(signal)
-    w = sumfsqsel.size()
+    w = mc1sel.size()
     sumw += w
     sumwx += w * x
     sumwy += w * y
@@ -1621,7 +1676,7 @@ def assess_cryoem_errors(
   wilson_scale_signal = math.exp(intercept)
   wilson_b_signal = -4 * slope
   if verbosity > 0:
-    print("\n  Wilson B for signal power: ", wilson_b_signal)
+    print("\n  Wilson B for signal power: ", wilson_b_signal, file=log)
   n_bins = ssqr_bins.size()
 
   sigmaT_bins = [1.]*n_bins
@@ -1645,14 +1700,14 @@ def assess_cryoem_errors(
     study_params = False      # flag for calling studyparams procedure
   else:
     study_params = True
-  output_level=verbosity      # 0/1/2/3/4 for mute/log/verbose/debug/testing
+  level=verbosity      # 0/1/2/3/4 for mute/log/verbose/debug/testing
 
   # create instances of refine and minimizer
   refine_cryoem_signal = RefineCryoemSignal(
     sumfsqr_lm = sumfsqr_local_mean, f1f2cos_lm = f1f2cos_local_mean,
-    r_star = r_star, ssqr_bins = ssqr_bins, target_spectrum = target_spectrum,
-    start_x = start_params)
-  minimizer = Minimizer(output_level=output_level)
+    deltafsqr_lm = deltafsqr_local_mean, r_star = r_star, ssqr_bins = ssqr_bins,
+    target_spectrum = target_spectrum, start_x = start_params)
+  minimizer = Minimizer(output_level=level)
 
   # Run minimizer
   minimizer.run(refine_cryoem_signal, protocol, ncyc, minimizer_type, study_params)
@@ -1678,17 +1733,17 @@ def assess_cryoem_errors(
   make_intermediate_files = False
 
   if verbosity > 0:
-    print("\nRefinement of scales and error terms completed\n")
-    print("\nParameters for A and BEST curve correction")
-    print("  A overall scale: ",math.sqrt(asqr_scale))
+    print("\nRefinement of scales and error terms completed\n", file=log)
+    print("\nParameters for A and BEST curve correction", file=log)
+    print("  A overall scale: ",math.sqrt(asqr_scale), file=log)
     for i_bin in range(n_bins):
-      print("  Bin #", i_bin + 1, "BEST curve correction: ", sigmaT_bins[i_bin])
-    print("  A tensor as beta:", a_beta)
-    print("  A tensor as Baniso: ", a_baniso)
+      print("  Bin #", i_bin + 1, "BEST curve correction: ", sigmaT_bins[i_bin], file=log)
+    print("  A tensor as beta:", a_beta, file=log)
+    print("  A tensor as Baniso: ", a_baniso, file=log)
     es = adptbx.eigensystem(a_baniso)
-    print("  Eigenvalues and eigenvectors:")
+    print("  Eigenvalues and eigenvectors:", file=log)
     for iv in range(3):
-      print("  ",es.values()[iv],es.vectors(iv))
+      print("  ",es.values()[iv],es.vectors(iv), file=log)
 
     sys.stdout.flush()
 
@@ -1703,8 +1758,8 @@ def assess_cryoem_errors(
   i_bin_used = 0 # Keep track in case full range of bins not used
   weighted_map_noise = 0.
   if verbosity > 0:
-    print("MapCC before and after rescaling as a function of resolution")
-    print("Bin   <ssqr>   mapCC_before   mapCC_after")
+    print("MapCC before and after rescaling as a function of resolution", file=log)
+    print("Bin   <ssqr>   Nterms   mapCC_before   mapCC_after", file=log)
   for i_bin in mc1.binner().range_used():
     sel = expectE.binner().selection(i_bin)
     eEsel = expectE.select(sel)
@@ -1717,21 +1772,22 @@ def assess_cryoem_errors(
     u_terms = (asqr_scale * sigmaT_bins[i_bin_used]
       * target_spectrum[i_bin_used]) * beta_miller_Asqr.data()
 
-    # Noise is total power minus signal, but make sure it is positive
-    f1f2cos = f1f2cos_local_mean.data().select(sel)
-    sumfsqr = sumfsqr_local_mean.data().select(sel)
-    sigmaE_terms = sumfsqr/2 - f1f2cos
-    min_sigE = sumfsqr/100000
-    sigmaE_terms = (sigmaE_terms+min_sigE + flex.abs(sigmaE_terms - min_sigE))/2
+    # Noise is half of deltafsqr power
+    sigmaE_terms = (deltafsqr_local_mean.data().select(sel)) / 2.
+    f1f2cos_terms = f1f2cos_local_mean.data().select(sel)
+    sumfsqr_terms = sumfsqr_local_mean.data().select(sel)
 
     # Compute the relative weight between the local statistics and the overall
     # anisotropic signal model, as in refinement code.
     steep = 9.
     local_weight = 0.95
-    fsc = f1f2cos/(f1f2cos + sigmaE_terms)
+    fsc = f1f2cos_terms/(sumfsqr_terms/2.)
+    # Make sure fsc is in range 0 to 1
+    fsc = (fsc + flex.abs(fsc)) / 2
+    fsc = (fsc + 1 - flex.abs(fsc - 1)) / 2
     wt_terms = flex.exp(steep*fsc)
     wt_terms = 1. - local_weight * (wt_terms/(math.exp(steep/2) + wt_terms))
-    sigmaS_terms = wt_terms*u_terms + (1.-wt_terms)*f1f2cos
+    sigmaS_terms = wt_terms*u_terms + (1.-wt_terms)*f1f2cos_terms
     # Make sure sigmaS is non-negative
     sigmaS_terms = (sigmaS_terms + flex.abs(sigmaS_terms))/2
     scale_terms = 1./flex.sqrt(sigmaS_terms + sigmaE_terms/2.)
@@ -1756,16 +1812,16 @@ def assess_cryoem_errors(
     mc2sel = mc2.select(sel)
     mapCC = mc1sel.map_correlation(other=mc2sel)
     if verbosity > 0:
-      print(i_bin_used+1, ssqr_bins[i_bin_used], mapCC_bins[i_bin_used], mapCC)
+      print(i_bin_used+1, ssqr_bins[i_bin_used], mc1sel.size(), mapCC_bins[i_bin_used], mapCC, file=log)
     mapCC_bins[i_bin_used] = mapCC # Update for returned output
     i_bin_used += 1
 
   # Compensate for numerical instability when sigmaS is extremely small, in which
   # case dobs is very small and expectE can be very large
   sel = dobs.data() < 0.00001
-  expectE.data().set_selected(sel,0.)
+  expectE.data().set_selected(sel,1.)
 
-  if make_intermediate_files:
+  if make_intermediate_files: # For debugging and investigating signal/noise
     # Write out sigmaS, sigmaE and Dobs both as mtz files and intensities-as-maps
 
     write_mtz(sigmaS,"sigmaS.mtz","sigmaS")
@@ -1790,17 +1846,39 @@ def assess_cryoem_errors(
 
   if verbosity > 0:
     if determine_ordered_volume:
-      print("Fraction of full map scattering: ",fraction_scattering)
-    print("Over-sampling factor: ",over_sampling_factor)
-    print("Weighted map noise: ",weighted_map_noise)
+      print("Fraction of full map scattering: ",fraction_scattering, file=log)
+    print("Over-sampling factor: ",over_sampling_factor, file=log)
+    print("Weighted map noise: ",weighted_map_noise, file=log)
     sys.stdout.flush()
 
   # Return a map_model_manager with the weighted map
   wEmean = dobs*expectE
   working_mmm.add_map_from_fourier_coefficients(map_coeffs=wEmean, map_id='map_manager_wtd')
+  sigmaA = 0.9 # Default for likelihood-weighted map
+  dosa = sigmaA*dobs.data()
+  lweight = dobs.customized_copy(data=(2*dosa)/(1.-flex.pow2(dosa)))
+  wEmean2 = lweight*expectE
+  working_mmm.add_map_from_fourier_coefficients(map_coeffs=wEmean2, map_id='map_manager_lwtd')
   # working_mmm.write_map(map_id='map_manager_wtd',file_name='prepmap.map')
-  working_mmm.remove_map_manager_by_id(map_1_id)
-  working_mmm.remove_map_manager_by_id(map_2_id)
+  working_mmm.remove_map_manager_by_id('map_manager_1')
+  working_mmm.remove_map_manager_by_id('map_manager_2')
+
+  # If there is a fixed model and it occupies a significant part of the sphere,
+  # compute the structure factors corresponding to the cutout density for the fixed
+  # model.
+
+  masked_model_contributes = False
+  masked_model_E = None
+  masked_model_sigmaA = None
+  fraction_masked = voxels_in_masked_model/working_map_size
+  if fraction_masked > 0.01:
+    if verbosity > 1:
+      print("Masked voxels from fixed model, total in box, fraction: ",
+            voxels_in_masked_model, working_map_size, fraction_masked, file=log)
+    masked_model_contributes = True
+    mm_masked_model = working_mmm.get_map_manager_by_id(map_id='fixed_atom_map')
+    # mm_masked_model.write_map('masked_model.map')
+    masked_model_E = mm_masked_model.map_as_fourier_coefficients(d_min=d_min,d_max=d_max)
 
   shift_cart = working_mmm.shift_cart()
   if shift_map_origin:
@@ -1811,6 +1889,121 @@ def assess_cryoem_errors(
     shift_frac = ucwork.fractionalize(shift_cart)
     shift_frac = tuple(-flex.double(shift_frac))
     expectE = expectE.translational_shift(shift_frac)
+    if masked_model_contributes:
+      masked_model_E = masked_model_E.translational_shift(shift_frac)
+      # write_mtz(expectE,"expectE.mtz","eE")
+      # write_mtz(masked_model_E,"masked_model.mtz","masked_model")
+
+  expectE_mod = expectE.deep_copy() # For temporary kludge where expectE is modified instead of adding fixed contribution in phasertng
+  if masked_model_contributes:
+    masked_model_sigmaA = expectE.customized_copy(data=flex.double(expectE.size(),0))
+    xdat = []
+    ydat = []
+    wdat = []
+    expectE.use_binner_of(mc1)
+    if verbosity > 1:
+      print("SigmaA curve for fixed model contribution",file=log)
+      print(" # of terms   mean(ssqr)  sigmaA   sigma(sigmaA)")
+    for i_bin in mc1.binner().range_used():
+      sel = expectE.binner().selection(i_bin)
+      eEsel = expectE.select(sel)
+      abseE = eEsel.amplitudes().data()
+      p1 = eEsel.phases().data()
+      masked_coeffs_sel = masked_model_E.select(sel)
+      absEc = masked_coeffs_sel.amplitudes().data()
+      sigmaP = flex.mean_default(flex.pow2(absEc),0.)
+      absEc /= math.sqrt(sigmaP)
+      masked_model_E.data().set_selected(sel,
+                    masked_model_E.data().select(sel) / math.sqrt(sigmaP))
+      masked_coeffs_sel /= math.sqrt(sigmaP)
+      p2 = masked_coeffs_sel.phases().data()
+      cosdphi = flex.cos(p2 - p1)
+      dobssel = dobs.data().select(sel)
+
+      # Solve for sigmaA yielding 1st derivative of LLG approximately equal to zero (assuming only numerator matters)
+      sum0 = flex.sum(2.*dobssel*abseE*absEc*cosdphi)
+      sum1 = flex.sum(2*flex.pow2(dobssel) * (1. - flex.pow2(abseE) - flex.pow2(absEc)))
+      sum2 = flex.sum(2*flex.pow(dobssel,3)*abseE*absEc*cosdphi)
+      sum3 = flex.sum(- 2*flex.pow(dobssel,4))
+      u1 = -2*sum2**3 + 9*sum1*sum2*sum3 - 27*sum0*sum3**2
+      sqrt_arg = u1**2 - 4*(sum2**2 - 3*sum1*sum3)**3
+      if sqrt_arg < 0: # Paranoia: haven't run into this in a wide variety of calculations
+        raise Sorry("Argument of square root in sigmaA calculation is negative")
+      third = 1./3
+      x1 = (u1 + math.sqrt(sqrt_arg))**third
+      sigmaA = ( (2 * 2.**third * sum2**2 - 6 * 2.**third*sum1*sum3
+                  - 2*sum2*x1 + 2.**(2*third) * x1**2) /
+                (6 * sum3 * x1) )
+      sigmaA = max(min(sigmaA,0.999),1.E-6)
+      # Now work out approximate e.s.d. of sigmaA estimate from 2nd derivative of LLG at optimal sigmaA
+      denom = flex.pow((1-flex.pow2(dobssel)*sigmaA**2),3)
+      sum0 = flex.sum((2*flex.pow2(dobssel) * (1. - flex.pow2(abseE) - flex.pow2(absEc)))/denom)
+      sum1 = flex.sum((12*flex.pow(dobssel,3)*abseE*absEc*cosdphi)/denom)
+      sum2 = flex.sum((-6*flex.pow(dobssel,4)*(flex.pow2(abseE) + flex.pow2(absEc)))/denom)
+      sum3 = flex.sum((4*flex.pow(dobssel,5)*abseE*absEc*cosdphi)/denom)
+      sum4 = flex.sum((-2*flex.pow(dobssel,6))/denom)
+      d2LLGbydsigmaA = sum0 + sum1*sigmaA + sum2*sigmaA**2 + sum3*sigmaA**3 + sum4*sigmaA**4
+      d2LLGbydsigmaA /= over_sampling_factor
+      sigma_sigmaA = 1./math.sqrt(abs(d2LLGbydsigmaA))
+      ssqr = flex.mean_default(eEsel.d_star_sq().data(),0)
+      ndat = dobssel.size()
+      if verbosity > 1:
+        print(ndat,ssqr,sigmaA,sigma_sigmaA,file=log)
+      xdat.append(ssqr)
+      ydat.append(math.log(sigmaA))
+      wdat.append(abs(d2LLGbydsigmaA)) # Inverse variance estimate
+
+    xdat = flex.double(xdat)
+    ydat = flex.double(ydat)
+    wdat = flex.double(wdat)
+    W = flex.sum(wdat)
+    Wx = flex.sum(wdat * xdat)
+    Wy = flex.sum(wdat * ydat)
+    Wxx = flex.sum(wdat * xdat * xdat)
+    Wxy = flex.sum(wdat * xdat * ydat)
+    slope = (W * Wxy - Wx * Wy) / (W * Wxx - Wx * Wx)
+    intercept = (Wy * Wxx - Wx * Wxy) / (W * Wxx - Wx * Wx)
+    frac_complete = math.exp(2.*intercept)
+    if verbosity > 0:
+      print("Slope and intercept of sigmaA plot for fixed model contribution: ",slope,intercept,file=log)
+      print("Approximate fraction of scattering: ",frac_complete,file=log)
+    linlogsiga = flex.double()
+    logsiga_combined = flex.double()
+    sigma_linlog = math.log(1.5) # Allow 50% error in linear fit
+    i_bin_used = 0
+    for i_bin in mc1.binner().range_used():
+      sigmaA = math.exp(ydat[i_bin_used])
+      # For complete model, slope should be negative, but can be positive if the
+      # modelled part is much better ordered than the larger unmodelled part
+      linlog = min(math.log(0.999),(intercept + slope*xdat[i_bin_used]))
+      linlogsiga.append(linlog)
+      sigma_sigmaA = 1./math.sqrt(wdat[i_bin_used])
+      sigma_lnsigmaA = math.exp(-ydat[i_bin_used])*sigma_sigmaA
+      combined_logsiga = ((ydat[i_bin_used]/sigma_lnsigmaA**2 + linlog/sigma_linlog**2) /
+                         (1./sigma_lnsigmaA**2 + 1./sigma_linlog**2) )
+      logsiga_combined.append(combined_logsiga)
+      combined_siga = math.exp(combined_logsiga)
+
+      sel = expectE.binner().selection(i_bin)
+      expectE_mod.data().set_selected(sel, expectE_mod.data().select(sel)
+            - math.exp(combined_logsiga)*dobs.data().select(sel)
+              * masked_model_E.data().select(sel) )
+      masked_model_sigmaA.data().set_selected(sel, combined_siga)
+      i_bin_used += 1
+
+    if False:
+      import matplotlib.pyplot as plt
+      fig, ax = plt.subplots(2,1)
+      ax[0].plot(xdat,ydat,label="ln(sigmaA)")
+      ax[0].plot(xdat,linlogsiga,label="line fit")
+      ax[0].plot(xdat,logsiga_combined,label="combined")
+      ax[0].legend(loc="upper right")
+      ax[1].plot(xdat,flex.exp(ydat),label="sigmaA")
+      ax[1].plot(xdat,flex.exp(linlogsiga),label="line fit")
+      ax[1].plot(xdat,flex.exp(logsiga_combined),label="combined")
+      ax[1].legend(loc="lower left")
+      plt.show()
+    # write_mtz(expectE_mod,"expectE_mod.mtz","expectEmod")
 
   ssqmin = flex.min(mc1.d_star_sq().data())
   ssqmax = flex.max(mc1.d_star_sq().data())
@@ -1827,8 +2020,10 @@ def assess_cryoem_errors(
   return group_args(
     new_mmm = working_mmm,
     shift_cart = shift_cart,
-    sphere_center = list(sphere_cent),
-    expectE = expectE, dobs = dobs,
+    sphere_center = list(sphere_cent_map),
+    expectE = expectE_mod, dobs = dobs, # Temporary kludge
+    # expectE = expectE, dobs = dobs,
+    masked_model_E = masked_model_E, masked_model_sigmaA = masked_model_sigmaA,
     over_sampling_factor = over_sampling_factor,
     fraction_scattering = fraction_scattering,
     weighted_map_noise = weighted_map_noise,
@@ -1847,37 +2042,29 @@ def run():
   Optional command-line arguments (keyworded):
   --protein_mw*: molecular weight expected for protein component of ordered density
   --nucleic_mw*: same for nucleic acid component
-  --model: PDB file for model that can either be used to flatten the map around
-          the model, to search for the next component, or to cut out a sphere
-          of density to refine and score the fit of the model
-  --flatten_model: Use model to define region where map should be flattened
-  --cutout_model: Use model to define sphere to process for refining and
-          scoring the docking of this model
   --sphere_cent: Centre of sphere defining target map region (3 floats)
           defaults to centre of map
   --radius: radius of sphere (1 float)
           must be given if sphere_cent defined, otherwise
-          defaults to narrowest extent of input map divided by 4
-  --shift_map_origin: shift output mtz file to match input map on its origin?
-          default True
+          defaults to either radius enclosing 98% of ordered volume (if determined)
+          or narrowest extent of input map divided by 4
+  --no_shift_map_origin: don't shift output mtz file to match input map on its origin
+          default False
+  --no_determine_ordered_volume: don't determine ordered volume
+          default False
   --file_root: root name for output files
   --mute (or -m): mute output
   --verbose (or -v): verbose output
   --testing: extra verbose output for debugging
   * NB: At least one of protein_mw or nucleic_mw must be given
-        Either a model or a sphere can be used to specify a cutout region, but
-        not both
-        The flatten_model option cannot be combined with cutting out a sphere.
   """
   import argparse
-  from iotbx.map_model_manager import map_model_manager
-  from iotbx.data_manager import DataManager
   dm = DataManager()
   dm.set_overwrite(True)
 
   parser = argparse.ArgumentParser(
           description='Prepare cryo-EM map for docking')
-  parser.add_argument('map1',help='Map file for half-map 1')
+  parser.add_argument('map1', help='Map file for half-map 1')
   parser.add_argument('map2', help='Map file for half-map 2')
   parser.add_argument('d_min', help='d_min for maps', type=float)
   parser.add_argument('--protein_mw',
@@ -1888,43 +2075,40 @@ def run():
                       type=float)
   parser.add_argument('--sphere_points',help='Target nrefs in averaging sphere',
                       type=float, default=500.)
-  parser.add_argument('--model',help='Placed model')
-  parser.add_argument('--flatten_model',help='Flatten map around model',
-                      action='store_true')
-  parser.add_argument('--cutout_model',help='Cut out sphere around model',
-                      action='store_true')
+  parser.add_argument('--fixed_model', help='Fixed model')
   parser.add_argument('--sphere_cent',help='Centre of sphere for docking',
                       nargs=3, type=float)
   parser.add_argument('--radius',help='Radius of sphere for docking', type=float)
   parser.add_argument('--file_root',
                       help='Root of filenames for output')
-  parser.add_argument('--shift_map_origin', dest='shift_map_origin', type=bool)
-  parser.set_defaults(shift_map_origin=True)
-  parser.add_argument('-m', '--mute', dest = 'mute',
-                      help = 'Mute output', action = 'store_true')
-  parser.add_argument('-v', '--verbose', dest = 'verbose',
-                      help = 'Set output as verbose', action = 'store_true')
-  parser.add_argument('--testing', dest = 'testing',
-                      help='Set output as testing', action='store_true')
+  parser.add_argument('--no_shift_map_origin', action='store_true')
+  parser.add_argument('--no_determine_ordered_volume', action='store_true')
+  parser.add_argument('-m', '--mute', help = 'Mute output', action = 'store_true')
+  parser.add_argument('-v', '--verbose', help = 'Set output as verbose',
+                      action = 'store_true')
+  parser.add_argument('--testing', help='Set output as testing', action='store_true')
   args = parser.parse_args()
   d_min = args.d_min
   verbosity = 1
   if args.mute: verbosity = 0
   if args.verbose: verbosity = 2
   if args.testing: verbosity = 4
-  shift_map_origin = args.shift_map_origin
+  shift_map_origin = not(args.no_shift_map_origin)
+  determine_ordered_volume = not(args.no_determine_ordered_volume)
 
   cutout_specified = False
   sphere_cent = None
   radius = None
-  model = None
+  fixed_model = None
+  if args.fixed_model is not None:
+    model_file = args.fixed_model
+    fixed_model = dm.get_model(model_file)
 
   protein_mw = None
   nucleic_mw = None
   if (args.protein_mw is None) and (args.nucleic_mw is None):
-    print("At least one of protein_mw or nucleic_mw must be given")
-    sys.stdout.flush()
-    exit
+    if determine_ordered_volume:
+      raise Sorry("At least one of protein_mw or nucleic_mw must be given")
   if args.protein_mw is not None:
     protein_mw = args.protein_mw
   if args.nucleic_mw is not None:
@@ -1932,64 +2116,55 @@ def run():
 
   sphere_points = args.sphere_points
 
-  if args.model is not None:
-    if not (args.cutout_model or args.flatten_model):
-      print('Use for model must be specified (flatten or cut out map')
-      sys.stdout.flush()
-      exit
-    model_file = args.model
-    model = dm.get_model(model_file)
-
-  if (args.sphere_cent is not None) and args.cutout_model:
-    print("Only one method to define region to cut out (sphere or model) can be given")
-    sys.stdout.flush()
-    exit
   if args.sphere_cent is not None:
-    assert args.radius is not None
+    if args.radius is None:
+      raise Sorry("Radius must be provided if sphere_cent is defined")
     sphere_cent = tuple(args.sphere_cent)
     radius = args.radius
     cutout_specified = True
-  if args.cutout_model:
-    assert args.model is not None
-    sphere_cent, radius = sphere_enclosing_model(model)
-    radius = radius + d_min # Expand to allow width for density
-    cutout_specified = True
+  if (not determine_ordered_volume and not cutout_specified):
+    raise Sorry("Must determine ordered volume if cutout not specified")
 
   # Create map_model_manager containing half-maps
   map1_filename = args.map1
   mm1 = dm.get_real_map(map1_filename)
   map2_filename = args.map2
   mm2 = dm.get_real_map(map2_filename)
-  mmm = map_model_manager(model=model, map_manager_1=mm1, map_manager_2=mm2)
+  mmm = map_model_manager(map_manager_1=mm1, map_manager_2=mm2)
 
-  # Prepare maps by flattening model volume if desired
-  if args.flatten_model:
-    assert args.model is not None
-    flatten_model_region(mmm, d_min)
+  if (fixed_model):
+    mmm.add_model_by_id(model=fixed_model, model_id='fixed_model')
+    mmm.generate_map(model=fixed_model, d_min=d_min, map_id='fixed_atom_map')
 
-  mask_id = 'ordered_volume_mask'
-  add_ordered_volume_mask(mmm, d_min,
-      protein_mw=protein_mw, nucleic_mw=nucleic_mw,
-      map_id_out=mask_id)
-  if verbosity>1:
-    ordered_mm = mmm.get_map_manager_by_id(map_id=mask_id)
-    if args.file_root is not None:
-      map_file_name = args.file_root + "_ordered_volume_mask.map"
-    else:
-      map_file_name = "ordered_volume_mask.map"
-    ordered_mm.write_map(map_file_name)
+  if determine_ordered_volume:
+    mask_id = 'ordered_volume_mask'
+    add_ordered_volume_mask(mmm, d_min,
+        protein_mw=protein_mw, nucleic_mw=nucleic_mw,
+        map_id_out=mask_id)
+    if fixed_model:
+      mask_fixed_model_region(mmm, d_min, fixed_model=fixed_model)
+    if verbosity>1:
+      ordered_mm = mmm.get_map_manager_by_id(map_id=mask_id)
+      if args.file_root is not None:
+        map_file_name = args.file_root + "_ordered_volume_mask.map"
+      else:
+        map_file_name = "ordered_volume_mask.map"
+      ordered_mm.write_map(map_file_name)
 
   # Default to sphere containing most of ordered volume
   if not cutout_specified:
-    target_completeness = 0.98
-    radius = get_mask_radius(mmm.get_map_manager_by_id(mask_id),target_completeness)
     ucpars = mm1.unit_cell().parameters()
     sphere_cent = (ucpars[0]/2,ucpars[1]/2,ucpars[2]/2)
+    if determine_ordered_volume:
+      target_completeness = 0.98
+      radius = get_mask_radius(mmm.get_map_manager_by_id(mask_id),target_completeness)
+    else:
+      radius = min(ucpars[0],ucpars[1],ucpars[2])/4.
 
   # Refine to get scale and error parameters for docking region
   results = assess_cryoem_errors(mmm, d_min, sphere_points=sphere_points,
-    verbosity=verbosity, sphere_cent=sphere_cent, radius=radius,
-    shift_map_origin=shift_map_origin)
+    determine_ordered_volume=determine_ordered_volume, verbosity=verbosity,
+    sphere_cent=sphere_cent, radius=radius, shift_map_origin=shift_map_origin)
 
   expectE = results.expectE
   mtz_dataset = expectE.as_mtz_dataset(column_root_label='Emean')

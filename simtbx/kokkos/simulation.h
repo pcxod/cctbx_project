@@ -2,14 +2,34 @@
 #define SIMTBX_KOKKOS_SIMULATION_H
 
 #include "scitbx/array_family/shared.h"
+#include "scitbx/array_family/flex_types.h"
 #include "simtbx/nanoBragg/nanoBragg.h"
 #include "simtbx/kokkos/structure_factors.h"
 #include "simtbx/kokkos/detector.h"
-#include "kokkos_types.h"
+#include "kokkostbx/kokkos_types.h"
+#include "kokkostbx/kokkos_vector3.h"
+#include "kokkostbx/kokkos_matrix3.h"
+
+using vec3 = kokkostbx::vector3<CUDAREAL>;
+using mat3 = kokkostbx::matrix3<CUDAREAL>;
+using crystal_orientation_t = Kokkos::View<vec3***, Kokkos::LayoutRight, MemSpace>; // [phisteps, domains, 3]
 
 namespace simtbx { namespace Kokkos {
 
 namespace af = scitbx::af;
+
+struct diffuse_api {
+  inline diffuse_api() {};
+  inline void show() {};
+  bool enable = false;
+  mat3 anisoG;
+  mat3 anisoU;
+  int stencil_size = 1;
+  bool symmetrize_diffuse = true;
+  int laue_group_num = 12;
+  mat3 rotate_principal_axes;
+  vec3 a0, b0, c0; // cell basis vectors
+};
 
 struct exascale_api {
   inline
@@ -38,7 +58,8 @@ struct exascale_api {
     af::shared<double> const
   );
 
-  void add_background(simtbx::Kokkos::kokkos_detector &);
+  void add_background(simtbx::Kokkos::kokkos_detector &, int const&);
+  af::flex_double add_noise(simtbx::Kokkos::kokkos_detector &);
   void allocate();
   //~exascale_api();
 
@@ -60,9 +81,11 @@ struct exascale_api {
   vector_cudareal_t m_source_I = vector_cudareal_t("m_source_I", 0);
   vector_cudareal_t m_source_lambda = vector_cudareal_t("m_source_lambda", 0);
   vector_cudareal_t m_mosaic_umats = vector_cudareal_t("m_mosaic_umats", 0);
+  crystal_orientation_t m_crystal_orientation = crystal_orientation_t("m_crystal_orientation", 0, 0, 3);
   CUDAREAL m_water_size = 0;
   CUDAREAL m_water_F = 0;
   CUDAREAL m_water_MW = 0;
+  diffuse_api diffuse;
 };
 } // Kokkos
 } // simtbx

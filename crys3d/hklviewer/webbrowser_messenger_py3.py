@@ -47,6 +47,7 @@ class WBmessenger(object):
     try:
       self.parent = viewerparent
       self.ProcessBrowserMessage = self.parent.ProcessBrowserMessage
+      self.on_browser_connection = self.parent.on_browser_connection
       self.websockport = self.parent.websockport
       self.sleeptime = self.parent.sleeptime
       self.mprint = self.parent.mprint
@@ -63,14 +64,22 @@ class WBmessenger(object):
       self.mywebsock = None
       self.websockeventloop = None
       self.clientmsgqueue_sem = threading.Semaphore()
+      self.listening_sem = threading.Semaphore()
+      self.listening_sem.acquire(blocking=True, timeout=lock_timeout)
+      self.mprint("WBmessenger got listening_sem", verbose="threadingmsg")
     except Exception as e:
       print( to_str(e) + "\n" + traceback.format_exc(limit=10))
 
 
   def start_server_loop(self):
-    #time.sleep(20)
+    #time.sleep(10)
+    self.mprint("HKLviewerWebSockServerThread started", verbose=1)
     self.websockeventloop.run_until_complete(self.server)
+    self.mprint("websocket server is listening", verbose=1)
+    self.listening_sem.release()
+    self.mprint("WBmessenger released listening_sem", verbose="threadingmsg")
     self.websockeventloop.run_forever()
+    self.mprint("websockeventloop has run forever", verbose=1)
 
 
   def StartWebsocket(self):
@@ -84,24 +93,23 @@ class WBmessenger(object):
         if self.parent.debug is not None:
           self.websockeventloop.set_debug(True)
           import logging
-          logging.getLogger("asyncio").setLevel(logging.WARNING)
+          logger = logging.getLogger("websockets.server")
+          logger.setLevel(logging.DEBUG)
+          logger.addHandler(logging.StreamHandler())
 
       self.server = websockets.serve(self.WebSockHandler, 'localhost',
                                       self.websockport, #ssl=ssl_context,
                                       create_protocol=MyWebSocketServerProtocol,
                                       )
       self.mprint("Starting websocket server on port %s" %str(self.websockport), verbose=1)
-      time.sleep(0.2)
       # run_forever() blocks execution so put in a separate thread
       self.wst = threading.Thread(target=self.start_server_loop, name="HKLviewerWebSockServerThread" )
       self.wst.daemon = True # ensure thread dies whenever program terminates through sys.exit()
       self.wst.start()
-
       self.websocketclientmsgthrd = threading.Thread(target = self.ProcessClientMessageLoop,
                                                      name="WebsocketClientMessageThread")
       self.websocketclientmsgthrd.daemon = True # ensure thread dies whenever program terminates through sys.exit()
       self.websocketclientmsgthrd.start()
-
       if not self.server:
         raise Sorry("Could not connect to web browser")
     except Exception as e:
@@ -116,7 +124,8 @@ class WBmessenger(object):
 
 
   async def WebSockHandler(self, mywebsock, path):
-    self.mprint("Entering WebSockHandler", verbose=1)
+    # invoked only when a new websocket client (the browser) is waiting to connect
+    self.mprint("Pending websocket client wanting to connect", verbose=1)
     if hasattr(self.mywebsock, "state") and self.mywebsock.state == 2 \
                                         and self.websockclient is not None:
       await self.mywebsock.wait_closed()
@@ -129,8 +138,8 @@ class WBmessenger(object):
     mywebsock.ondisconnect = self.OnDisconnectWebsocketClient
     mywebsock.onlostconnect = self.OnLostConnectWebsocketClient
     self.mywebsock = mywebsock
-    getmsgtask = asyncio.ensure_future(self.ReceiveMessage())
-    sendmsgtask = asyncio.ensure_future(self.WebBrowserMsgQueue())
+    getmsgtask = asyncio.ensure_future(self.ReceiveMsgQueue())
+    sendmsgtask = asyncio.ensure_future(self.SendMsgQueue())
     done, pending = await asyncio.wait( [getmsgtask, sendmsgtask],
       return_when=asyncio.FIRST_COMPLETED,
     )
@@ -140,7 +149,7 @@ class WBmessenger(object):
     self.ishandling = False
 
 
-  async def ReceiveMessage(self):
+  async def ReceiveMsgQueue(self):
     while True:
       await asyncio.sleep(self.sleeptime)
       if self.was_disconnected in [4242, # reload
@@ -151,6 +160,7 @@ class WBmessenger(object):
                                     1000
                                     ]:
         await self.mywebsock.wait_closed()
+        self.mprint("ReceiveMsgQueue shutdown", verbose=1)
         return # shutdown
       if self.websockclient is None or self.mywebsock.client_connected is None:
         await asyncio.sleep(self.sleeptime)
@@ -169,7 +179,7 @@ class WBmessenger(object):
       # present in clientmsgqueue, then replace it with message rather than appending it to clientmsgqueue.
       notfound = True
       for rmsg in self.replace_msg_lst:
-        if rmsg in message:
+        if isinstance(message, str) and rmsg in message:
           for msg in self.clientmsgqueue:
             if rmsg in msg:
               msg = message
@@ -180,7 +190,7 @@ class WBmessenger(object):
       self.clientmsgqueue_sem.release()
 
 
-  async def WebBrowserMsgQueue(self):
+  async def SendMsgQueue(self):
     while True:
       try:
         nwait = 0.0
@@ -192,7 +202,7 @@ class WBmessenger(object):
                                       1005,
                                       1000
                                       ]:
-          self.mprint("WebBrowserMsgQueue shutdown", verbose=1)
+          self.mprint("SendMsgQueue shutdown", verbose=1)
           return # shutdown
         if self.parent.javascriptcleaned or self.was_disconnected == 4241: # or self.was_disconnected == 1001:
           return
@@ -202,7 +212,8 @@ class WBmessenger(object):
           while not self.browserisopen:  #self.websockclient:
             await asyncio.sleep(self.sleeptime)
             nwait += self.sleeptime
-            if nwait > self.parent.handshakewait or self.parent.javascriptcleaned or not self.parent.viewerparams.scene_id is not None:
+            if nwait > self.parent.handshakewait or self.parent.javascriptcleaned \
+                or not self.parent.params.viewer.scene_id is not None:
               continue
           if gotsent:
             self.msgqueue.remove( self.msgqueue[0] )
@@ -229,8 +240,9 @@ class WBmessenger(object):
   def OnConnectWebsocketClient(self, client):
     self.websockclient = client
     self.mprint( "Browser connected " + str( self.websockclient ), verbose=1 )
+    self.on_browser_connection()
     self.was_disconnected = None
-    if self.parent.lastviewmtrx and self.parent.viewerparams.scene_id is not None:
+    if self.parent.lastviewmtrx and self.parent.params.viewer.scene_id is not None:
       self.parent.set_volatile_params()
       self.mprint( "Reorienting client after refresh:" + str( self.websockclient ), verbose=2 )
       self.AddToBrowserMsgQueue("ReOrient", self.parent.lastviewmtrx)
@@ -240,6 +252,7 @@ class WBmessenger(object):
     msg =  "Browser lost connection %s, code %s, reason: %s" %(str(self.websockclient), close_code, close_reason)
     self.mprint(msg , verbose=1 )
     self.was_disconnected = close_code
+    self.browserisopen = False
     self.websockclient = None
     self.ishandling = False
 

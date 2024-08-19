@@ -2,7 +2,7 @@
 //#include <cudatbx/cuda_base.cuh>
 #include "simtbx/kokkos/simulation.h"
 #include "simtbx/kokkos/simulation_kernels.h"
-#include "simtbx/kokkos/kokkos_utils.h"
+#include "kokkostbx/kokkos_utils.h"
 #include "scitbx/array_family/flex_types.h"
 
 #define THREADS_PER_BLOCK_X 128
@@ -100,27 +100,22 @@ namespace Kokkos {
     simtbx::Kokkos::kokkos_detector & kdt,
     double const& weight
   ){
-    // cudaSafeCall(cudaSetDevice(SIM.device_Id));
-
     // transfer source_I, source_lambda
     // the int arguments are for sizes of the arrays
     int source_count = SIM.sources;
     af::shared<double> weighted_sources_I = af::shared<double>(source_count);
     double* wptr = weighted_sources_I.begin();
     for (std::size_t iwt = 0; iwt < source_count; iwt++){wptr[iwt] = weight*(SIM.source_I[iwt]);}
-    transfer_double2kokkos(m_source_I, wptr, source_count);
-    transfer_double2kokkos(m_source_lambda, SIM.source_lambda, source_count);
-    // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(cu_source_I, SIM.source_I, SIM.sources));
-    // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(cu_source_lambda, SIM.source_lambda, SIM.sources));
+    kokkostbx::transfer_double2kokkos(m_source_I, wptr, source_count);
+    kokkostbx::transfer_double2kokkos(m_source_lambda, SIM.source_lambda, source_count);
+
+    ::Kokkos::resize(m_crystal_orientation, SIM.phisteps, SIM.mosaic_domains, 3);
+    calc_CrystalOrientations(
+      SIM.phi0, SIM.phistep, SIM.phisteps, m_spindle_vector, m_a0, m_b0, m_c0, SIM.mosaic_spread,
+      SIM.mosaic_domains, m_mosaic_umats, m_crystal_orientation);
 
     // magic happens here(?): take pointer from singleton, temporarily use it for add Bragg iteration:
     vector_cudareal_t current_channel_Fhkl = kec.d_channel_Fhkl[ichannel];
-
-    // cudaDeviceProp deviceProps = { 0 };
-    // cudaSafeCall(cudaGetDeviceProperties(&deviceProps, SIM.device_Id));
-    // int smCount = deviceProps.multiProcessorCount;
-    // dim3 threadsPerBlock(THREADS_PER_BLOCK_X, THREADS_PER_BLOCK_Y);
-    // dim3 numBlocks(smCount * 8, 1);
 
     std::size_t panel_size = kdt.m_slow_dim_size * kdt.m_fast_dim_size;
 
@@ -128,24 +123,28 @@ namespace Kokkos {
     for (std::size_t panel_id = 0; panel_id < kdt.m_panel_count; panel_id++){
       // loop thru panels and increment the array ptrs
       kokkosSpotsKernel(
-      kdt.m_slow_dim_size, kdt.m_fast_dim_size, SIM.roi_xmin,
-      SIM.roi_xmax, SIM.roi_ymin, SIM.roi_ymax, SIM.oversample, SIM.point_pixel,
-      SIM.pixel_size, m_subpixel_size, m_steps, SIM.detector_thickstep, SIM.detector_thicksteps,
-      SIM.detector_thick, SIM.detector_attnlen,
-      extract_subview(kdt.m_sdet_vector, panel_id, m_vector_length),
-      extract_subview(kdt.m_fdet_vector, panel_id, m_vector_length),
-      extract_subview(kdt.m_odet_vector, panel_id, m_vector_length),
-      extract_subview(kdt.m_pix0_vector, panel_id, m_vector_length),
-      SIM.curved_detector, kdt.metrology.dists[panel_id], kdt.metrology.dists[panel_id], m_beam_vector,
-      kdt.metrology.Xbeam[panel_id], kdt.metrology.Ybeam[panel_id],
-      SIM.dmin, SIM.phi0, SIM.phistep, SIM.phisteps, m_spindle_vector,
-      SIM.sources, m_source_X, m_source_Y, m_source_Z,
-      m_source_I, m_source_lambda, m_a0, m_b0,
-      m_c0, SIM.xtal_shape, SIM.mosaic_spread, SIM.mosaic_domains, m_mosaic_umats,
+      kdt.m_slow_dim_size, kdt.m_fast_dim_size, SIM.roi_xmin, SIM.roi_xmax,
+      SIM.roi_ymin, SIM.roi_ymax, SIM.oversample, SIM.point_pixel,
+      SIM.pixel_size, m_subpixel_size, m_steps, SIM.detector_thickstep,
+      SIM.detector_thicksteps, SIM.detector_thick, SIM.detector_attnlen,
+      extract_subview(kdt.m_sdet_vector, panel_id, 1),
+      extract_subview(kdt.m_fdet_vector, panel_id, 1),
+      extract_subview(kdt.m_odet_vector, panel_id, 1),
+      extract_subview(kdt.m_pix0_vector, panel_id, 1),
+      SIM.curved_detector, kdt.metrology.dists[panel_id], kdt.metrology.dists[panel_id],
+      m_beam_vector,
+      SIM.dmin, SIM.phisteps, SIM.sources,
+      m_source_X, m_source_Y, m_source_Z,
+      m_source_I, m_source_lambda,
+      SIM.xtal_shape,
+      SIM.mosaic_domains, m_crystal_orientation,
       SIM.Na, SIM.Nb, SIM.Nc, SIM.V_cell,
-      m_water_size, m_water_F, m_water_MW, simtbx::nanoBragg::r_e_sqr, SIM.fluence,
-      simtbx::nanoBragg::Avogadro, SIM.spot_scale, SIM.integral_form, SIM.default_F,
-      SIM.interpolate, current_channel_Fhkl, kec.m_FhklParams, SIM.nopolar,
+      m_water_size, m_water_F, m_water_MW, simtbx::nanoBragg::r_e_sqr,
+      SIM.fluence, simtbx::nanoBragg::Avogadro, SIM.spot_scale, SIM.integral_form,
+      SIM.default_F,
+      current_channel_Fhkl,
+      kec.m_FhklParams,
+      SIM.nopolar,
       m_polar_vector, SIM.polarization, SIM.fudge,
       // &(kdt.m_maskimage[panel_size * panel_id]),
       nullptr,
@@ -197,10 +196,15 @@ namespace Kokkos {
     // transfer source_I, source_lambda
     // the int arguments are for sizes of the arrays
     int source_count = SIM.sources;
-    transfer_double2kokkos(m_source_I, SIM.source_I, source_count);
-    transfer_double2kokkos(m_source_lambda, SIM.source_lambda, source_count);
+    kokkostbx::transfer_double2kokkos(m_source_I, SIM.source_I, source_count);
+    kokkostbx::transfer_double2kokkos(m_source_lambda, SIM.source_lambda, source_count);
     // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(m_source_I, SIM.source_I, SIM.sources));
     // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(m_source_lambda, SIM.source_lambda, SIM.sources));
+
+    ::Kokkos::resize(m_crystal_orientation, SIM.phisteps, SIM.mosaic_domains, 3);
+    calc_CrystalOrientations(
+      SIM.phi0, SIM.phistep, SIM.phisteps, m_spindle_vector, m_a0, m_b0, m_c0, SIM.mosaic_spread,
+      SIM.mosaic_domains, m_mosaic_umats, m_crystal_orientation);
 
     // magic happens here: take pointer from singleton, temporarily use it for add Bragg iteration:
     vector_cudareal_t current_channel_Fhkl = kec.d_channel_Fhkl[ichannel];
@@ -213,29 +217,35 @@ namespace Kokkos {
 
     // for call for all panels at the same time
 
+      // set up cell basis vectors for the diffuse parameters (convert vec4 to vec3)
+      diffuse.a0 << SIM.a0[1],SIM.a0[2],SIM.a0[3]; diffuse.b0 << SIM.b0[1],SIM.b0[2],SIM.b0[3]; diffuse.c0 << SIM.c0[1],SIM.c0[2],SIM.c0[3];
+
       debranch_maskall_Kernel(
       kdt.m_panel_count, kdt.m_slow_dim_size, kdt.m_fast_dim_size, active_pixel_list.size(),
       SIM.oversample, SIM.point_pixel,
       SIM.pixel_size, m_subpixel_size, m_steps,
-      SIM.detector_thickstep, SIM.detector_thicksteps,
-      SIM.detector_thick, SIM.detector_attnlen,
-      m_vector_length,
+      SIM.detector_thickstep, SIM.detector_thicksteps, SIM.detector_thick, SIM.detector_attnlen,
       kdt.m_sdet_vector,
       kdt.m_fdet_vector,
       kdt.m_odet_vector,
       kdt.m_pix0_vector,
-      kdt.m_distance, kdt.m_distance, m_beam_vector,
-      kdt.m_Xbeam, kdt.m_Ybeam,
-      SIM.dmin, SIM.phi0, SIM.phistep, SIM.phisteps, m_spindle_vector,
-      SIM.sources, m_source_X, m_source_Y, m_source_Z,
-      m_source_I, m_source_lambda, m_a0, m_b0,
-      m_c0, SIM.xtal_shape, SIM.mosaic_domains, m_mosaic_umats,
+      kdt.m_distance,
+      m_beam_vector,
+      SIM.dmin, SIM.phisteps, SIM.sources,
+      m_source_X, m_source_Y,
+      m_source_Z,
+      m_source_I, m_source_lambda,
+      SIM.mosaic_domains, m_crystal_orientation,
       SIM.Na, SIM.Nb, SIM.Nc, SIM.V_cell,
-      m_water_size, m_water_F, m_water_MW, simtbx::nanoBragg::r_e_sqr, SIM.fluence,
-      simtbx::nanoBragg::Avogadro, SIM.spot_scale, SIM.integral_form, SIM.default_F,
-      current_channel_Fhkl, kec.m_FhklParams, SIM.nopolar,
+      m_water_size, m_water_F, m_water_MW, simtbx::nanoBragg::r_e_sqr,
+      SIM.fluence, simtbx::nanoBragg::Avogadro, SIM.spot_scale, SIM.integral_form,
+      SIM.default_F,
+      current_channel_Fhkl,
+      kec.m_FhklParams,
+      SIM.nopolar,
       m_polar_vector, SIM.polarization, SIM.fudge,
       kdt.m_active_pixel_list,
+      diffuse,
       // return arrays:
       kdt.m_floatimage,
       kdt.m_omega_reduction,
@@ -267,12 +277,18 @@ namespace Kokkos {
 
     SCITBX_ASSERT(SIM.sources == ichannels.size()); /* For each nanoBragg source, this value instructs
     the simulation where to look for structure factors.  If -1, skip this source wavelength. */
+    SCITBX_ASSERT(SIM.sources == weight.size());
 
     for (int ictr = 0; ictr < SIM.sources; ++ictr){
       if (ichannels[ictr] < 0) continue; // the ichannel array
       //printf("HA HA %4d channel %4d, %5.1f %5.1f %5.1f %10.5f %10.5g\n",ictr,ichannels[ictr],
       //  SIM.source_X[ictr], SIM.source_Y[ictr], SIM.source_Z[ictr],
       //  SIM.source_I[ictr], SIM.source_lambda[ictr]);
+
+      ::Kokkos::resize(m_crystal_orientation, SIM.phisteps, SIM.mosaic_domains, 3);
+      calc_CrystalOrientations(
+      SIM.phi0, SIM.phistep, SIM.phisteps, m_spindle_vector, m_a0, m_b0, m_c0, SIM.mosaic_spread,
+      SIM.mosaic_domains, m_mosaic_umats, m_crystal_orientation);
 
       // magic happens here: take pointer from singleton, temporarily use it for add Bragg iteration:
       vector_cudareal_t current_channel_Fhkl = kec.d_channel_Fhkl[ichannels[ictr]];
@@ -283,35 +299,41 @@ namespace Kokkos {
       vector_cudareal_t c_source_I = vector_cudareal_t("c_source_I", 0);
       vector_cudareal_t c_source_lambda = vector_cudareal_t("c_source_lambda", 0);
       double weighted_I = SIM.source_I[ictr] * weight[ictr];
-      transfer_double2kokkos(c_source_X, &(SIM.source_X[ictr]), 1);
-      transfer_double2kokkos(c_source_Y, &(SIM.source_Y[ictr]), 1);
-      transfer_double2kokkos(c_source_Z, &(SIM.source_Z[ictr]), 1);
-      transfer_double2kokkos(c_source_I, &(weighted_I), 1);
-      transfer_double2kokkos(c_source_lambda, &(SIM.source_lambda[ictr]), 1);
+      kokkostbx::transfer_double2kokkos(c_source_X, &(SIM.source_X[ictr]), 1);
+      kokkostbx::transfer_double2kokkos(c_source_Y, &(SIM.source_Y[ictr]), 1);
+      kokkostbx::transfer_double2kokkos(c_source_Z, &(SIM.source_Z[ictr]), 1);
+      kokkostbx::transfer_double2kokkos(c_source_I, &(weighted_I), 1);
+      kokkostbx::transfer_double2kokkos(c_source_lambda, &(SIM.source_lambda[ictr]), 1);
+
+      // set up cell basis vectors for the diffuse parameters (convert vec4 to vec3)
+      diffuse.a0 << SIM.a0[1],SIM.a0[2],SIM.a0[3]; diffuse.b0 << SIM.b0[1],SIM.b0[2],SIM.b0[3]; diffuse.c0 << SIM.c0[1],SIM.c0[2],SIM.c0[3];
 
       debranch_maskall_Kernel(
       kdt.m_panel_count, kdt.m_slow_dim_size, kdt.m_fast_dim_size, active_pixel_list.size(),
       SIM.oversample, SIM.point_pixel,
       SIM.pixel_size, m_subpixel_size, m_steps,
-      SIM.detector_thickstep, SIM.detector_thicksteps,
-      SIM.detector_thick, SIM.detector_attnlen,
-      m_vector_length,
+      SIM.detector_thickstep, SIM.detector_thicksteps, SIM.detector_thick, SIM.detector_attnlen,
       kdt.m_sdet_vector,
       kdt.m_fdet_vector,
       kdt.m_odet_vector,
       kdt.m_pix0_vector,
-      kdt.m_distance, kdt.m_distance, m_beam_vector,
-      kdt.m_Xbeam, kdt.m_Ybeam,
-      SIM.dmin, SIM.phi0, SIM.phistep, SIM.phisteps, m_spindle_vector,
-      1, c_source_X, c_source_Y, c_source_Z,
-      c_source_I, c_source_lambda, m_a0, m_b0,
-      m_c0, SIM.xtal_shape, SIM.mosaic_domains, m_mosaic_umats,
+      kdt.m_distance,
+      m_beam_vector,
+      SIM.dmin, SIM.phisteps, 1,
+      c_source_X, c_source_Y,
+      c_source_Z,
+      c_source_I, c_source_lambda,
+      SIM.mosaic_domains, m_crystal_orientation,
       SIM.Na, SIM.Nb, SIM.Nc, SIM.V_cell,
-      m_water_size, m_water_F, m_water_MW, simtbx::nanoBragg::r_e_sqr, SIM.fluence,
-      simtbx::nanoBragg::Avogadro, SIM.spot_scale, SIM.integral_form, SIM.default_F,
-      current_channel_Fhkl, kec.m_FhklParams, SIM.nopolar,
+      m_water_size, m_water_F, m_water_MW, simtbx::nanoBragg::r_e_sqr,
+      SIM.fluence, simtbx::nanoBragg::Avogadro, SIM.spot_scale, SIM.integral_form,
+      SIM.default_F,
+      current_channel_Fhkl,
+      kec.m_FhklParams,
+      SIM.nopolar,
       m_polar_vector, SIM.polarization, SIM.fudge,
       kdt.m_active_pixel_list,
+      diffuse,
       // return arrays:
       kdt.m_floatimage,
       kdt.m_omega_reduction,
@@ -325,14 +347,14 @@ namespace Kokkos {
   }
 
   void
-  exascale_api::add_background(simtbx::Kokkos::kokkos_detector & kdt) {
+  exascale_api::add_background(simtbx::Kokkos::kokkos_detector & kdt, int const& override_source) {
         // cudaSafeCall(cudaSetDevice(SIM.device_Id));
 
         // transfer source_I, source_lambda
         // the int arguments are for sizes of the arrays
         int sources_count = SIM.sources;
-        transfer_double2kokkos(m_source_I, SIM.source_I, sources_count);
-        transfer_double2kokkos(m_source_lambda, SIM.source_lambda, sources_count);
+        kokkostbx::transfer_double2kokkos(m_source_I, SIM.source_I, sources_count);
+        kokkostbx::transfer_double2kokkos(m_source_lambda, SIM.source_lambda, sources_count);
         // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(m_source_I, SIM.source_I, SIM.sources));
         // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(m_source_lambda, SIM.source_lambda, SIM.sources));
 
@@ -376,13 +398,13 @@ namespace Kokkos {
         // the for loop around panels.  Offsets given.
         for (std::size_t panel_id = 0; panel_id < kdt.m_panel_count; panel_id++) {
           add_background_kokkos_kernel(SIM.sources,
-          SIM.oversample,
+          SIM.oversample, override_source,
           SIM.pixel_size, kdt.m_slow_dim_size, kdt.m_fast_dim_size, SIM.detector_thicksteps,
           SIM.detector_thickstep, SIM.detector_attnlen,
-          extract_subview(kdt.m_sdet_vector, panel_id, m_vector_length),
-          extract_subview(kdt.m_fdet_vector, panel_id, m_vector_length),
-          extract_subview(kdt.m_odet_vector, panel_id, m_vector_length),
-          extract_subview(kdt.m_pix0_vector, panel_id, m_vector_length),
+          extract_subview(kdt.m_sdet_vector, panel_id, 1),
+          extract_subview(kdt.m_fdet_vector, panel_id, 1),
+          extract_subview(kdt.m_odet_vector, panel_id, 1),
+          extract_subview(kdt.m_pix0_vector, panel_id, 1),
           kdt.metrology.dists[panel_id], SIM.point_pixel, SIM.detector_thick,
           m_source_X, m_source_Y, m_source_Z,
           m_source_lambda, m_source_I,
@@ -400,6 +422,29 @@ namespace Kokkos {
 
         // cudaSafeCall(cudaFree(cu_stol_of));
         // cudaSafeCall(cudaFree(cu_Fbg_of));
+  }
+
+  af::flex_double
+  exascale_api::add_noise(simtbx::Kokkos::kokkos_detector & kdt) {
+        // put raw pixels into a temporary hold
+        af::flex_double tmp_hold_pixels = kdt.get_raw_pixels();
+        std::size_t panel_size = kdt.m_slow_dim_size * kdt.m_fast_dim_size;
+        af::flex_double panel_pixels = af::flex_double(af::flex_grid<>(kdt.m_slow_dim_size,kdt.m_fast_dim_size), af::init_functor_null<double>());
+        for (std::size_t panel_id = 0; panel_id < kdt.m_panel_count; panel_id++) {
+          double* dst_beg = panel_pixels.begin();
+          double* dst_end = panel_pixels.end();
+          double* dstptr = dst_beg;
+          for (double *srcptr = &(tmp_hold_pixels[panel_id*panel_size]); dstptr != dst_end; ){
+            *dstptr++ = *srcptr++;
+          } // get the pixels from one panel on GPU memory into panel_pixels for add_noise
+          SIM.add_noise(panel_pixels);
+          dstptr = dst_beg;
+          for (double *srcptr = &(tmp_hold_pixels[panel_id*panel_size]); dstptr != dst_end; ){
+            *srcptr++ = *dstptr++;
+          } // return the pixels from SIM.raw_pixels to temporary array
+        }
+        ::Kokkos::fence();
+        return tmp_hold_pixels;
   }
 
   void
@@ -432,11 +477,11 @@ namespace Kokkos {
 
     //const int vector_length = 4;
 
-    transfer_double2kokkos(m_beam_vector, SIM.beam_vector, m_vector_length);
-    transfer_double2kokkos(m_spindle_vector, SIM.spindle_vector, m_vector_length);
-    transfer_double2kokkos(m_a0, SIM.a0, m_vector_length);
-    transfer_double2kokkos(m_b0, SIM.b0, m_vector_length);
-    transfer_double2kokkos(m_c0, SIM.c0, m_vector_length);
+    kokkostbx::transfer_double2kokkos(m_beam_vector, SIM.beam_vector, m_vector_length);
+    kokkostbx::transfer_double2kokkos(m_spindle_vector, SIM.spindle_vector, m_vector_length);
+    kokkostbx::transfer_double2kokkos(m_a0, SIM.a0, m_vector_length);
+    kokkostbx::transfer_double2kokkos(m_b0, SIM.b0, m_vector_length);
+    kokkostbx::transfer_double2kokkos(m_c0, SIM.c0, m_vector_length);
 
     // cudaSafeCall(cudaMalloc((void ** )&cu_beam_vector, sizeof(*cu_beam_vector) * vector_length));
     // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(cu_beam_vector, SIM.beam_vector, vector_length));
@@ -457,17 +502,17 @@ namespace Kokkos {
     // Optimization do it only once here rather than multiple time per pixel in the GPU.
     double polar_vector_unitized[4];
     cpu_unitize(SIM.polar_vector, polar_vector_unitized);
-    transfer_double2kokkos(m_polar_vector, polar_vector_unitized, m_vector_length);
+    kokkostbx::transfer_double2kokkos(m_polar_vector, polar_vector_unitized, m_vector_length);
 
     int sources_count = SIM.sources;
-    transfer_double2kokkos(m_source_X, SIM.source_X, sources_count);
-    transfer_double2kokkos(m_source_Y, SIM.source_Y, sources_count);
-    transfer_double2kokkos(m_source_Z, SIM.source_Z, sources_count);
-    transfer_double2kokkos(m_source_I, SIM.source_I, sources_count);
-    transfer_double2kokkos(m_source_lambda, SIM.source_lambda, sources_count);
+    kokkostbx::transfer_double2kokkos(m_source_X, SIM.source_X, sources_count);
+    kokkostbx::transfer_double2kokkos(m_source_Y, SIM.source_Y, sources_count);
+    kokkostbx::transfer_double2kokkos(m_source_Z, SIM.source_Z, sources_count);
+    kokkostbx::transfer_double2kokkos(m_source_I, SIM.source_I, sources_count);
+    kokkostbx::transfer_double2kokkos(m_source_lambda, SIM.source_lambda, sources_count);
 
     int mosaic_domains_count = SIM.mosaic_domains;
-    transfer_double2kokkos(m_mosaic_umats, SIM.mosaic_umats, mosaic_domains_count * 9);
+    kokkostbx::transfer_double2kokkos(m_mosaic_umats, SIM.mosaic_umats, mosaic_domains_count * 9);
 
     // cudaSafeCall(cudaMalloc((void ** )&cu_polar_vector, sizeof(*cu_polar_vector) * vector_length));
     // cudaSafeCall(cudaMemcpyVectorDoubleToDevice(cu_polar_vector, polar_vector_unitized, vector_length));

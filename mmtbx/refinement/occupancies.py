@@ -132,15 +132,8 @@ class minimizer(object):
     adopt_init_args(self, locals())
     self.fmodels.create_target_functors()
     self.fmodels.prepare_target_functors_for_minimization()
-    from phenix.refinement import weight_xray_chem
-    self.weights = weight_xray_chem.weights(wx       = 1,
-                                            wx_scale = 1,
-                                            angle_x  = None,
-                                            wn       = 1,
-                                            wn_scale = 1,
-                                            angle_n  = None,
-                                            w        = 0,
-                                            wxn      = 1) # XXX
+    from mmtbx.refinement import weights
+    self.weights = weights.weights(wx = 1, wx_scale = 1, w = 0)
     self.par_min = self.par_initial.deep_copy()
     self.x = self.pack(self.par_min)
     self.n = self.x.size()
@@ -431,6 +424,14 @@ def occupancy_selections(
           cg_sel.append(list(sel))
       if(len(cg_sel) > 0):
         result.append(cg_sel)
+
+  if (constrain_correlated_3d_groups) and (len(result) > 0):
+      result = assemble_constraint_groups_3d(
+        xray_structure=model.get_xray_structure(),
+        pdb_atoms=model.get_atoms(),
+        constraint_groups=result,
+        log=log)
+
   if(add_water):
     water_selection = get_atom_selections(
       model                 = model,
@@ -438,13 +439,36 @@ def occupancy_selections(
       iselection            = True,
       allow_empty_selection = True,
       one_selection_array   = True)
+    def flatten(lst):
+      flat_list = []
+      for item in lst:
+          if isinstance(item, list):
+              flat_list.extend(flatten(item))
+          else:
+              flat_list.append(item)
+      return flat_list
+    occ_groups_of_more_than_one = []
+    for g in result:
+      if len(g)>1:
+        occ_groups_of_more_than_one.extend( flatten(g) )
+    water_selection = list(water_selection)
+    wocc = model.get_hierarchy().atoms().extract_occ()
+    wsel = model.solvent_selection().iselection()
+    wremove = []
+    for i in wsel:
+       if wocc[i]<1.e-6:
+         water_selection.remove(i)
+       if i in occ_groups_of_more_than_one:
+         water_selection.remove(i)
     result = add_occupancy_selection(
       result     = result,
       size       = model.get_number_of_atoms(),
-      selection  = water_selection,
+      selection  = flex.size_t(water_selection),
       hd_special = None)
+
   list_3d_as_bool_selection(
     list_3d=result, size=model.get_number_of_atoms())
+
   if(len(result) == 0): result = None
   if(as_flex_arrays and result is not None):
     result_ = []
@@ -454,12 +478,6 @@ def occupancy_selections(
         result__.append(flex.size_t(sel))
       result_.append(result__)
     result = result_
-    if (constrain_correlated_3d_groups) and (len(result) > 0):
-      result = assemble_constraint_groups_3d(
-        xray_structure=model.get_xray_structure(),
-        pdb_atoms=model.get_atoms(),
-        constraint_groups=result,
-        log=log)
   return result
 
 def occupancy_regroupping(pdb_hierarchy, cgs):

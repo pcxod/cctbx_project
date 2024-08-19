@@ -5,6 +5,7 @@ import scitbx.array_family.shared # import dependency
 import cctbx.geometry # import dependency
 from libtbx.test_utils import approx_equal
 from libtbx.str_utils import show_string
+from libtbx import group_args
 
 import boost_adaptbx.boost.python as bp
 from six.moves import range
@@ -64,7 +65,6 @@ class proxy_registry_base(object):
     self.proxies = proxies
     self.strict_conflict_handling = strict_conflict_handling
     self.n_resolved_conflicts = 0
-    self.counts = flex.size_t()
     self.discard_table()
 
   def initialize_table(self):
@@ -80,11 +80,9 @@ class proxy_registry_base(object):
   def append_custom_proxy(self, proxy):
     assert self.table is None
     self.proxies.append(proxy)
-    self.counts.append(1)
 
   def _append_proxy(self, source_info, proxy, process_result):
     self.proxies.append(proxy)
-    self.counts.append(1)
     self.source_labels.append(source_info.labels())
     self.source_n_expected_atoms.append(source_info.n_expected_atoms())
     process_result.tabulated_proxy = proxy
@@ -95,6 +93,7 @@ class proxy_registry_base(object):
         proxy,
         i_list,
         process_result):
+    # Almost never called.
     source_n_expected_atoms = source_info.n_expected_atoms()
     if (self.strict_conflict_handling
         or self.source_n_expected_atoms[i_list]
@@ -111,12 +110,55 @@ class proxy_registry_base(object):
         process_result.tabulated_proxy = proxy
 
 class bond_simple_proxy_registry(proxy_registry_base):
+  """
+  self.table:
+  [ {iseq1: Nproxy} ] , index in this array is iseq0
+  """
 
   def __init__(self, n_seq, strict_conflict_handling):
     proxy_registry_base.__init__(self,
       proxies=shared_bond_simple_proxy(),
       strict_conflict_handling=strict_conflict_handling)
     self.n_seq = n_seq
+
+  def expand_with_ncs(self, nrgl, masters_and_rest_iselection):
+    # print("original proxies:", [p.i_seqs for p in self.proxies])
+    # nrgl._show(brief=False)
+    additional_proxies = []
+    for i in range(len(self.proxies)):
+      p = self.proxies[i]
+      new_current_proxy_iseqs = (masters_and_rest_iselection[p.i_seqs[0]],
+                                 masters_and_rest_iselection[p.i_seqs[1]])
+      new_master_p = bond_simple_proxy(
+          i_seqs = new_current_proxy_iseqs,
+          distance_ideal=p.distance_ideal,
+          weight=p.weight,
+          slack=p.slack,
+          limit=p.limit,
+          top_out=p.top_out,
+          origin_id=p.origin_id).sort_i_seqs()
+      self.proxies[i] = new_master_p
+      all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      # print('  i, p.i_seqs', i, p.i_seqs)
+      # print('  all_new_iseqs', all_new_iseqs)
+      if all_new_iseqs is not None:
+        for new_iseqs in all_new_iseqs:
+          new_proxy = bond_simple_proxy(
+              i_seqs=new_iseqs,
+              distance_ideal=p.distance_ideal,
+              weight=p.weight,
+              slack=p.slack,
+              limit=p.limit,
+              top_out=p.top_out,
+              origin_id=p.origin_id).sort_i_seqs()
+          # marking table
+          self.table[new_iseqs[0]][new_iseqs[1]] = self.proxies.size()
+          # ~ self._append_proxy
+          additional_proxies.append(new_proxy)
+          self.source_labels.append(self.source_labels[i])
+          self.source_n_expected_atoms.append(self.source_n_expected_atoms[i])
+    self.proxies.extend(additional_proxies)
+
 
   def initialize_table(self):
     proxy_registry_base.initialize_table(self)
@@ -155,16 +197,49 @@ class bond_simple_proxy_registry(proxy_registry_base):
           proxy=proxy,
           i_list=i_list,
           process_result=result)
-      if (not result.is_conflicting):
-        self.counts[i_list] += 1
     return result
 
 class angle_proxy_registry(proxy_registry_base):
+  #
+  """
+  self.table: nested dicts
+    { iseq1:
+      {
+        (iseq0, iseq2) : Nproxy
+      }
+    }
+  """
 
   def __init__(self, strict_conflict_handling):
     proxy_registry_base.__init__(self,
       proxies=shared_angle_proxy(),
       strict_conflict_handling=strict_conflict_handling)
+
+  def expand_with_ncs(self, nrgl, masters_and_rest_iselection):
+    additional_proxies = []
+    # n_proxies = len(self.proxies)
+    for i in range(len(self.proxies)):
+      p = self.proxies[i]
+      new_current_proxy_iseqs = [ masters_and_rest_iselection[iseq] for iseq in p.i_seqs]
+      new_master_p = angle_proxy(
+            i_seqs=new_current_proxy_iseqs,
+            proxy=p).sort_i_seqs()
+      self.proxies[i] = new_master_p
+      all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      if all_new_iseqs is not None:
+        for new_iseqs in all_new_iseqs:
+          new_proxy = angle_proxy(
+              i_seqs=new_iseqs,
+              proxy=p).sort_i_seqs()
+          # marking table
+          tab_i_seq_1 = self.table.setdefault(new_proxy.i_seqs[1], {})
+          tab_i_seq_1[(new_proxy.i_seqs[0], new_proxy.i_seqs[2])] = self.proxies.size()
+          # ~ self._append_proxy
+          additional_proxies.append(new_proxy)
+          # self.proxies.append(new_proxy)
+          self.source_labels.append(self.source_labels[i])
+          self.source_n_expected_atoms.append(self.source_n_expected_atoms[i])
+    self.proxies.extend(additional_proxies)
 
   def add_if_not_duplicated(self, proxy, tolerance=1.e-6):
     assert len(proxy.i_seqs) == 3
@@ -174,7 +249,6 @@ class angle_proxy_registry(proxy_registry_base):
     if (i_seqs_0_2 not in tab_i_seq_1):
       tab_i_seq_1[i_seqs_0_2] = self.proxies.size()
       self.proxies.append(proxy)
-      self.counts.append(1)
       return True
     return False
 
@@ -201,8 +275,6 @@ class angle_proxy_registry(proxy_registry_base):
           proxy=proxy,
           i_list=i_list,
           process_result=result)
-      if (not result.is_conflicting):
-        self.counts[i_list] += 1
     return result
 
   def lookup_i_proxy(self, i_seqs):
@@ -216,11 +288,44 @@ class angle_proxy_registry(proxy_registry_base):
     return tab_i_seq_1.get((i0, i2))
 
 class dihedral_proxy_registry(proxy_registry_base):
+  """
+  self.table - similar to angle:
+    { iseq0:
+      {
+        (iseq1, iseq2, iseq3) : Nproxy
+      }
+    }
+  """
 
   def __init__(self, strict_conflict_handling):
     proxy_registry_base.__init__(self,
       proxies=shared_dihedral_proxy(),
       strict_conflict_handling=strict_conflict_handling)
+
+  def expand_with_ncs(self, nrgl, masters_and_rest_iselection):
+    additional_proxies = []
+    for i in range(len(self.proxies)):
+      p = self.proxies[i]
+      new_current_proxy_iseqs = [ masters_and_rest_iselection[iseq] for iseq in p.i_seqs]
+      new_master_p = dihedral_proxy(
+            i_seqs=new_current_proxy_iseqs,
+            proxy=p).sort_i_seqs()
+      self.proxies[i] = new_master_p
+      all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      if all_new_iseqs is not None:
+        for new_iseqs in all_new_iseqs:
+          new_proxy = dihedral_proxy(
+              i_seqs=new_iseqs,
+              proxy=p).sort_i_seqs()
+          # marking table
+          tab_i_seq_0 = self.table.setdefault(new_proxy.i_seqs[0], {})
+          tab_i_seq_0[(new_proxy.i_seqs[1], new_proxy.i_seqs[2], new_proxy.i_seqs[3])] = self.proxies.size()
+          # ~ self._append_proxy
+          additional_proxies.append(new_proxy)
+          # self.proxies.append(new_proxy)
+          self.source_labels.append(self.source_labels[i])
+          self.source_n_expected_atoms.append(self.source_n_expected_atoms[i])
+    self.proxies.extend(additional_proxies)
 
   def add_if_not_duplicated(self, proxy, tolerance=1.e-6):
     assert len(proxy.i_seqs) == 4
@@ -230,7 +335,6 @@ class dihedral_proxy_registry(proxy_registry_base):
     if (i_seqs_1_2_3 not in tab_i_seq_0):
       tab_i_seq_0[i_seqs_1_2_3] = self.proxies.size()
       self.proxies.append(proxy)
-      self.counts.append(1)
       return True
     return False
 
@@ -259,8 +363,6 @@ class dihedral_proxy_registry(proxy_registry_base):
           proxy=proxy,
           i_list=i_list,
           process_result=result)
-      if (not result.is_conflicting):
-        self.counts[i_list] += 1
     return result
 
   def lookup_i_proxy(self, i_seqs):
@@ -279,11 +381,44 @@ class dihedral_proxy_registry(proxy_registry_base):
     return (tab_i_seq_0.get((i1, i2, i3)), angle_sign)
 
 class chirality_proxy_registry(proxy_registry_base):
+  """
+  self.table - same as dihedral:
+    { iseq0:
+      {
+        (iseq1, iseq2, iseq3) : Nproxy
+      }
+    }
+  """
 
   def __init__(self, strict_conflict_handling):
     proxy_registry_base.__init__(self,
       proxies=shared_chirality_proxy(),
       strict_conflict_handling=strict_conflict_handling)
+
+  def expand_with_ncs(self, nrgl, masters_and_rest_iselection):
+    additional_proxies = []
+    for i in range(len(self.proxies)):
+      p = self.proxies[i]
+      new_current_proxy_iseqs = [ masters_and_rest_iselection[iseq] for iseq in p.i_seqs]
+      new_master_p = chirality_proxy(
+            i_seqs=new_current_proxy_iseqs,
+            proxy=p).sort_i_seqs()
+      self.proxies[i] = new_master_p
+      all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      if all_new_iseqs is not None:
+        for new_iseqs in all_new_iseqs:
+          new_proxy = chirality_proxy(
+              i_seqs=new_iseqs,
+              proxy=p).sort_i_seqs()
+          # marking table
+          tab_i_seq_0 = self.table.setdefault(new_proxy.i_seqs[0], {})
+          tab_i_seq_0[(new_proxy.i_seqs[1], new_proxy.i_seqs[2], new_proxy.i_seqs[3])] = self.proxies.size()
+          # ~ self._append_proxy
+          additional_proxies.append(new_proxy)
+          # self.proxies.append(new_proxy)
+          self.source_labels.append(self.source_labels[i])
+          self.source_n_expected_atoms.append(self.source_n_expected_atoms[i])
+    self.proxies.extend(additional_proxies)
 
   def add_if_not_duplicated(self, proxy, tolerance=1.e-6):
     proxy = proxy.sort_i_seqs()
@@ -292,7 +427,6 @@ class chirality_proxy_registry(proxy_registry_base):
     if (i_seqs_1_2_3 not in tab_i_seq_0):
       tab_i_seq_0[i_seqs_1_2_3] = self.proxies.size()
       self.proxies.append(proxy)
-      self.counts.append(1)
       return True
     return False
 
@@ -320,16 +454,51 @@ class chirality_proxy_registry(proxy_registry_base):
           proxy=proxy,
           i_list=i_list,
           process_result=result)
-      if (not result.is_conflicting):
-        self.counts[i_list] += 1
     return result
 
 class planarity_proxy_registry(proxy_registry_base):
+  """
+  self.table:
+
+    self.table - similar to dihedral, chiralities, but undefined
+      number of iseqs in the nested dictionary keys:
+    { iseq0:
+      {
+        (iseq1, iseq2, iseq3, ... ) : Nproxy
+      }
+    }
+
+  """
 
   def __init__(self, strict_conflict_handling):
     proxy_registry_base.__init__(self,
       proxies=shared_planarity_proxy(),
       strict_conflict_handling=strict_conflict_handling)
+
+  def expand_with_ncs(self, nrgl, masters_and_rest_iselection):
+    additional_proxies = []
+    for i in range(len(self.proxies)):
+      p = self.proxies[i]
+      new_current_proxy_iseqs = [ masters_and_rest_iselection[iseq] for iseq in p.i_seqs]
+      new_master_p = planarity_proxy(
+            i_seqs=new_current_proxy_iseqs,
+            proxy=p).sort_i_seqs()
+      self.proxies[i] = new_master_p
+      all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      if all_new_iseqs is not None:
+        for new_iseqs in all_new_iseqs:
+          new_proxy = planarity_proxy(
+              i_seqs=new_iseqs,
+              proxy=p).sort_i_seqs()
+          # marking table
+          tab_i_seq_0 = self.table.setdefault(new_proxy.i_seqs[0], {})
+          tab_i_seq_0[(new_proxy.i_seqs[1:])] = self.proxies.size()
+          # ~ self._append_proxy
+          additional_proxies.append(new_proxy)
+          # self.proxies.append(new_proxy)
+          self.source_labels.append(self.source_labels[i])
+          self.source_n_expected_atoms.append(self.source_n_expected_atoms[i])
+    self.proxies.extend(additional_proxies)
 
   def add_if_not_duplicated(self, proxy, tolerance=1.e-6):
     assert proxy.i_seqs.size() > 2
@@ -340,7 +509,6 @@ class planarity_proxy_registry(proxy_registry_base):
       tab_i_seq_0[i_seqs_1_up] = self.proxies.size()
       # saving proxy number in list
       self.proxies.append(proxy)
-      self.counts.append(1)
       return True
     return False
 
@@ -366,15 +534,47 @@ class planarity_proxy_registry(proxy_registry_base):
           proxy=proxy,
           i_list=i_list,
           process_result=result)
-      if (not result.is_conflicting):
-        self.counts[i_list] += 1
     return result
 
 class parallelity_proxy_registry(proxy_registry_base):
+  """
+  self.table:
+  { ( (iseqs), (jseqs) ) : Nproxy }
+  """
+
   def __init__(self, strict_conflict_handling):
     proxy_registry_base.__init__(self,
         proxies=shared_parallelity_proxy(),
         strict_conflict_handling=strict_conflict_handling)
+
+  def expand_with_ncs(self, nrgl, masters_and_rest_iselection):
+    additional_proxies = []
+    for i in range(len(self.proxies)):
+      p = self.proxies[i]
+      new_current_proxy_iseqs = [ masters_and_rest_iselection[iseq] for iseq in p.i_seqs]
+      new_current_proxy_jseqs = [ masters_and_rest_iselection[jseq] for jseq in p.j_seqs]
+      new_master_p = parallelity_proxy(
+            i_seqs=new_current_proxy_iseqs,
+            j_seqs=new_current_proxy_jseqs,
+            proxy=p).sort_i_seqs()
+      self.proxies[i] = new_master_p
+      # all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      all_new_iseqs = nrgl.get_copy_iseqs(new_current_proxy_iseqs)
+      all_new_jseqs = nrgl.get_copy_iseqs(new_current_proxy_jseqs)
+      if all_new_iseqs is not None and all_new_jseqs is not None:
+        for new_iseqs, new_jseqs in zip(all_new_iseqs, all_new_jseqs):
+          new_proxy = parallelity_proxy(
+              i_seqs=new_iseqs,
+              j_seqs=new_jseqs,
+              proxy=p).sort_i_seqs()
+          # marking table
+          self.table[(tuple(new_proxy.i_seqs), tuple(new_proxy.j_seqs))] = self.proxies.size()
+          # ~ self._append_proxy
+          additional_proxies.append(new_proxy)
+          # self.proxies.append(new_proxy)
+          self.source_labels.append(self.source_labels[i])
+          self.source_n_expected_atoms.append(self.source_n_expected_atoms[i])
+    self.proxies.extend(additional_proxies)
 
   def add_if_not_duplicated(self, proxy, tolerance=1.e-6):
     assert proxy.i_seqs.size() > 2
@@ -387,10 +587,8 @@ class parallelity_proxy_registry(proxy_registry_base):
       # saving proxy number in list
       self.table[(tab_i_seqs, tab_j_seqs)]= self.proxies.size()
       self.proxies.append(proxy)
-      self.counts.append(1)
       return True
     return False
-
 
   def process(self, source_info, proxy, tolerance=1.e-6):
     assert proxy.i_seqs.size() > 2
@@ -421,8 +619,6 @@ class parallelity_proxy_registry(proxy_registry_base):
           proxy=proxy,
           i_list=i_list,
           process_result=result)
-      if (not result.is_conflicting):
-        self.counts[i_list] += 1 # mark somewhere that this is duplicated
     return result
 
 @bp.inject_into(prolsq_repulsion_function)
@@ -444,7 +640,15 @@ def _bond_show_sorted_impl(self,
                            f=None,
                            prefix="",
                            max_items=None,
-                           origin_id=None):
+                           origin_id=None,
+                           return_result = False):
+  if return_result:
+      result = group_args(group_args_type = 'Bond restraints',
+        by_value = by_value,
+        max_items = max_items,
+        value_list = [],
+      )
+
   if unit_cell is None:
     sorted_table, n_not_shown = self.get_sorted(
       by_value=by_value,
@@ -489,8 +693,24 @@ def _bond_show_sorted_impl(self,
       if (rt_mx is not None):
         print(" " + str(rt_mx), end='', file=f)
       print(file=f)
+      if return_result:
+          value = group_args(
+            group_args_type =
+             'Bond distance:  ',
+            labels = labels,
+            delta = delta,
+            sigma = sigma,
+            residual = residual,
+            ideal = distance_ideal,
+            model = distance_model,)
+          result.value_list.append(value)
+
+
   if (n_not_shown != 0):
     print(prefix + "... (remaining %d not shown)" % n_not_shown, file=f)
+
+  if return_result:
+    return result
 
 @bp.inject_into(shared_bond_asu_proxy)
 class _():
@@ -640,17 +860,19 @@ class _():
                   f=None,
                   prefix="",
                   max_items=None,
-                  origin_id=None):
+                  origin_id=None,
+                  return_result = False):
     if f is None: f = sys.stdout
     # print >> f, "%sBond restraints: %d" % (prefix, self.size())
-    _bond_show_sorted_impl(self, by_value,
+    return _bond_show_sorted_impl(self, by_value,
                            sites_cart=sites_cart,
                            site_labels=site_labels,
                            unit_cell=unit_cell,
                            f=f,
                            prefix=prefix,
                            max_items=max_items,
-                           origin_id=origin_id)
+                           origin_id=origin_id,
+                           return_result = return_result)
 
   def deltas(self, sites_cart, unit_cell=None):
     if unit_cell is None:
@@ -701,12 +923,18 @@ class _():
         sites_cart=sites_cart,
         sorted_asu_proxies=self)
     else:
-      sorted_table, n_not_shown = self.get_sorted(
-                        by_value="delta",
-                        sites_cart=sites_cart,
-                        origin_id=origin_id)
-      hd = [x[4] for x in sorted_table]
-      hdata = flex.double(hd)
+      selected_simple = self.simple.proxy_select(origin_id = origin_id)
+      selected_asu = self.asu.proxy_select(origin_id = origin_id)
+      hdata_simple = bond_distances_model(
+        sites_cart=sites_cart,
+        proxies=selected_simple)
+      sap = bond_sorted_asu_proxies(asu_mappings=self.asu_mappings())
+      sap.process(selected_asu)
+      hdata_asu = bond_distances_model(
+        sites_cart=sites_cart,
+        sorted_asu_proxies=sap)
+      hdata_simple.extend(hdata_asu)
+      hdata = hdata_simple
     histogram = flex.histogram(
       data=flex.double(hdata),
       n_slots=n_slots)
@@ -912,7 +1140,8 @@ class _():
         f=None,
         prefix="",
         max_items=None,
-        origin_id=None):
+        origin_id=None,
+        return_result = False,):
     if f is None: f = sys.stdout
     # print >> f, "%sBond restraints: %d" % (prefix, self.n_total())
     return _bond_show_sorted_impl(self, by_value,
@@ -921,7 +1150,8 @@ class _():
                           f=f,
                           prefix=prefix,
                           max_items=max_items,
-                          origin_id=origin_id)
+                          origin_id=origin_id,
+                          return_result = return_result)
 
 @bp.inject_into(nonbonded_sorted_asu_proxies)
 class _():
@@ -967,6 +1197,41 @@ class _():
     if (max_items is not None):
       i_proxies_sorted = i_proxies_sorted[:max_items]
     return i_proxies_sorted
+
+  def sorted_value_proxies_generator(self,
+                           by_value,
+                           sites_cart,
+                           cutoff = 100):
+    assert by_value in ["delta"]
+    deltas = nonbonded_deltas(sites_cart=sites_cart, sorted_asu_proxies=self)
+    if (deltas.size() == 0): return
+    i_proxies_sorted = flex.sort_permutation(data=deltas)
+    n_proxies = deltas.size()
+    n_simple = self.simple.size()
+    asu_mappings = self.asu_mappings()
+    i = 0
+    while i < n_proxies and deltas[i_proxies_sorted[i]] < cutoff:
+      i_proxy = i_proxies_sorted[i]
+      if (i_proxy < n_simple):
+        i_seq, j_seq = self.simple[i_proxy].i_seqs
+        yield (
+            i_seq,
+            j_seq,
+            deltas[i_proxy],
+            None,
+            "",
+            self.simple[i_proxy],
+            )
+      else:
+        i_seq, j_seq = self.asu[i_proxy-n_simple].i_seq, self.asu[i_proxy-n_simple].j_seq
+        yield (
+            i_seq,
+            j_seq,
+            deltas[i_proxy],
+            asu_mappings.get_rt_mx_ji(pair=self.asu[i_proxy-n_simple]),
+            " sym.op.",
+            self.asu[i_proxy-n_simple])
+      i += 1
 
   def get_sorted_proxies(self,
                          by_value,
@@ -1092,7 +1357,16 @@ class _():
         prefix="",
         max_items=None,
         suppress_model_minus_vdw_greater_than=0.2,
-        but_show_all_model_up_to=3.5):
+        but_show_all_model_up_to=3.5,
+        return_result = False):
+
+    if return_result:
+      result = group_args(group_args_type = 'Non-bonded restraints',
+        by_value = by_value,
+        max_items = max_items,
+        value_list = [],
+      )
+
     assert by_value in ["delta"]
     sorted_table, n_not_shown = self.get_sorted(
         by_value=by_value,
@@ -1124,8 +1398,24 @@ class _():
       if (rt_mx is not None):
         print(" " + str(rt_mx), end='', file=f)
       print(file=f)
+      if return_result:
+          value = group_args(
+            group_args_type =
+             'Non-bonded distance:  ideal is vdw_distance, '+
+                 'model is delta (actual)',
+            labels = labels,
+            delta = None,
+            sigma = None,
+            residual = None,
+            ideal = vdw_distance,
+            model = delta,)
+          result.value_list.append(value)
+
     if (n_not_shown != 0):
       print(prefix + "... (remaining %d not shown)" % n_not_shown, file=f)
+
+    if return_result:
+      return result
 
 @bp.inject_into(angle)
 class _():
@@ -1225,14 +1515,16 @@ class _():
         f=None,
         prefix="",
         max_items=None,
-        origin_id=None):
-    _show_sorted_impl(O=self,
+        origin_id=None,
+        return_result = False):
+    return _show_sorted_impl(O=self,
         proxy_type=angle,
         proxy_label=proxy_label,
         item_label="angle",
         by_value=by_value, unit_cell=unit_cell, sites_cart=sites_cart,
         site_labels=site_labels, f=f, prefix=prefix, max_items=max_items,
-        origin_id=origin_id)
+        origin_id=origin_id,
+        return_result = return_result)
 
   def get_sorted(self,
         by_value,
@@ -1316,15 +1608,16 @@ class _():
         f=None,
         prefix="",
         max_items=None,
-        origin_id=None):
-
-    _show_sorted_impl(O=self,
+        origin_id=None,
+        return_result = False):
+    return _show_sorted_impl(O=self,
         proxy_type=dihedral,
         proxy_label=proxy_label,
         item_label="dihedral",
         by_value=by_value, unit_cell=unit_cell, sites_cart=sites_cart,
         site_labels=site_labels, f=f, prefix=prefix, max_items=max_items,
-        origin_id=origin_id)
+        origin_id=origin_id,
+        return_result = return_result)
 
   def get_sorted(self,
         by_value,
@@ -1401,14 +1694,18 @@ class _():
         f=None,
         prefix="",
         max_items=None,
-        origin_id=None):
-    _show_sorted_impl(O=self,
+        origin_id=None,
+        return_result = False,
+    ):
+
+    return _show_sorted_impl(O=self,
         proxy_type=chirality,
         proxy_label=proxy_label,
         item_label="chirality",
         by_value=by_value, unit_cell=unit_cell, sites_cart=sites_cart,
         site_labels=site_labels, f=f, prefix=prefix, max_items=max_items,
-        origin_id=origin_id)
+        origin_id=origin_id,
+        return_result = return_result)
 
   def get_sorted(self,
         by_value,
@@ -1514,7 +1811,18 @@ class _():
         f=None,
         prefix="",
         max_items=None,
-        origin_id=None):
+        origin_id=None,
+        return_result = False,
+    ):
+    if return_result:
+      result = group_args(group_args_type = 'Planarity restraints',
+        by_value = by_value,
+        max_items = max_items,
+        value_list = [],
+      )
+
+
+
     assert by_value in ["residual", "rms_deltas"]
     assert site_labels is None or len(site_labels) == sites_cart.size()
     if (f is None): f = sys.stdout
@@ -1578,6 +1886,20 @@ class _():
         rdr = ""
         rdr_spacer = " "*20
         s = ""
+        if return_result:
+          sigma = weight_as_sigma(weight=weight)
+          value = group_args(
+            group_args_type =
+             'Planarity restraint (energy for one atom, all atoms: %s)' %(
+              str(ls)),
+            labels = [l],
+            delta = delta,
+            sigma = sigma,
+            residual = (delta/max(1.e-10,sigma))**2,
+            ideal = None,
+            model = None,)
+          result.value_list.append(value)
+
     n_not_shown = O.size() - i_proxies_sorted.size()
     if (n_not_shown != 0):
       outl += prefix + "... (remaining %d not shown)\n" % n_not_shown
@@ -1587,6 +1909,9 @@ class _():
     if outl:
       print("%sSorted by %s:" % (prefix, by_value), file=f)
       print(outl[:-1], file=f)
+
+    if return_result:
+      return result
 
 @bp.inject_into(parallelity)
 class _():
@@ -1780,19 +2105,14 @@ def _show_histogram_of_deltas_impl(O,
     if (f is None): f = sys.stdout
     print("%sHistogram of %s deviations from ideal:" % (
       prefix, proxy_label), file=f)
+    selected_proxies = O
     if origin_id is not None:
-      sorted_table, n_not_shown = O.get_sorted(
-                        by_value="delta",
-                        sites_cart=sites_cart,
-                        origin_id=origin_id)
-      hd = [x[2] for x in sorted_table]
-      data = flex.double(hd)
+      selected_proxies = O.proxy_select(origin_id=origin_id)
+    if unit_cell is None:
+      data = flex.abs(selected_proxies.deltas(sites_cart=sites_cart))
     else:
-      if unit_cell is None:
-        data = flex.abs(O.deltas(sites_cart=sites_cart))
-      else:
-        data = flex.abs(
-          O.deltas(unit_cell=unit_cell, sites_cart=sites_cart))
+      data = flex.abs(
+        selected_proxies.deltas(unit_cell=unit_cell, sites_cart=sites_cart))
     histogram = flex.histogram(
       data=data,
       n_slots=n_slots)
@@ -1896,7 +2216,15 @@ def _show_sorted_impl(O,
         f,
         prefix,
         max_items,
-        origin_id=None):
+        origin_id=None,
+        return_result = False,
+      ):
+  if return_result:
+    result = group_args(group_args_type = '%s restraints' %(proxy_label),
+        by_value = by_value,
+        max_items = max_items,
+        value_list = [],)
+
   if (f is None): f = sys.stdout
   sorted_table, n_not_shown = _get_sorted_impl(O,
         proxy_type=proxy_type,
@@ -1926,6 +2254,32 @@ def _show_sorted_impl(O,
       print("%s%s %s" % (prefix, s, l), file=outl)
       s = item_label_blank
     restraint._show_sorted_item(f=outl, prefix=prefix)
+
+    if return_result:
+          def value_from_restraint(restraint, key_ending = None):
+            for x in dir(restraint):
+              if not x.startswith("__") and x.endswith(key_ending):
+                return getattr(restraint,x)
+
+          #angle_ideal, angle_model, delta, variance**0.5, weight, residual
+          delta = restraint.delta
+          sigma = weight_as_sigma(weight = restraint.weight)
+          ideal = value_from_restraint(restraint,'_ideal')
+          model = value_from_restraint(restraint,'_model')
+          residual = restraint.residual()
+          if proxy_label == 'Dihedral angle':
+            ideal = model + delta
+            if ideal<-180: ideal+=360
+
+          value = group_args(group_args_type = '%s result' %proxy_label,
+            labels = labels,
+            delta = delta,
+            sigma = sigma,
+            ideal = ideal,
+            model = model,
+            residual = residual)
+          result.value_list.append(value)
+
   if (n_not_shown != 0):
     if (proxy_type is dihedral):
       n_harmonic = O.count_harmonic()
@@ -1937,6 +2291,9 @@ def _show_sorted_impl(O,
     print(prefix+"    harmonic: %d" % n_harmonic, file=f)
   print("%sSorted by %s:" % (prefix, by_value), file=f)
   print(outl.getvalue()[:-1], file=f)
+
+  if return_result:
+    return result
 
 class pair_proxies(object):
 

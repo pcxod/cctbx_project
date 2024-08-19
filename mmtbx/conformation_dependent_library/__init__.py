@@ -114,6 +114,7 @@ def generate_residue_tuples(hierarchy,
                             include_non_linked=False,
                             backbone_only=True,
                             include_non_standard_residues=False,
+                            include_d_amino_acids=False,
                             allow_poly_ca=False,
                             # CDL specific
                             cdl_class=False,
@@ -128,7 +129,9 @@ def generate_residue_tuples(hierarchy,
     assert length<=2
     LinkedResidues = TwoNucleicResidues
     residue_lookup = ['common_rna_dna']
-    assert not include_non_standard_residues
+    #assert not include_non_standard_residues
+    if include_non_standard_residues:
+      residue_lookup.append('modified_rna_dna')
   else:
     assert length<=10
     if length==3:
@@ -143,6 +146,8 @@ def generate_residue_tuples(hierarchy,
     residue_lookup = ['common_amino_acid']
     if include_non_standard_residues:
       residue_lookup.append('modified_amino_acid')
+    if include_d_amino_acids:
+      residue_lookup.append('d_amino_acid')
   if backbone_only:
     backbone_asc = hierarchy.atom_selection_cache()
     backbone_sel = backbone_asc.selection(retain_selection)
@@ -220,6 +225,7 @@ def generate_protein_tuples(hierarchy,
                             include_non_linked=False,
                             backbone_only=True,
                             include_non_standard_peptides=False,
+                            include_d_amino_acids=False,
                             allow_poly_ca=False,
                             include_linked_via_restraints_manager=False,
                             # CDL specific
@@ -235,6 +241,7 @@ def generate_protein_tuples(hierarchy,
                                       include_non_linked=include_non_linked,
                                       backbone_only=backbone_only,
                                       include_non_standard_residues=include_non_standard_peptides,
+                                      include_d_amino_acids=include_d_amino_acids,
                                       allow_poly_ca=allow_poly_ca,
                                       #include_linked_via_restraints_manager=include_linked_via_restraints_manager,
                                       # CDL specific
@@ -252,6 +259,7 @@ def generate_protein_threes(hierarchy,
                             include_non_linked=False,
                             backbone_only=True,
                             include_non_standard_peptides=False,
+                            include_d_amino_acids=False,
                             include_linked_via_restraints_manager=False,
                             allow_poly_ca=False,
                             # CDL specific
@@ -266,6 +274,7 @@ def generate_protein_threes(hierarchy,
     include_non_linked=include_non_linked,
     backbone_only=backbone_only,
     include_non_standard_peptides=include_non_standard_peptides,
+    include_d_amino_acids=include_d_amino_acids,
     allow_poly_ca=allow_poly_ca,
     # include_linked_via_restraints_manager=include_linked_via_restraints_manager,
     cdl_class=cdl_class,
@@ -281,6 +290,7 @@ def generate_protein_fragments(hierarchy,
                                include_non_linked=False,
                                backbone_only=True,
                                include_non_standard_peptides=False,
+                               include_d_amino_acids=False,
                                allow_poly_ca = False,
                                # include_non_protein_linked=False, # NH2 1KYC
                                # include_linked_via_restraints_manager=False,
@@ -293,6 +303,7 @@ def generate_protein_fragments(hierarchy,
     include_non_linked=include_non_linked,
     backbone_only=backbone_only,
     include_non_standard_residues=include_non_standard_peptides,
+    include_d_amino_acids=include_d_amino_acids,
     allow_poly_ca=allow_poly_ca,
     # include_non_protein_linked=include_non_protein_linked,
     # include_linked_via_restraints_manager=include_linked_via_restraints_manager,
@@ -364,6 +375,7 @@ def update_restraints(hierarchy,
       # print('cdl_svl %s %s' % (threes,restraint_values))
     else:
       if threes.cis_group():
+        if threes[1].resname!='PRO': continue
         if cis_pro_eh99:
           # returns cis-PRO EH99 values if asked
           restraint_values = get_restraint_values(threes, interpolate=interpolate)

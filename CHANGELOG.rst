@@ -1,3 +1,178 @@
+2024.7
+======
+
+* Speed improvements in NCS search and process non-bonded links
+* DataManager: add scoring layer to filter arrays for fmodel
+
+2024.6
+======
+
+* Update pdbtools to use target_output_format
+* Update known residue codes
+* Update CCTBXParser to show diff of DataManager scope with --diff-params
+
+2024.5
+======
+
+* Added water picking with alternate conformations
+* Removed more unused or not maintained tools in iotbx and mmtbx
+* Added check for NaN in ccp4/mrc maps
+
+2024.4
+======
+
+* Added mmtbx.holton_geometry_validation tool
+* Removed unused or not maintained tools in mmtbx
+* Fixed bug in PDB remediator for RNA
+* Added ability to add water with alternative conformations
+
+2024.3
+======
+
+* Fixed loggraph output in xtriage
+* Added initial clashscore2 that uses reduce2 and probe2
+* Clean up MolProbity and clashscore code
+* Clean up Polder maps code
+* Added option to use pyopengl in gltbx if available
+
+2024.2
+======
+
+* Improved handling of writing models in mmCIF or PDB formats
+* Speedups to reduce2 and probe2
+
+2024.1
+======
+
+* Added checks to see if a model can be outupt in the PDB format
+* Added custom scattering factors support to fmodel
+* Reogranize fmodel PHIL
+* Fixed boost::timer deprecation
+
+2023.12
+=======
+
+* Fixed bug in model_vs_sequence
+* Updated suitename analysis to ignore DNA
+* Fixed bug where mask parameters were not propagated in f_model
+
+2023.11
+=======
+
+* Initial support for longer alternate locations
+* Added some support functions for quantum refinement
+* Bug fixes and improvements to cctbx.HKLviewer
+* Improved handling of rotable hydrogens
+
+2023.10
+=======
+
+* Improvements to reduce2
+* More improvements for handling long residue names
+* Improvments to mosaic bulk solvent model
+* Fixed bug in CCTBXParser that did not show one label being parsed
+* Added option to customize DataManager PHIL in ProgramTemplate
+* Initial support for Python 3.12
+
+2023.9
+======
+
+* Added initial support for longer residue names
+* Updated lists of modified amino and nucleic acids
+* Generalized wilson_plot to neutron and elecron scattering tables
+
+2023.8
+======
+
+* Added JSON output to MolProbity structure validation scripts
+* Added support for segID when converting between PDB and mmCIF formats
+* Fixed bug in CCTBXParser where a file could be processed more than once
+* Reorganized restraints based on quantum mechanics
+
+2023.7
+======
+
+* Initial support for handling longer residue names in mmCIF
+* Improved handling of real-space maps with unexpected metadata for the
+  origin and cell angles
+* Improvements to reduce2 and probe2
+* Reorganization of quantum mechanical restraints
+
+2023.6
+======
+
+* Basic space group check when reading mmCIF
+* Fix hybrid36 output in mmCIF
+* Updates to lists of modified amino and nucleic acids
+* DataManager updates for handling multiple uses (types) for generating fmodel
+
+2023.5
+======
+
+* DataManager updates for handling multiple uses (types) of models and Miller arrays
+* DataManager updates for handling priority of amplitudes and intensities
+* Migration from using any_file when file type is already known
+* Start checking atom names of non-standard amino acids
+
+2023.4
+======
+
+* Prevent potenially large memory usage when trying to read reflection data
+* CCTBXParser fix to properly re-raise an error when parsing PHIL
+* DataManager fix for handling datatypes with parent classes
+* Improved water picking
+* Improved atom selections to handle more than 10k atoms
+
+2023.3
+======
+
+* Bug fixes for RNA validation
+* Improved handling of B and pLDDT values in mmtbx.process_predicted_model
+* Bug fixes for validating C-beta deviations for D-amino acids
+* Bug fixes and improvements to cctbx.HKLviewer
+
+2023.2
+======
+
+* Improved modeling of histidine protonation states
+* Improved tool for merging models
+* Added resolution estimation for map docking (prepare_map_for_docking)
+* Bug fixes and improvements to cctbx.HKLviewer
+
+2023.1
+======
+
+* Enable rounding of occupancies in the ouput files so that the sum is equal to 1
+* Improved mmCIF support with twinning information and fixes in _pdbx_struct_oper_list handling
+* New tool to validate torsions
+* Bug fixes and improvements to cctbx.HKLviewer
+
+2022.12
+=======
+
+* New code for fitting histidine
+* DataManager can map scattering table types to data types
+
+2022.11
+=======
+
+* Improved occupancy handling of multiple conformations so that the sum does
+  not exceed 1
+* Improvements to reduce2 and probe2 tools for MolProbity
+
+2022.10
+=======
+
+* Added array selection via data labels to CCTBXParser
+
+  * Match partial labels to full labels in data file
+  * Combine multiple label selections via the command line
+
+* Allow mosaic buil solvent model to have initial values
+* Fix bug where atoms may be missing in a super-sphere
+* Bug fixes and improvements to cctbx.HKLviewer
+* Switch to using libsvm-official for Python interface to libsvm
+
 2022.9
 ======
 

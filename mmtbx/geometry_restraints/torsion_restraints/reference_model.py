@@ -62,7 +62,7 @@ reference_model
     .type = bool
     .short_caption = use starting model as reference
   sigma = 1.0
-    .type = float
+    .type = float(value_min=0.001)
   limit = 15.0
     .type = float
   hydrogens = False
@@ -172,6 +172,7 @@ class reference_model(object):
             reference_file_list].count(None) == 1
     if(log is None):
       log = sys.stdout
+    self.log=log
     # self.model = model
     self.params = params
     self.selection = selection
@@ -285,7 +286,8 @@ class reference_model(object):
     # combined_h.write_pdb_file(fn+"_combined.pdb")
     ncs_obj = iotbx.ncs.input(
         hierarchy=temp_h,
-        params = self.params.search_options)
+        params = self.params.search_options,
+        log = self.log)
     # For each found NCS group we going to do matching procedure between
     # copies
     for group_list in ncs_obj.get_ncs_restraints_group_list():

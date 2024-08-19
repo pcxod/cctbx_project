@@ -155,8 +155,8 @@ class amplitudes:
       sc.fp = expected_henke.fp()
       sc.fdp = expected_henke.fdp()
 
-    import mmtbx.command_line.fmodel
-    phil2 = mmtbx.command_line.fmodel.fmodel_from_xray_structure_master_params
+    import mmtbx.programs.fmodel
+    phil2 = mmtbx.programs.fmodel.master_phil
     params2 = phil2.extract()
     params2.high_resolution = 1.6
     params2.fmodel.k_sol = 0.35
@@ -231,6 +231,7 @@ if __name__=="__main__":
   SIM.to_smv_format(fileout="test_full_001.img", intfile_scale=output_scale)
   assert approx_equal(SIM.raw_pixels, SIM2.raw_pixels)
   SIM.to_cbf("test_full_001.cbf", intfile_scale=output_scale)
+  SIM.to_nexus_nxmx("test_full_001.h5", intfile_scale=output_scale)
 
   if runmode=="GPU":
     bragg_engine = nanoBragg.add_nanoBragg_spots_cuda

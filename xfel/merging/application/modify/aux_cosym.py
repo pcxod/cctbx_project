@@ -42,7 +42,7 @@ class CosymAnalysis(BaseClass):
             yy.append(self.coords[(item,1)])
           from matplotlib import pyplot as plt
           plt.plot(xx,yy,"r.")
-          # denminator of 12 is specific to the use case of P6 (# symops in the metric superlattice)
+          # denominator of 12 is specific to the use case of P6 (# symops in the metric superlattice)
           plt.plot(xx[::len(xx)//12],yy[::len(yy)//12],"b.")
           plt.plot(xx[:1],yy[:1],"g.")
           plt.axes().set_aspect("equal")
@@ -52,6 +52,7 @@ class CosymAnalysis(BaseClass):
           plt.show()
 
   def plot_after_cluster_analysis(self):
+      if self.coords.shape[1] == 2: # one twining operator, most merohedry problems
           xx = flex.double()
           yy = flex.double()
           for item in range(self.coords.shape[0]):
@@ -62,13 +63,76 @@ class CosymAnalysis(BaseClass):
           plt.plot(xx[0:1], yy[0:1], 'k.')
           plt.plot([0,0],[-0.01,0.01],"k-")
           plt.plot([-0.01,0.01],[0,0],"k-")
+          plt.xlim(-0.2,1.0)
+          plt.ylim(-0.2,1.0)
+          plt.title("$<w_{ij}>$=%.1f"%(np.mean(self.target.wij_matrix)))
           ax = plt.gca()
           ax.set_aspect("equal")
           circle = plt.Circle((0,0),1,fill=False,edgecolor="b")
           ax.add_artist(circle)
-          if self.plot_fname is None:
+      elif self.coords.shape[1] == 4: # special case of P3 having 4 cosets
+          # cast the data into two different shaped arrays.
+          # one for me
+          xyzt = [flex.double(),flex.double(),flex.double(),flex.double()]
+          datasize = self.coords.shape[0]
+          for item in range(datasize):
+            for icoset in range(4):
+              xyzt[icoset].append(self.coords[(item,icoset)])
+          # and one for sklearn
+          xsrc = []
+          for i in range(datasize):
+            pt = []
+            for j in range(4):
+              pt.append(xyzt[j][i])
+            xsrc.append(pt)
+          X = np.array(xsrc)
+
+          from sklearn.cluster import DBSCAN
+          db = DBSCAN(eps=0.1, min_samples=10).fit(X)
+          labels = db.labels_
+
+          # Number of clusters in labels, ignoring noise if present.
+          n_clusters_ = len(set(labels)) - (1 if -1 in labels else 0)
+          n_noise_ = list(labels).count(-1)
+
+          print("Estimated number of clusters: %d" % n_clusters_)
+          print("Estimated number of noise points: %d" % n_noise_)
+
+          coset_keys = list(set(self.reindexing_ops))
+          assert len(coset_keys)==4 # result from dials cosym nearest neighbor clustering
+          assert n_clusters_ == 4 # result from dbscan
+
+          assert len(labels)==datasize
+          print("unique labels",set(labels))
+
+          from matplotlib import pyplot as plt
+          colordict = {-1:"black",0:"green",1:"red",2:"magenta",3:"blue"}
+          colors = [colordict[item] for item in labels]
+
+          import matplotlib.gridspec as gridspec
+          fig = plt.figure(figsize=(8,7))
+          gs = gridspec.GridSpec(nrows=2, ncols=2, height_ratios=[1, 1])
+          label={0:"$x$",1:"$y$",2:"$z$",3:"$t$"}
+          for axp, axf in zip([(0,0),(0,1),(1,0),(1,1)],[(0,1),(3,1),(0,2),(3,2)]):
+            axspec = fig.add_subplot(gs[axp[0],axp[1]])
+            axspec.scatter(xyzt[axf[0]], xyzt[axf[1]], c=colors, marker='.')
+
+            axspec.plot([0,0],[-0.01,0.01],"k-")
+            axspec.plot([-0.01,0.01],[0,0],"k-")
+            axspec.set_xlim(-0.2,1.0)
+            axspec.set_ylim(-0.2,1.0)
+            axspec.set_xlabel(label[axf[0]])
+            axspec.set_ylabel(label[axf[1]])
+            axspec.set_aspect("equal")
+            plt.title("$<w_{ij}>$=%.1f"%(np.mean(self.target.wij_matrix)))
+            if axp[0]==1: plt.title("")
+            ax = plt.gca()
+            circle = plt.Circle((0,0),1,fill=False,edgecolor="b")
+            ax.add_artist(circle)
+
+      if self.plot_fname is None:
             plt.show()
-          else:
+      else:
             plot_path = os.path.join(self.output_dir, self.plot_fname)
             plot_fname = "{}_{}.{}".format(
                 plot_path, self.i_plot, self.plot_format)
@@ -177,6 +241,11 @@ class dials_cl_cosym_subclass (dials_cl_cosym_wrapper):
             self._experiments, self._reflections = select_datasets_on_identifiers(
                 self._experiments, self._reflections, exclude_datasets=exclude
             )
+            assert len(cb_ops) == len(self.uuid_cache)
+            self.uuid_cache = [
+                x for i, x in enumerate(self.uuid_cache)
+                if cb_ops[i] is not None
+            ]
             cb_ops = list(filter(None, cb_ops))
 
         ex_cb_ops = len(cb_ops)
@@ -431,7 +500,7 @@ class TargetWithCustomSymops(TargetWithFastRij):
     auto_sym_ops = self._generate_twin_operators()
     if twin_axes is not None:
       assert len(twin_axes) == len(twin_angles)
-      lds = [literal_description(cb_op.apply(op)) for op in auto_sym_ops]
+      lds = [literal_description(cb_op.inverse().apply(op)) for op in auto_sym_ops]
       ld_tuples = [(ld.r_info.ev(), ld.r_info.type()) for ld in lds]
       i_symops_to_keep = []
       for i, (axis, angle) in enumerate(ld_tuples):

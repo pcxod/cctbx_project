@@ -1,20 +1,21 @@
-from __future__ import absolute_import,print_function, division
+from __future__ import absolute_import, print_function, division
 import matplotlib.pyplot as plt
-import sys,os
+import sys
+import os
 from iotbx.detectors.cspad_detector_formats import reverse_timestamp
 from libtbx.phil import parse
 from libtbx.utils import Sorry
 from scitbx.array_family import flex
 from scitbx.math import five_number_summary
 
-message = ''' script to get a sense of the computational performance of every rank while processing data.
-              End product is a plot of wall time vs MPI rank number with every data point being that of a frame
-              processed by dials.stills_process. The information is read in from the debug files created by
-              dials.stills_process.
-              Example usage on cxic0415 processed demo data -
-              libtbx.python weather.py
-              input_path=cxic0415/output/debug
-'''
+message = """
+A script to get a sense of the computational performance of every rank while
+processing data. End product is a plot of wall time vs MPI rank number with
+every data point being that of a frame processed by dials.stills_process.
+The information is read in from the debug files created by dials.stills_process.
+Example usage on cxic0415 processed demo data:
+    cctbx.xfel.weather input_path=cxic0415/output/debug
+""".strip()
 phil_scope = parse('''
   input_path = .
     .type = str
@@ -43,6 +44,7 @@ phil_scope = parse('''
     .help = Default name of pickled matplotlib plot saved to disk
 ''')
 
+
 def params_from_phil(args):
   user_phil = []
   for arg in args:
@@ -52,85 +54,88 @@ def params_from_phil(args):
       try:
         user_phil.append(parse(arg))
       except Exception as e:
-        raise Sorry("Unrecognized argument: %s"%arg)
+        raise Sorry("Unrecognized argument: %s" % arg)
   params = phil_scope.fetch(sources=user_phil).extract()
   return params
 
+
+def timestamp_to_seconds(ts):
+  sec, ms = reverse_timestamp(ts)
+  return sec + ms * 0.001
+
+
 def run(params):
-  counter = 0
-  root=params.input_path
+  root = params.input_path
   fig_object = plt.figure()
   good_total = fail_total = 0
-  all_psanats = []
-  all_deltas = []
   fail_deltas = []
   good_deltas = []
+  rank_walltimes = []
   for filename in os.listdir(root):
     if os.path.splitext(filename)[1] != '.txt': continue
     if 'debug' not in filename: continue
     reference = None
     fail_timepoints = []
     good_timepoints = []
-    rank = int(filename.split('_')[1].split('.')[0])
-    counter += 1
-    print (filename)
     run_timepoints = []
-    for line in open(os.path.join(root,filename)):
+    rank = int(filename.split('_')[1].split('.')[0])
+    for line in open(os.path.join(root, filename)):
       try:
         hostname, psanats, ts, status, result = line.strip().split(',')
       except ValueError:
         continue
       if reference is None:
-        sec, ms = reverse_timestamp(ts)
-        reference = sec+ms*1e-3
+        reference = timestamp_to_seconds(ts)
         run_timepoints.append(0)
-        assert status not in ['stop','done','fail']
+        assert status not in ['stop', 'done', 'fail']
 
-      if status in ['stop','done','fail']:
-        sec, ms = reverse_timestamp(ts)
-        run_timepoints.append((sec + ms*1.e-3)-reference)
+      if status in ['stop', 'done', 'fail']:
+        timepoint = timestamp_to_seconds(ts) - reference
+        run_timepoints.append(timepoint)
         if status == 'done':
-          good_timepoints.append((sec + ms*1.e-3)-reference)
+          good_timepoints.append(timepoint)
           good_deltas.append(good_timepoints[-1] - run_timepoints[-2])
         else:
-          fail_timepoints.append((sec + ms*1.e-3)-reference)
+          fail_timepoints.append(timepoint)
           fail_deltas.append(fail_timepoints[-1] - run_timepoints[-2])
-        all_psanats.append(psanats)
-        all_deltas.append(run_timepoints[-1] - run_timepoints[-2])
-        ok = True
+        processing_of_most_recent_still_terminated = True
       else:
-        ok = False
+        processing_of_most_recent_still_terminated = False
+    rank_walltimes.append(timestamp_to_seconds(ts) - reference)
     plt.plot(fail_timepoints, [rank]*len(fail_timepoints), 'b.')
     plt.plot(good_timepoints, [rank]*len(good_timepoints), 'g.')
     fail_total += len(fail_timepoints)
     good_total += len(good_timepoints)
-    if not ok:
-      sec, ms = reverse_timestamp(ts)
-      plt.plot([(sec+ms*1e-3) - reference], [rank], 'rx')
-    #if counter > 100: break
+    if not processing_of_most_recent_still_terminated:
+      plt.plot([rank_walltimes[-1]], [rank], 'rx')
 
+  msg = "Five number summary of {} (s): {:7.2f}, {:7.2f}, {:7.2f}, {:7.2f}, {:7.2f}"
   if fail_deltas:
-    fail_five_numbers = five_number_summary(flex.double(fail_deltas))
-    print("Five number summary of {} fail image processing times: {:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}".format(fail_total, *fail_five_numbers))
+    process = '{:5d} fail image processing times'.format(fail_total)
+    print(msg.format(process, *five_number_summary(flex.double(fail_deltas))))
   if good_deltas:
-    good_five_numbers = five_number_summary(flex.double(good_deltas))
-    print("Five number summary of {} good image processing times: {:.3f}, {:.3f}, {:.3f}, {:.3f}, {:.3f}".format(good_total, *good_five_numbers))
+    process = '{:5d} good image processing times'.format(good_total)
+    print(msg.format(process, *five_number_summary(flex.double(good_deltas))))
+  if rank_walltimes:
+    process = "{:5d} individual ranks' walltimes".format(len(rank_walltimes))
+    print(msg.format(process, *five_number_summary(flex.double(rank_walltimes))))
 
-  if params.wall_time and params.num_nodes and params.num_cores_per_node-0.5:
+  if params.wall_time and params.num_nodes and params.num_cores_per_node:
     for i in range(params.num_nodes):
-      plt.plot([0,params.wall_time], [i*params.num_cores_per_node-0.5, i*params.num_cores_per_node-0.5], 'r-')
+      plt.plot([0, params.wall_time], [i*params.num_cores_per_node-0.5, i*params.num_cores_per_node-0.5], 'r-')
   plt.xlabel('Wall time (sec)')
   plt.ylabel('MPI Rank Number')
   plt.title(params.plot_title)
   if params.pickle_plot:
     from libtbx.easy_pickle import dump
-    dump('%s'%params.pickle_filename, fig_object)
+    dump('%s' % params.pickle_filename, fig_object)
   if params.show_plot:
     plt.show()
 
+
 if __name__ == '__main__':
   if '--help' in sys.argv[1:] or '-h' in sys.argv[1:]:
-    print (message)
+    print(message)
     exit()
   params = params_from_phil(sys.argv[1:])
-run(params)
+  run(params)

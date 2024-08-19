@@ -2,7 +2,6 @@ from __future__ import absolute_import, division, print_function
 import iotbx.pdb
 import mmtbx.model.statistics
 from six.moves import cStringIO as StringIO
-from libtbx.test_utils import show_diff
 from libtbx.utils import null_out
 import mmtbx.model
 
@@ -1170,14 +1169,21 @@ def test_1():
   model = mmtbx.model.manager(model_input = pdb_inp, log = null_out())
   model.process(make_restraints=True)
   model.get_restraints_manager()
-  stats = mmtbx.model.statistics.geometry(model=model)
-  out = StringIO()
-  stats.show(log=out)
-  val = out.getvalue()
-  # print (val)
-  assert not show_diff(val, """
+  for cp in [True, False]:
+    for fc in [True, False]:
+      if not cp and fc:
+        # incompatible parameters
+        continue
+      stats = mmtbx.model.statistics.geometry(
+          model=model,
+          condensed_probe=cp,
+          fast_clash=fc)
+      out = StringIO()
+      stats.show(log=out)
+      val = out.getvalue()
+      exp = """
 GEOMETRY RESTRAINTS LIBRARY: GEOSTD + MONOMER LIBRARY + CDL V1.2
-DEVIATIONS FROM IDEAL VALUES - RMSD. RMSZ FOR BONDS AND ANGLES.
+DEVIATIONS FROM IDEAL VALUES - RMSD, RMSZ FOR BONDS AND ANGLES.
   BOND      :  0.004   0.020   1174  Z= 0.292
   ANGLE     :  0.908   4.674   1594  Z= 0.671
   CHIRALITY :  0.038   0.125    186
@@ -1186,12 +1192,15 @@ DEVIATIONS FROM IDEAL VALUES - RMSD. RMSZ FOR BONDS AND ANGLES.
   MIN NONBONDED DISTANCE : 2.457
 
 MOLPROBITY STATISTICS.
-  ALL-ATOM CLASHSCORE : 3.94
+  ALL-ATOM CLASHSCORE : 3.50
   RAMACHANDRAN PLOT:
     OUTLIERS :  0.00 %
     ALLOWED  :  2.68 %
     FAVORED  : 97.32 %
-  ROTAMER OUTLIERS :  2.36 %
+  ROTAMER:
+    OUTLIERS :  2.36 %
+    ALLOWED  :  0.79 %
+    FAVORED  : 96.85 %
   CBETA DEVIATIONS :  0.00 %
   PEPTIDE PLANE:
     CIS-PROLINE     : 0.00 %
@@ -1207,7 +1216,17 @@ THEREFORE, THE VALUES ARE NOT RELATED IN A SIMPLE MANNER.
   HELIX:  0.29 (0.58), RESIDUES: 67
   SHEET: -1.83 (0.89), RESIDUES: 20
   LOOP : -0.50 (0.74), RESIDUES: 62
-""")
+
+MAX DEVIATION FROM PLANES:
+   TYPE  MAXDEV  MEANDEV LINEINFILE
+   ARG   0.002   0.000   ARG A  49
+   TYR   0.008   0.002   TYR A  40
+   PHE   0.008   0.001   PHE A  87
+   HIS   0.001   0.000   HIS A 126
+"""
+  val = [l.strip() for l in val.splitlines() if l.strip() != '']
+  exp = [l.strip() for l in exp.splitlines() if l.strip() != '']
+  assert val == exp
 
 if __name__ == '__main__':
   test_1()

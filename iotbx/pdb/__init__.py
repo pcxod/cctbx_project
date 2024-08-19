@@ -8,6 +8,7 @@ from iotbx_pdb_ext import *
 
 import iotbx.pdb.records
 import iotbx.pdb.hierarchy
+from iotbx.pdb.experiment_type import experiment_type
 from scitbx import matrix
 
 from iotbx.pdb.atom_name_interpretation import \
@@ -131,10 +132,10 @@ rna_dna_reference_residue_names = {
   "GUA": "?G",
   "URI": "U",
   "THY": "DT",
-  "AR": "A",
-  "CR": "C",
-  "GR": "G",
-  "UR": "U",
+  # "AR": "A",
+  # "CR": "C",
+  # "GR": "G",
+  # "UR": "U",
   "AD": "DA",
   "CD": "DC",
   "GD": "DG",
@@ -567,13 +568,15 @@ class combine_unique_pdb_files(object):
     self.md5_registry = {}
     self.unique_file_names = []
     self.raw_records = []
+    self.raw_text_block_list = []
     for file_name in file_names:
       if (file_name in self.file_name_registry):
         self.file_name_registry[file_name] += 1
       else:
         self.file_name_registry[file_name] = 1
         with smart_open.for_reading(file_name=file_name) as f:
-          r = [s.expandtabs().rstrip() for s in f.read().splitlines()]
+          text = f.read()
+          r = [s.expandtabs().rstrip() for s in text.splitlines()]
         m = hashlib_md5()
         m.update(to_bytes("\n".join(r), codec='utf8'))
         m = m.hexdigest()
@@ -584,6 +587,7 @@ class combine_unique_pdb_files(object):
           self.md5_registry[m] = [file_name]
           self.unique_file_names.append(file_name)
           self.raw_records.extend(r)
+          self.raw_text_block_list.append(text)
 
   def report_non_unique(self, out=None, prefix=""):
     if (out is None): out = sys.stdout
@@ -1286,10 +1290,6 @@ class _():
   def resolution(self):
     return self.get_r_rfree_sigma().resolution
 
-  def experiment_type_electron_microscopy(self):
-    et = self.get_experiment_type().strip().upper()
-    return et == "ELECTRON MICROSCOPY"
-
   def get_program_name(self):
     remark_3_lines = self.extract_remark_iii_records(3)
     result = None
@@ -1343,20 +1343,20 @@ class _():
       except ValueError: pass
     return result
 
-  def extract_tls_params(self, pdb_hierarchy):
+  def extract_tls_params(self, hierarchy):
     import iotbx.pdb.remark_3_interpretation
     remark_3_records = self.extract_remark_iii_records(3)
     chain_ids = []
-    for model in pdb_hierarchy.models():
+    for model in hierarchy.models():
       for chain in model.chains():
         chain_ids.append(chain.id)
     return iotbx.pdb.remark_3_interpretation.extract_tls_parameters(
       remark_3_records = remark_3_records,
-      pdb_hierarchy    = pdb_hierarchy,
+      pdb_hierarchy    = hierarchy,
       chain_ids        = chain_ids)
 
   def extract_f_model_core_constants(self):
-    import iotbx.pdb.remark_3_interpretation
+
     remark_3_records = self.extract_remark_iii_records(3)
     return remark_3_interpretation.extract_f_model_core_constants(remark_3_records)
 
@@ -1388,8 +1388,8 @@ class _():
   def get_experiment_type(self):
     for line in self.title_section():
       if (line.startswith("EXPDTA")):
-        return records.expdta(line).technique.strip()
-    return None
+        return experiment_type(iotbx.pdb.records.expdta(line).keywords)
+    return experiment_type([])
 
   def extract_connectivity(self):
     """

@@ -314,16 +314,20 @@ def find_peaks_holes(
   f_map = None
   if (filter_peaks_by_2fofc is not None):
     f_map_ = fmodel.electron_density_map().fft_map(
-      resolution_factor=params.resolution_factor,
+      resolution_factor=min(0.5, params.grid_step/fmodel.f_obs().d_min()),
       symmetry_flags=maptbx.use_space_group_symmetry,
       map_type="2mFo-DFc",
       use_all_data=True)
     f_map_.apply_sigma_scaling()
     f_map = f_map_.real_map()
   make_header("Positive difference map peaks", out=out)
+  coeffs = fmodel.electron_density_map().map_coefficients(
+    map_type     = "mFo-DFc",
+    fill_missing = False,
+    isotropize   = False)
   peaks_result = find_peaks.manager(
-    fmodel=fmodel,
-    map_type="mFo-DFc",
+    map_coeffs = coeffs,
+    xray_structure = fmodel.xray_structure,
     map_cutoff=map_cutoff,
     params=params,
     log=out)
@@ -342,9 +346,13 @@ def find_peaks_holes(
   print("", file=out)
   out.flush()
   make_header("Negative difference map holes", out=out)
+  coeffs = fmodel.electron_density_map().map_coefficients(
+    map_type     = "mFo-DFc",
+    fill_missing = False,
+    isotropize   = False)
   holes_result = find_peaks.manager(
-    fmodel=fmodel,
-    map_type="mFo-DFc",
+    map_coeffs = coeffs,
+    xray_structure = fmodel.xray_structure,
     map_cutoff=-map_cutoff,
     params=params,
     log=out)
@@ -410,11 +418,11 @@ def find_peaks_holes(
       # re-use Phaser LLG map if it was previously calculated
       if (map_type == "anomalous") and (anom_map_coeffs is not None):
         fft_map = anom_map_coeffs.fft_map(
-          resolution_factor=params.resolution_factor,
+          resolution_factor=min(0.5, params.grid_step/fmodel.f_obs().d_min()),
           symmetry_flags=maptbx.use_space_group_symmetry)
       else :
         fft_map = fmodel.electron_density_map().fft_map(
-          resolution_factor=params.resolution_factor,
+          resolution_factor= min(0.5, params.grid_step/fmodel.f_obs().d_min()),
           symmetry_flags=maptbx.use_space_group_symmetry,
           map_type=map_type,
           use_all_data=True)
@@ -442,7 +450,7 @@ def find_peaks_holes(
     non_water_anom_peaks = []
     if (anom_map is None):
       fft_map = fmodel.electron_density_map().fft_map(
-        resolution_factor=params.resolution_factor,
+        resolution_factor=min(0.5, params.grid_step/fmodel.f_obs().d_min()),
         symmetry_flags=maptbx.use_space_group_symmetry,
         map_type="anom",
         use_all_data=True)

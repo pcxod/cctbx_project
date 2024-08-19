@@ -6,7 +6,10 @@ from libtbx.mpi4py import MPI
 from simtbx.command_line.hopper import hopper_phil
 import time
 import logging
+import os
 from simtbx.diffBragg import mpi_logger
+
+from simtbx.diffBragg.device import DeviceWrapper
 
 COMM = MPI.COMM_WORLD
 
@@ -26,10 +29,13 @@ script_phil = """
 pandas_table = None
   .type = str
   .help = path to an input pandas table (usually output by simtbx.diffBragg.predictions)
-prep_time = 60
+refls_key = predictions
+  .type = str
+  .help = name of the predicted refls column in the pandas table input
+max_sigz = 10.
   .type = float
-  .help = Time spent optimizing order of input dataframe to better divide shots across ranks
-  .help = Unit is seconds, 1-2 minutes of prep might save a lot of time during refinement!
+  .help = Maximum allowed value ot sigz in the input pandas table  (dataframe)
+  .help = (high sigz above 10 usually indicates failed stage 1 refinement)
 """
 
 philz = script_phil + philz + hopper_phil
@@ -52,6 +58,13 @@ class Script:
                 check_format=False,
                 epilog=help_message)
             self.params, _ = self.parser.parse_args(show_diff_phil=COMM.rank==0)
+            outdir = self.params.refiner.io.output_dir
+            if outdir is not None:
+                if not os.path.exists(outdir):
+                    os.makedirs(outdir)
+                diff_phil_outname = os.path.join(outdir, "diff.phil")
+                with open(diff_phil_outname, "w") as o:
+                    o.write(self.parser.diff_phil.as_str())
         self.params = COMM.bcast(self.params)
 
     def run(self):
@@ -62,8 +75,6 @@ class Script:
             raise ValueError("Pandas table input required")
 
         refine_starttime = time.time()
-        if not self.params.refiner.randomize_devices:
-            self.params.simulator.device_id = COMM.rank % self.params.refiner.num_devices
         refiner = ensemble_refine_launcher.global_refiner_from_parameters(self.params)
         print("Time to refine experiment: %f" % (time.time()- refine_starttime))
 
@@ -84,6 +95,7 @@ if __name__ == '__main__':
         if LineProfiler is not None and script.params.profile:
             lp = LineProfiler()
             lp.add_function(ensemble_refine_launcher.RefineLauncher.launch_refiner)
+            lp.add_function(ensemble_refine_launcher.RefineLauncher.load_inputs)
             lp.add_function(stage_two_refiner.StageTwoRefiner._compute_functional_and_gradients)
             lp.add_function(stage_two_refiner.StageTwoRefiner._run_diffBragg_current)
             lp.add_function(stage_two_refiner.StageTwoRefiner._update_Fcell)
@@ -107,7 +119,9 @@ if __name__ == '__main__':
         else:
             mpi_logger.setup_logging_from_params(script.params)
 
-        RUN()
+        script.params.simulator.device_id = COMM.rank % script.params.refiner.num_devices
+        with DeviceWrapper(script.params.simulator.device_id) as _:
+            RUN()
 
         if lp is not None:
             stats = lp.get_stats()
@@ -115,4 +129,4 @@ if __name__ == '__main__':
             hopper_utils.print_profile(stats,
                     ["launch_refiner", "_compute_functional_and_gradients", "_run_diffBragg_current",
                      "_update_Fcell", "_scale_pixel_data", "_Fcell_derivatives", "_mpi_aggregation",
-                     "GatherFromExperiment", "_setup"])
+                     "GatherFromExperiment", "_setup", "load_inputs"])

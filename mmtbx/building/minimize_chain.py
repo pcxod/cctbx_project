@@ -164,8 +164,9 @@ def get_map_coeffs(
   reflection_file=reflection_file_reader.any_reflection_file(map_coeffs_file)
   miller_arrays=reflection_file.as_miller_arrays()
   for ma in miller_arrays:
-    if not ma.is_complex_array: continue
-    if not map_coeffs_labels or map_coeffs_labels==ma.info().labels[0]:
+    if not ma.is_complex_array(): continue
+    if (not map_coeffs_labels) or map_coeffs_labels==ma.info().labels[0] or \
+       map_coeffs_labels == ",".join(ma.info().labels):
       return ma
   raise Sorry("Unable to find map coeffs in the file %s with labels %s" %(
       map_coeffs_file,str(map_coeffs_labels)))
@@ -214,18 +215,14 @@ def get_pdb_inp(
         pdb_string=open(pdb_in).read()
       else:
         raise Sorry("Need an input PDB file")
-    pdb_inp=iotbx.pdb.input(source_info=None, lines = pdb_string)
+    from iotbx.pdb.utils import get_pdb_input
+    pdb_inp=get_pdb_input(pdb_string)
     cryst1_line=iotbx.pdb.format_cryst1_record(
          crystal_symmetry=crystal_symmetry)
-    if not pdb_inp.crystal_symmetry(): # get it
-      from six.moves import cStringIO as StringIO
-      f=StringIO()
-      print(cryst1_line, file=f)
-      print(pdb_string, file=f)
-      pdb_string=f.getvalue()
-      pdb_inp=iotbx.pdb.input(source_info=None, lines = pdb_string)
   if pdb_string is None:
-    pdb_string=pdb_inp.as_pdb_string()
+    ph = pdb_inp.construct_hierarchy()
+    pdb_string = ph.as_pdb_or_mmcif_string(
+      crystal_symmetry = crystal_symmetry)
   return pdb_inp,cryst1_line,pdb_string
 
 def run_one_cycle(

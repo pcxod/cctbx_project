@@ -3,6 +3,7 @@
 #include <simtbx/diffBragg/src/diffBragg.h>
 #include <simtbx/nanoBragg/nanoBragg.h>
 #include <iostream>
+#include <boost/python/numpy.hpp>
 
 using namespace boost::python;
 namespace simtbx{
@@ -13,6 +14,90 @@ namespace boost_python { namespace {
   void (simtbx::nanoBragg::diffBragg::*add_diffBragg_spots_B)(const nanoBragg::af::shared<size_t>&) = &simtbx::nanoBragg::diffBragg::add_diffBragg_spots;
   void (simtbx::nanoBragg::diffBragg::*add_diffBragg_spots_C)(const nanoBragg::af::shared<size_t>&, boost::python::list per_pix_nominal_hkl)
         = &simtbx::nanoBragg::diffBragg::add_diffBragg_spots;
+
+  boost::python::list get_Fhkl_grad_inds(simtbx::nanoBragg::diffBragg& diffBragg){
+      boost::python::list indices;
+      for(auto& fhkl_idx: diffBragg.db_cryst.Fhkl_grad_idx_tracker){
+        indices.append(fhkl_idx);
+      }
+      return indices;
+  }
+
+  static void set_beams(simtbx::nanoBragg::diffBragg& diffBragg, scitbx::af::versa<dxtbx::model::Beam, scitbx::af::flex_grid<> > const& value) {
+      if(diffBragg.verbose>3) printf(" about to initialize sources\n");
+      diffBragg.pythony_beams = value;
+      if(diffBragg.verbose>3) printf(" done\n");
+      diffBragg.db_cu_flags.update_sources=true;
+      /* re-initialize source table from pythony array */
+      diffBragg.init_sources();
+  }
+  // TODO: point to the get_beams defined in simtbx/nanoBragg/nanoBragg_ext.cpp if possible..
+  ///* table of sources, as dxtbx "beam"s */
+  static scitbx::af::versa<dxtbx::model::Beam, scitbx::af::flex_grid<> > get_beams(simtbx::nanoBragg::diffBragg& diffBragg) {
+      int i;
+      /* allocate new flex array */
+//      scitbx::af::versa<dxtbx::model::Beam, scitbx::af::flex_grid<> > diffBragg_pythony_beams;
+      diffBragg.pythony_beams = scitbx::af::versa<dxtbx::model::Beam, scitbx::af::flex_grid<> >();
+      /* make sure it is big enough to hold all sources */
+      diffBragg.pythony_beams.resize(diffBragg.sources);
+
+      /* polarization normal seems to be B vector */
+      scitbx::vec3<double> Evector = scitbx::vec3<double>(diffBragg.polar_vector[1],diffBragg.polar_vector[2],diffBragg.polar_vector[3]);
+      scitbx::vec3<double> Pvector = scitbx::vec3<double>(diffBragg.beam_vector[1],diffBragg.beam_vector[2],diffBragg.beam_vector[3]);
+      scitbx::vec3<double> Bvector = Pvector.cross(Evector).normalize();
+
+      /* copy internal storage into the flex array */
+      for(i=0;i<diffBragg.sources;++i){
+          diffBragg.pythony_beams[i].set_direction(scitbx::vec3<double>(diffBragg.source_X[i],diffBragg.source_Y[i],diffBragg.source_Z[i]));
+          diffBragg.pythony_beams[i].set_wavelength(diffBragg.source_lambda[i]*1e10);
+          diffBragg.pythony_beams[i].set_flux(diffBragg.source_I[i]);
+          // how is this a fraction when it can be negative? (Kahn et al. 1982)
+          diffBragg.pythony_beams[i].set_polarization_fraction(diffBragg.polarization);
+          diffBragg.pythony_beams[i].set_polarization_normal(Bvector);
+      }
+      /* pass this back to python */
+      return diffBragg.pythony_beams;
+  }
+
+
+  void set_dspace_bins(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::list bins){
+    diffBragg.db_cryst.dspace_bins.clear();
+    for (int i=0; i< boost::python::len(bins); i++ ){
+        double bin_edge = boost::python::extract<double>(bins[i]);
+        diffBragg.db_cryst.dspace_bins.push_back(bin_edge);
+    }
+  }
+
+  boost::python::list get_dspace_bins(simtbx::nanoBragg::diffBragg& diffBragg){
+    boost::python::list bins;
+    for (int i=0; i < diffBragg.db_cryst.dspace_bins.size(); i++){
+        bins.append(diffBragg.db_cryst.dspace_bins[i]);
+    }
+    return bins;
+  }
+
+  void set_hall(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::str hall){
+    diffBragg.db_cryst.hall_symbol = boost::python::extract<std::string>(hall);
+  }
+  boost::python::str get_hall(simtbx::nanoBragg::diffBragg& diffBragg){
+    return boost::python::str(diffBragg.db_cryst.hall_symbol);
+  }
+
+  int get_Num_ASU(simtbx::nanoBragg::diffBragg& diffBragg){
+    return diffBragg.db_cryst.Num_ASU;
+  }
+
+  bool get_Fhkl_have_scale_factors(simtbx::nanoBragg::diffBragg& diffBragg){
+    return diffBragg.db_flags.Fhkl_have_scale_factors;
+  }
+
+  boost::python::dict get_ASUid_map(simtbx::nanoBragg::diffBragg& diffBragg){
+        boost::python::dict asu_info;
+        for(auto &x: diffBragg.db_cryst.ASUid_map){
+            asu_info[x.first] = x.second;
+        }
+        return asu_info;
+  }
 
   static void  set_diffuse_gamma(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::tuple const& values) {
       double g0 = boost::python::extract<double>(values[0]);
@@ -56,6 +141,24 @@ namespace boost_python { namespace {
       return boost::python::make_tuple(sig0, sig1, sig2);
   }
 
+  static boost::python::tuple get_rotate_principal_axes(simtbx::nanoBragg::diffBragg& diffBragg){
+    double val0=diffBragg.db_cryst.rotate_principal_axes(0,0);
+    double val1=diffBragg.db_cryst.rotate_principal_axes(0,1);
+    double val2=diffBragg.db_cryst.rotate_principal_axes(0,2);
+    double val3=diffBragg.db_cryst.rotate_principal_axes(1,0);
+    double val4=diffBragg.db_cryst.rotate_principal_axes(1,1);
+    double val5=diffBragg.db_cryst.rotate_principal_axes(1,2);
+    double val6=diffBragg.db_cryst.rotate_principal_axes(2,0);
+    double val7=diffBragg.db_cryst.rotate_principal_axes(2,1);
+    double val8=diffBragg.db_cryst.rotate_principal_axes(2,2);
+    return boost::python::make_tuple(val0,val1,val2,val3,val4,val5,val6,val7,val8);
+  }
+
+  void set_rotate_principal_axes(simtbx::nanoBragg::diffBragg& diffBragg, nanoBragg::mat3 const& value){
+    diffBragg.db_cryst.rotate_principal_axes << value[0], value[1], value[2],
+            value[3], value[4], value[5],
+            value[6], value[7], value[8];
+  }
 
   static void  set_Ndef(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::tuple const& values) {
       diffBragg.set_ncells_def_values(values);
@@ -89,7 +192,7 @@ namespace boost_python { namespace {
     values = boost::python::make_tuple(0,0);
     return values;
   }
-  //TODO override the set_sources function (or xray_beams) property in nanoBragg in order
+  //TODO override the set_sources function (or xray_beams) property in nanoBragg
   // to set the fpfdp accordingly (if Fhkl2 is set)
   static void set_atom_data(simtbx::nanoBragg::diffBragg & diffBragg,
             boost::python::tuple const& atom_XYZBO){
@@ -352,6 +455,7 @@ namespace boost_python { namespace {
 
   static void  set_Fhkl_tuple(simtbx::nanoBragg::diffBragg& diffBragg, boost::python::tuple const& value) {
       //TODO nanoBragg set as well ?
+      diffBragg.db_cu_flags.update_Fhkl=true;
       diffBragg.pythony_indices = extract<nanoBragg::indices >(value[0]);
       diffBragg.pythony_amplitudes = extract<nanoBragg::af::shared<double> >(value[1]);
       diffBragg.init_Fhkl();
@@ -363,10 +467,10 @@ namespace boost_python { namespace {
               diffBragg.complex_miller = true;
           }
       }
-      diffBragg.linearize_Fhkl();
+      diffBragg.linearize_Fhkl(true);
   }
 
-  static boost::python::tuple get_Fhkl_tuple(simtbx::nanoBragg::diffBragg diffBragg) {
+  static boost::python::tuple get_Fhkl_tuple(nanoBragg::diffBragg diffBragg) {
       int h,k,l;
       double temp;
       int hkls = diffBragg.h_range*diffBragg.k_range*diffBragg.l_range;
@@ -399,17 +503,40 @@ namespace boost_python { namespace {
         return boost::python::make_tuple(diffBragg.pythony_indices,diffBragg.pythony_amplitudes);
   }
 
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+  void finalize_kokkos(){
+    Kokkos::finalize();
+  }
+
+  void initialize_kokkos(int dev){
+    Kokkos::initialize(Kokkos::InitializationSettings()
+                           .set_device_id(dev));
+  }
+#endif
+
   void diffBragg_init_module() {
+    Py_Initialize();
+    boost::python::numpy::initialize();
+
     using namespace boost::python;
     typedef return_value_policy<return_by_value> rbv;
     typedef default_call_policies dcp;
     typedef return_internal_reference<> rir;
+
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+    def("finalize_kokkos", finalize_kokkos,
+        "calls Kokkos::finalize()");
+
+    def("initialize_kokkos", initialize_kokkos,
+        "the sole argument `dev` (an int from 0 to Ngpu-1) is passed to Kokkos::initialize()");
+#endif
+
     class_<simtbx::nanoBragg::diffBragg, bases<simtbx::nanoBragg::nanoBragg> >
             ("diffBragg", no_init)
       /* constructor that takes a dxtbx detector and beam model */
       .def(init<const dxtbx::model::Detector&,
                 const dxtbx::model::Beam&,
-                int >(
+                int>(
         (arg_("detector"),
          arg_("beam"),
          arg_("verbose")=0),
@@ -492,6 +619,18 @@ namespace boost_python { namespace {
       //.def("get_derivative_pixels", get_deriv_pix,
       //      "gets the manager raw image containing first derivatives")
 
+      .def("__add_Fhkl_gradients", &simtbx::nanoBragg::diffBragg::add_Fhkl_gradients,
+            "special mode for computing the gradients of the structure factors. Takes psf, residual, variance, and trusted mask as arguments")
+
+      .def("__update_Fhkl_scale_factors", &simtbx::nanoBragg::diffBragg::update_Fhkl_scale_factors,
+            "updates the scale factors for each ASU. Should be same length as the db_cryst.ADUid_map")
+
+      .def("__update_Fhkl_channels", &simtbx::nanoBragg::diffBragg::update_Fhkl_channels,
+            "pass this a numpy int array the same length as the number of energy sources, this specifies the mapping of structure factor to energy channel, allowing one to refine multiple energy-dependent structure factors for example in a two-color experiment")
+
+      .def("get_Fhkl_channels", &simtbx::nanoBragg::diffBragg::get_Fhkl_channels,
+            "get current list of Fhkl channels (if set, it will be the same length as number of sources)")
+
       .def("__get_derivative_pixels", &simtbx::nanoBragg::diffBragg::get_derivative_pixels,
             "gets the manager raw image containing first derivatives")
 
@@ -526,8 +665,14 @@ namespace boost_python { namespace {
 
       .def("show_heavy_atom_data", &simtbx::nanoBragg::diffBragg::show_heavy_atom_data)
 
-#ifdef NANOBRAGG_HAVE_CUDA
       .def("gpu_free",&simtbx::nanoBragg::diffBragg::gpu_free)
+
+#ifdef DIFFBRAGG_HAVE_CUDA
+      .def("gpu_free",&simtbx::nanoBragg::diffBragg::cuda_free)
+#endif
+
+#ifdef DIFFBRAGG_HAVE_KOKKOS
+      .def("kokkos_free",&simtbx::nanoBragg::diffBragg::kokkos_free)
 #endif
 
       .def("set_mosaic_blocks_prime",
@@ -561,6 +706,11 @@ namespace boost_python { namespace {
                      make_getter(&simtbx::nanoBragg::diffBragg::oversample_omega,rbv()),
                      make_setter(&simtbx::nanoBragg::diffBragg::oversample_omega,dcp()),
                     "whether to use an average solid angle correction per pixel, or one at the sub pixel level")
+
+      .add_property("force_cpu",
+                     make_getter(&simtbx::nanoBragg::diffBragg::force_cpu,rbv()),
+                     make_setter(&simtbx::nanoBragg::diffBragg::force_cpu,dcp()),
+                    "force use of the CPU kernel, for example, if the environ var DIFFBRAGG_USE_CUDA is set")
 
       .add_property("track_Fhkl",
                      make_getter(&simtbx::nanoBragg::diffBragg::track_Fhkl,rbv()),
@@ -678,9 +828,9 @@ namespace boost_python { namespace {
              "coefficients for source_lambda refinement: `lambda = coef0 + coef1*source`  where `source` is the source index")
 
      // CUDA PROPERTIES
-      .add_property("use_cuda",
-             make_getter(&simtbx::nanoBragg::diffBragg::use_cuda,rbv()),
-             make_setter(&simtbx::nanoBragg::diffBragg::use_cuda,dcp()),
+      .add_property("use_gpu",
+             make_getter(&simtbx::nanoBragg::diffBragg::use_gpu,rbv()),
+             make_setter(&simtbx::nanoBragg::diffBragg::use_gpu,dcp()),
              "use GPU acceleration")
 
       .add_property("record_time",
@@ -723,6 +873,11 @@ namespace boost_python { namespace {
             make_function(&set_diffuse_sigma,dcp()),
             "set the 3 diffuse sigma factors")
 
+      .add_property("_ext_rotate_principal_axes",
+             make_function(&get_rotate_principal_axes,rbv()),
+             make_function(&set_rotate_principal_axes,dcp()),
+             "sets the matrix that rotates the principal axes of the anisotropic diffuse model")
+
       .add_property("most_recent_kernel_used_GPU",
             make_getter(&simtbx::nanoBragg::diffBragg::last_kernel_on_GPU,rbv()),
             "if True, the most recent kernel call utilized a GPU")
@@ -730,13 +885,58 @@ namespace boost_python { namespace {
             make_function(&get_wavelen_img_flag,rbv()),
             make_function(&set_wavelen_img_flag,dcp()),
             "if True, then record the average wavelength per pixel, weighted by Bragg intensity")
+      .def("get_ASUid_map",
+            &get_ASUid_map,
+            "an internal map that specifies the ASU miller index for each entry in FhklLinear")
+      .add_property("Num_ASU",
+                     make_function(get_Num_ASU,rbv()),
+                    "number of unique ASU miller indices")
 
-      //.add_property("ave_wavelength",
-      //      make_function(&simtbx::nanoBragg::diffBragg::ave_wavelength_img , rbv()),
-      //      "return flex array containing average wavelen per pixel")
+      .add_property("Fhkl_have_scale_factors",
+                     make_function(get_Fhkl_have_scale_factors,rbv()),
+                    "boolean flag indicating whether the Fhkl have scale factors initialized (for doing Fhkl refinement)")
+
+      .add_property("Fhkl_gradient_indices",
+                     make_function(get_Fhkl_grad_inds,rbv()),
+                    "return a list of indices")
+      .add_property("hall_symbol",
+            make_function(&get_hall,rbv()),
+            make_function(&set_hall,dcp()),
+            "an internal map that specifies the ASU miller index for each entry in FhklLinear")
+
+      .add_property("dspace_bins",
+            make_function(&get_dspace_bins,rbv()),
+            make_function(&set_dspace_bins,dcp()),
+            "set the bins for computing the average structure factor per resolution")
+
+      .def("_ave_I_cell",
+            &simtbx::nanoBragg::diffBragg::get_ave_I_cell,
+            "return python list of average I_cell (provided dspace_bins was set)")
+
+      .def("_Fhkl_restraint_data",
+            &simtbx::nanoBragg::diffBragg::Fhkl_restraint_data,
+            "return numpy array of Fhkl restraint gradients and target contribution")
+
       .def("ave_wavelength_image",
             &simtbx::nanoBragg::diffBragg::ave_wavelength_img,
             "return flex array containing average wavelen per pixel")
+
+      .def("ave_hkl_image",
+            &simtbx::nanoBragg::diffBragg::ave_hkl_img,
+            "return 3-tuple of flex arrays each containing average h,k,l per pixel, respectively")
+
+      .def("_set_Friedel_mate_inds",
+            &simtbx::nanoBragg::diffBragg::set_Friedel_mate_inds,
+            "Two arguments; each lists of the same length, pointing to the positive and negative mates in a Friedel pair, respectively")
+
+      .def("get_mosaic_blocks_prime",
+           &simtbx::nanoBragg::diffBragg::get_mosaic_blocks_prime,
+           "return the deriv of the matrices U that define the mosaic block distribution w.r.t eta")
+
+      .add_property("xray_beams",
+                    make_function(&get_beams,rbv()),
+                    make_function(&set_beams,dcp()),
+                    "list of dxtbx::Beam objects corresponding to each zero-divergence and monochromatic x-ray point source in the numerical simulation ")
 
     ; // end of diffBragg extention
 

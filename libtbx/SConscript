@@ -380,7 +380,9 @@ Unknown or unsupported cl.exe version.
 
 Minimum version is 7.1 (Visual Studio 2003).
 For newer versions, please adjust this SConscript.
-""")
+
+%s
+""" % cl_info)
     print("MSVC_VERSION:", env_base["MSVC_VERSION"])
     env_base.Replace(
       SHCC="cl",
@@ -443,8 +445,19 @@ libtbx.scons: Warning: compiling with /MDd:
 
     if (libtbx.env.build_options.debug_symbols):
       env_etc.shlinkflags.append("/DEBUG")
+      env_base.Prepend(LINKFLAGS=["/DEBUG"]) # write program database files with debug symbols
     env_etc.shlinkflags_bpl = list(env_etc.shlinkflags)
     env_etc.libm = []
+    # handle std::snprintf for some dependencies that may need this macro
+    # https://github.com/python/cpython/issues/80201
+    if sys.version_info.major == 3 and sys.version_info.minor <= 8:
+      env_etc.ccflags_base.append('/DHAVE_SNPRINTF')
+      env_etc.cxxflags_base.append('/DHAVE_SNPRINTF')
+    # needed for latest versions of Visual Studio 2022 so that type
+    # limits are available
+    if env_etc.msvc_version == 17:
+      env_etc.ccflags_base.append('/D__STDC_LIMIT_MACROS')
+      env_etc.cxxflags_base.append('/D__STDC_LIMIT_MACROS')
   elif (env_etc.compiler == "win32_icc"):
     cl_exe = full_command_path("icl.exe")
     if (cl_exe is None):
@@ -647,9 +660,11 @@ else:
       warn_options = gcc_common_warn_options() + ["-Werror"]
     env_etc.ccflags_base.extend(warn_options)
     if (libtbx.env.build_options.optimization):
-      opts = ["-DNDEBUG", "-O3", "-ffast-math"]
+      opts = ["-DNDEBUG", "-O3"]
+      if (env_etc.gcc_version < 11000):
+        opts.append("-ffast-math")
       if (env_etc.gcc_version >= 40100 and is_64bit_architecture):
-        opts.insert(2, "-funroll-loops")
+        opts.append("-funroll-loops")
     else:
       opts = ["-O0", "-fno-inline"]
     if (libtbx.env.build_options.mode == "profile"):
@@ -802,7 +817,14 @@ int main() {
       env_etc.shlinkflags_bpl = env_etc.shlinkflags
       if sys.platform.startswith('darwin'):
         env_etc.shlinkflags_bpl += ['-undefined', 'dynamic_lookup']
-      libtbx.env.build_options.env_cxxflags = \
+      if libtbx.env.build_options.cxxstd is not None:
+        for cxxstd in ['c++11', 'c++14', 'c++17']:
+          libtbx.env.build_options.env_cxxflags = \
+            libtbx.env.build_options.env_cxxflags.replace(cxxstd, libtbx.env.build_options.cxxstd)
+          libtbx.env.build_options.env_cppflags = \
+            libtbx.env.build_options.env_cppflags.replace(cxxstd, libtbx.env.build_options.cxxstd)
+      else:
+        libtbx.env.build_options.env_cxxflags = \
         libtbx.env.build_options.env_cxxflags.replace('c++14', 'c++11').replace('c++17', 'c++11')
       libtbx.env.build_options.env_cppflags = \
         libtbx.env.build_options.env_cppflags.replace('c++14', 'c++11').replace('c++17', 'c++11')
@@ -957,6 +979,12 @@ int main() {
       min_macos = 11.0
     base_macos_flags = ['-stdlib=libc++', '-mmacosx-version-min=%s' % min_macos]
 
+    # Boost issue with newer versions of clang
+    # include/boost/mpl/aux_/integral_wrapper.hpp:73:31: error: integer value -1 is outside the valid range of values [0, 3] for this enumeration type
+    # https://reviews.llvm.org/D150226
+    if env_etc.clang_version[0] >= 15:
+      base_macos_flags.append('-Wno-enum-constexpr-conversion')
+
     link_flags = ["-w"] # suppress "source/lib does not exist" warning
     link_flags.extend(base_macos_flags)
     if libtbx.env.build_options.force_32bit:
@@ -1104,8 +1132,33 @@ if local_env is not None:
     env_base.Prepend(CPPPATH=cpppath)
   env_base.Prepend(LIBPATH=[os.path.join(abs(local_env.build_path), 'lib')])
 
+# check again that only --cxxstd or --enable_cxx11 is set
+if libtbx.env.build_options.enable_cxx11 \
+  and libtbx.env.build_options.cxxstd is not None:
+  raise Sorry('''
+Both --enable_cxx11 and --cxxstd have been set. Please only set one of
+these options.
+''')
+
+if libtbx.env.build_options.cxxstd is not None:
+
+  if sys.platform == 'win32':
+    cxx_flags = ['/std:%s' % libtbx.env.build_options.cxxstd]
+  else:
+    cxx_flags = ['-std=%s' % libtbx.env.build_options.cxxstd]
+
+  # add flags
+  env_etc.cxxflags_base.extend(cxx_flags)
+  env_base.Append(CXXFLAGS=cxx_flags)
+  env_base.Append(LINKFLAGS=cxx_flags)
+  env_etc.shlinkflags.extend(cxx_flags)
+  env_etc.shlinkflags_bpl.extend(cxx_flags)
+
+  # enable compilation check later on
+  env_etc.cxx11_is_available = True
+
 # C++11 flags for any compiler
-# XXX feautre duplication, see determine_cpp0x_flag
+# XXX feature duplication, see determine_cpp0x_flag
 if libtbx.env.build_options.enable_cxx11:
   def ver(tuple3):
     if tuple3 is None:
@@ -1153,12 +1206,23 @@ if env_etc.cxx11_is_available:
   test_code += "int main() {std::vector<int> x(9); for(auto & i : x) "
   test_code += "{i=7; std::cout << i << std::endl;}\n"
   test_code += " x = func(std::vector<int>(2)); return 0;}\n"
-  conf = env_base.Configure()
+  # temp fix for Xcode 15 and current static conda environments
+  if sys.platform.startswith('darwin') \
+    and libtbx.env.build_options.use_conda \
+    and 'conda' not in libtbx.env.build_options.compiler \
+    and env_etc.clang_version[0] > 14:
+    test_env = env_base.Clone(LIBPATH=[env_base['LIBPATH'][0]])
+    conf = test_env.Configure()
+  else:
+    conf = env_base.Configure()
   flag, output = conf.TryRun(test_code, extension='.cpp')
   conf.Finish()
   if not flag:
     env_etc.cxx11_is_available = False
-    if libtbx.env.build_options.enable_cxx11:
+    if libtbx.env.build_options.cxxstd is not None:
+      raise RuntimeError("{} is not available, see config.log".format(
+        libtbx.env.build_options.cxxstd.capitalize()))
+    elif libtbx.env.build_options.enable_cxx11:
       raise RuntimeError("C++11 is not available, see config.log")
 
 """ ************************ Custom Builders and Emitters **************************** """
@@ -1460,10 +1524,16 @@ def enable_cuda_if_possible():
 def enable_kokkos_if_possible():
   env_etc.enable_kokkos = False
   if (libtbx.env.build_options.enable_kokkos):
+    if sys.version_info.major == 2:
+      raise RuntimeError('Kokkos is not available on Python 2')
     env_etc.enable_kokkos = True
 
 enable_openmp_if_possible()
 enable_cuda_if_possible()
 enable_kokkos_if_possible()
+
+if os.environ.get('LIBTBX_COMPILATION_DB', False):
+  env_base.Tool('compilation_db')
+  env_base.CompilationDatabase('compilation_db.json')
 
 Export("env_base", "env_etc")

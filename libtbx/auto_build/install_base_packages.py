@@ -280,11 +280,11 @@ class installer(object):
     if options.dials:
       options.build_gui = True
       options.build_all = True
-      packages += ['pillow', 'jinja2', 'orderedset', 'procrunner', 'scipy', 'scikit_learn', 'tqdm', 'msgpack']
+      packages += ['pillow', 'jinja2', 'orderedset', 'scipy', 'scikit_learn', 'tqdm', 'msgpack']
     if options.xia2:
       options.build_gui = True
       options.build_all = True
-      packages += ['pillow', 'jinja2', 'procrunner', 'tabulate']
+      packages += ['pillow', 'jinja2', 'tabulate']
     if options.labelit:
       options.build_gui = True
       options.build_all = True
@@ -728,7 +728,6 @@ Installation of Python packages may fail.
       'lz4_plugin',
       'jinja2',
       'orderedset',
-      'procrunner',
       'tqdm',
       'tabulate',
       'psutil',
@@ -838,7 +837,7 @@ Installation of Python packages may fail.
       configure_args += ["--prefix", self.base_dir]
       if (self.options.python_shared):
         configure_args.append("--enable-shared")
-        configure_args.append("LDFLAGS=-Wl,-rpath=\$$ORIGIN/../lib")
+        configure_args.append("LDFLAGS=-Wl,-rpath=$ORIGIN/../lib")
 
       # patch Modules/Setup.dist to find custom OpenSSL
       targets = ['#SSL=/usr/local/ssl',
@@ -1168,11 +1167,6 @@ _replace_sysconfig_paths(build_time_vars)
     self.build_python_module_pip(
       'orderedset', package_version=ORDEREDSET_VERSION,
       confirm_import_module='orderedset')
-
-  def build_procrunner(self):
-    self.build_python_module_pip(
-      'procrunner', package_version=PROCRUNNER_VERSION,
-      confirm_import_module='procrunner')
 
   def build_tqdm(self):
     self.build_python_module_pip('tqdm', package_version=TQDM_VERSION)

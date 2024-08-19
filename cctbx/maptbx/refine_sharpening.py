@@ -184,7 +184,7 @@ def adjust_amplitudes_linear(f_array,b1,b2,b3,resolution=None,
   data_array=data_array*scale_array
   return f_array.customized_copy(data=data_array)
 
-def get_model_map_coeffs_normalized(pdb_inp=None,
+def get_model_map_coeffs_normalized(pdb_hierarchy=None,
    si=None,
    f_array=None,
    overall_b=None,
@@ -193,7 +193,7 @@ def get_model_map_coeffs_normalized(pdb_inp=None,
    target_b_iso_model_scale=0,
    target_b_iso_ratio = 5.9,  # empirical, see params for segment_and_split_map
    out=sys.stdout):
-  if not pdb_inp: return None
+  if not pdb_hierarchy: return None
   if not si:
     from cctbx.maptbx.segment_and_split_map import sharpening_info
     si=sharpening_info(resolution=resolution,
@@ -212,7 +212,7 @@ def get_model_map_coeffs_normalized(pdb_inp=None,
   from cctbx.maptbx.segment_and_split_map import get_f_phases_from_model
   try:
     model_map_coeffs=get_f_phases_from_model(
-     pdb_inp=pdb_inp,
+     pdb_hierarchy=pdb_hierarchy,
      f_array=f_array,
      overall_b=overall_b,
      k_sol=si.k_sol,
@@ -564,6 +564,10 @@ def calculate_fsc(**kw):
     fc_map=model_map_coeffs
     b_eff=None
 
+  if not mc1 or not mc2:  # nothing to do
+    si.target_scale_factors = None
+    return si
+
 
   ratio_list=flex.double()
   target_sthol2=flex.double()
@@ -664,7 +668,8 @@ def calculate_fsc(**kw):
 
     if remove_anisotropy_before_analysis and aniso_scale_factor_as_u_cart:
       rms_fo_values = len(direction_vectors) * [None]
-    elif direction_vectors and direction_vectors[0] != None:
+    elif (direction_vectors and direction_vectors[0] != None) and (
+        aniso_scale_factor_array is not None):
       # Let's fit rms fo in just this shell
       rms_fo_values = get_rms_fo_values(
        fo = fo,
@@ -682,7 +687,8 @@ def calculate_fsc(**kw):
       if dv:
         weights_para_sel = weights_para.select(sel)
         weights_para_sel_sqrt = flex.sqrt(weights_para_sel)
-        if remove_anisotropy_before_analysis and aniso_scale_factor_as_u_cart:
+        if remove_anisotropy_before_analysis and aniso_scale_factor_as_u_cart\
+            and aniso_scale_factor_array and aniso_scale_factor_array.data():
           scale_sel = aniso_scale_factor_array.data().select(sel)
         else:
           scale_sel = None
@@ -1247,7 +1253,7 @@ def get_aniso_info(
   ssqr(s) = (1/CC_half(s) - 1)  ...along any direction s
   Ao(|s|)**2 = rmsFobs(s*)**2 * (1 + 0.5*ssqr(s*))    ...along s*
 
-  A(s) = (rmsFo(s)/rmsFo(|s|))*sqrt((1 +  0.5* ssqr(|s|))/(1 +  0.5* ssqr(s)))
+  A(s) = (rmsFo(s)/rmsFc(|s|))*sqrt((1 +  0.5* ssqr(|s|))/(1 +  0.5* ssqr(s)))
   B(s) = A(s) * sqrt (ssqr(s) /ssqr(|s|))
   Target scale factors:
   Q(s) = (rmsFc(|s|)/rmsFo(s)) * sqrt(1 + 0.5* ssqr(s))/ (1 + ssqr(s))
@@ -2560,10 +2566,17 @@ def scale_amplitudes(model_map_coeffs=None,
   f_array,phases=map_coeffs_as_fp_phi(map_coeffs)
 
   (d_max,d_min)=f_array.d_max_min(d_max_is_highest_defined_if_infinite=True)
-  if not f_array.binner():
-    f_array.setup_binner(n_bins=si.n_bins,d_max=d_max,d_min=d_min)
-    f_array.binner().require_all_bins_have_data(min_counts=1,
-      error_string="Please use a lower value of n_bins")
+  n_bins_use = si.n_bins
+  while not f_array.binner():
+    try:
+      f_array.setup_binner(n_bins=si.n_bins,d_max=d_max,d_min=d_min)
+      f_array.binner().require_all_bins_have_data(min_counts=1,
+        error_string="Please use a lower value of n_bins")
+    except Exception as e:
+      if n_bins_use > 1:
+        n_bins_use -= 1
+      else:
+        raise Exception(e)
 
   if resolution is None:
     resolution=si.resolution

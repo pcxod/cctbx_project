@@ -452,9 +452,9 @@ class Toolbox(object):
         else:
           branch = False
         remote, rebase = False, False
-      if re.match('remote\s*=', line.strip()):
+      if re.match(r'remote\s*=', line.strip()):
         remote = True
-      if re.match('rebase\s*=', line.strip()):
+      if re.match(r'rebase\s*=', line.strip()):
         rebase = True
     if branch and remote and not rebase:
       insertions.insert(0, (n + 1, branch))
@@ -474,12 +474,28 @@ class Toolbox(object):
     except OSError:
       git_available = False
 
+    # put molprobity repository at same level as "modules" to reproduce svn behavior
+    if module == 'molprobity':
+      destination = os.path.join('.', module)
+
     if destination is None:
       destination = os.path.join('modules', module)
     destpath, destdir = os.path.split(destination)
 
     # default to using ssh for private phenix repositories
-    if module in ['phenix', 'solve_resolve', 'phenix_pathwalker', 'labelit']:
+    if module in ['elbow',
+                  'ksdssp',
+                  'labelit',
+                  'muscle',
+                  'opt_resources',
+                  'phenix',
+                  'phenix_pathwalker',
+                  'Plex',
+                  'PyQuante',
+                  'pulchra',
+                  'reel',
+                  'solve_resolve',
+                  ]:
       use_ssh = True
 
     if os.path.exists(destination):
@@ -717,17 +733,17 @@ class rosetta_class(SourceModule):
   module = 'rosetta'
   authenticated = [
     'rsync',
-    '%(cciuser)s@cci.lbl.gov:/net/cci/auto_build/externals/'+rosetta_version_tar_bundle+'/',
+    '%(cciuser)s@boa.lbl.gov:/net/cci/auto_build/externals/'+rosetta_version_tar_bundle+'/',
   ]
   authenticated = [
     'scp',
-    '%(cciuser)s@cci.lbl.gov:/net/cci-filer2/raid1/auto_build/externals/'+rosetta_version_tar_bundle+'.tgz']
+    '%(cciuser)s@boa.lbl.gov:/net/cci-filer2/raid1/auto_build/externals/'+rosetta_version_tar_bundle+'.tgz']
 
 class afitt_class(SourceModule):
   module = 'afitt'
   authenticated = [
     'scp',
-    '%(cciuser)s@cci.lbl.gov:/net/cci-filer2/raid1/auto_build/externals/'+afitt_version+'.gz']
+    '%(cciuser)s@boa.lbl.gov:/net/cci-filer2/raid1/auto_build/externals/'+afitt_version+'.gz']
 
 # Core CCTBX repositories
 # These must all provide anonymous access.
@@ -761,9 +777,9 @@ class qrefine_module(SourceModule):
 
 class mon_lib_module(SourceModule):
   module = 'mon_lib'
-  anonymous = ['curl', 'http://cci.lbl.gov/repositories/mon_lib.gz']
-  authentarfile = ['%(cciuser)s@cci.lbl.gov', 'mon_lib.tar.gz', '/net/cci/auto_build/repositories/mon_lib']
-  #authenticated = ['rsync', '%(cciuser)s@cci.lbl.gov:/net/cci/auto_build/repositories/annlib/']
+  anonymous = ['curl', 'http://boa.lbl.gov/repositories/mon_lib.gz']
+  authentarfile = ['%(cciuser)s@boa.lbl.gov', 'mon_lib.tar.gz', '/net/cci/auto_build/repositories/mon_lib']
+  #authenticated = ['rsync', '%(cciuser)s@boa.lbl.gov:/net/cci/auto_build/repositories/annlib/']
 
 class geostd_module(SourceModule):
   module = 'geostd'
@@ -823,7 +839,7 @@ class gui_resources_module(SourceModule):
 
 class opt_resources_module(SourceModule):
   module = 'opt_resources'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/opt_resources/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/opt_resources.git']
 
 class eigen_module(SourceModule):
   module = 'eigen'
@@ -867,27 +883,29 @@ class phenix_colabs(SourceModule):
 
 class plex_module(SourceModule):
   module = 'Plex'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/Plex/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/Plex.git']
 
 class pyquante_module(SourceModule):
   module = 'PyQuante'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/PyQuante/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/PyQuante.git']
 
 class chem_data_module(SourceModule):
   module = 'chem_data'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/chem_data/trunk']
+  anonymous = ['git',
+               'git@gitlab.com:phenix_project/chem_data.git',
+               'https://gitlab.com/phenix_project/chem_data.git']
 
 class elbow_module(SourceModule):
   module = 'elbow'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/elbow/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/elbow.git']
 
 class ksdssp_module(SourceModule):
   module = 'ksdssp'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/ksdssp/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/ksdssp.git']
 
 class pulchra_module(SourceModule):
   module = 'pulchra'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/pulchra/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/pulchra.git']
 
 class solve_resolve_module(SourceModule):
   module = 'solve_resolve'
@@ -895,19 +913,19 @@ class solve_resolve_module(SourceModule):
 
 class reel_module(SourceModule):
   module = 'reel'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/reel/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/reel.git']
 
 class muscle_module(SourceModule):
   module = 'muscle'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/muscle/trunk']
+  authenticated = ['git', 'git@github.com:phenix-project/muscle.git']
 
 class cxi_xdr_xes_module(SourceModule):
   module = 'cxi_xdr_xes'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/cxi_xdr_xes/trunk']
+  authenticated = ['svn', 'svn+ssh://%(cciuser)s@boa.lbl.gov/cxi_xdr_xes/trunk']
 
 class buildbot_module(SourceModule):
   module = 'buildbot'
-  authenticated = ['svn', 'svn+ssh://%(cciuser)s@cci.lbl.gov/buildbot/trunk']
+  authenticated = ['git', 'git@github.com:cci-lbl/buildbot.git']
 
 class phenix_pathwalker_module(SourceModule):
   module = 'phenix_pathwalker'
@@ -972,7 +990,7 @@ class dxtbx_module(SourceModule):
 class dials_regression_module(SourceModule):
   module = 'dials_regression'
   authenticated = ['svn',
-                   'svn+ssh://%(cciuser)s@cci.lbl.gov/dials_regression/trunk']
+                   'svn+ssh://%(cciuser)s@boa.lbl.gov/dials_regression/trunk']
 
 class iota_module(SourceModule):
   module = 'iota'
@@ -990,8 +1008,9 @@ class msgpack_module(SourceModule):
 
 class xfel_regression_module(SourceModule):
   module = 'xfel_regression'
-  authenticated = ['svn',
-                   'svn+ssh://%(cciuser)s@cci.lbl.gov/xfel_regression/trunk']
+  authenticated = ['git',
+                   'git@gitlab.com:cctbx/xfel_regression.git',
+                   'https://gitlab.com/cctbx/xfel_regression.git']
 
 class xia2_module(SourceModule):
   module = 'xia2'
@@ -1002,36 +1021,36 @@ class xia2_module(SourceModule):
 
 class kokkos_module(SourceModule):
   module = 'kokkos'
-  anonymous = ['git',
+  anonymous = ['git', '-b 4.2.00',
                'git@github.com:kokkos/kokkos.git',
                'https://github.com/kokkos/kokkos.git',
-               'https://github.com/kokkos/kokkos/archive/master.zip']
+               'https://github.com/kokkos/kokkos/archive/refs/tags/4.2.00.zip']
 
 class kokkos_kernels_module(SourceModule):
   module = 'kokkos-kernels'
-  anonymous = ['git',
+  anonymous = ['git', '-b 4.2.00',
                'git@github.com:kokkos/kokkos-kernels.git',
                'https://github.com/kokkos/kokkos-kernels.git',
-               'https://github.com/kokkos/kokkos-kernels/archive/master.zip']
+               'https://github.com/kokkos/kokkos-kernels/archive/refs/tags/4.2.00.zip']
 
 # Duke repositories
 class probe_module(SourceModule):
   module = 'probe'
-  anonymous = ['svn', 'https://github.com/rlabduke/probe.git/trunk']
+  anonymous = ['git', 'https://github.com/rlabduke/probe.git']
 
 class reduce_module(SourceModule):
+  # Version 4.14 or later should be used to avoid mmtbx_reduce_ext name conflict.
   module = 'reduce'
-  anonymous = ['git', '-b v3.7.2',
-               'https://github.com/rlabduke/reduce.git']
+  anonymous = ['git', 'https://github.com/rlabduke/reduce.git']
 
 class king_module(SourceModule):
   module = 'king'
-  anonymous = ['svn',
-               'https://github.com/rlabduke/phenix_king_binaries.git/trunk']
+  anonymous = ['git',
+               'https://github.com/rlabduke/phenix_king_binaries.git']
 
-class molprobity_moodule(SourceModule):
+class molprobity_module(SourceModule):
   module = 'molprobity'
-  anonymous = ['svn', 'https://github.com/rlabduke/MolProbity.git/trunk']
+  anonymous = ['git', 'https://github.com/rlabduke/MolProbity.git']
 
 class uc_metrics_module(SourceModule):
   module = 'uc_metrics'
@@ -1553,6 +1572,12 @@ class Builder(object):
     if module == 'cctbx_project':
       workdir = ['modules', module]
       self.add_step(self.shell(command=[sys.executable, os.path.join('libtbx', 'version.py')], workdir=workdir))
+
+    # add geostd to chem_data
+    if module == 'chem_data':
+      action = MODULES.get_module('geostd')().get_url(auth=self.get_auth())
+      method, geostd_parameters = action[0], action[1:]
+      self._add_git('geostd', geostd_parameters, destination=self.opjoin('modules', 'chem_data', 'geostd'))
 
     # Use dials-2.2 branches for Python 2
     if (module == 'dials' or module == 'dxtbx' or module == 'xia2') and not self.python3:
@@ -2076,13 +2101,13 @@ class PhaserBuilder(CCIBuilder):
       self.skip_base = "hdf5,lz4_plugin,py2app,wxpython,docutils,pyopengl,pillow,tiff," + \
         "cairo,fonts,render,fontconfig,pixman,png,sphinx,freetype,gtk,matplotlib," + \
         "cython,h5py,gettext,numpy,pythonextra,pytest,junitxml,libsvm,pyrtf,six,send2trash," + \
-         "jinja2,orderedset,procrunner,tabulate,scipy,scikit_learn,biopython,expat,glib,mrcfile"
+         "jinja2,orderedset,tabulate,scipy,scikit_learn,biopython,expat,glib,mrcfile"
     else:
       self.skip_base = ','.join(self.skip_base.split(',') + ['hdf5','lz4_plugin','py2app',
          'wxpython','docutils','pyopengl','pillow','tiff','cairo','fonts','pyrtf','six','send2trash',
          'fontconfig','render','pixman','png','sphinx','freetype','gtk', 'matplotlib',
          'cython', 'h5py', 'gettext', 'numpy', 'pythonextra', 'pytest', 'junitxml','libsvm',
-         'jinja2', 'orderedset', 'procrunner', 'tabulate', 'scipy', 'scikit_learn', 'biopython',
+         'jinja2', 'orderedset', 'tabulate', 'scipy', 'scikit_learn', 'biopython',
          'expat', 'glib', 'mrcfile'
          ])
     super(PhaserBuilder, self).add_base(
@@ -2106,8 +2131,8 @@ class PhaserTNGBuilder(PhaserBuilder):
   LIBTBX = PhaserBuilder.LIBTBX + ['phasertng', 'phaser_voyager', 'voyager_regression']
 
   def add_tests(self):
-    #self.add_test_parallel(module='phaser_regression') # run phaser_regression/run_tests.py file
     self.add_test_parallel(module='voyager_regression') # run voyager_regression/run_tests.py file
+    self.add_test_parallel(module='phaser_regression') # run phaser_regression/run_tests.py file
 
   def get_libtbx_configure(self):
     configlst = super(PhaserTNGBuilder, self).get_libtbx_configure()
@@ -2146,6 +2171,7 @@ class CCTBXLiteBuilder(CCIBuilder):
     'cctbx',
     'cctbx_website',
     'scitbx',
+    'serialtbx',
     'libtbx',
     'iotbx',
     'mmtbx',
@@ -2311,7 +2337,8 @@ class XFELBuilder(CCIBuilder):
 
   def get_libtbx_configure(self):
     configlst = super(XFELBuilder, self).get_libtbx_configure()
-    configlst.append('--enable_cxx11')
+    if '--enable_cxx11' in configlst: configlst.remove('--enable_cxx11')
+    configlst.append('--cxxstd=c++14')
     return configlst
 
   def add_tests(self):
@@ -2325,6 +2352,7 @@ class XFELBuilder(CCIBuilder):
     pass
 
 class PhenixBuilder(CCIBuilder):
+  HOT = []
   CODEBASES_EXTRA = [
     'chem_data',
     'phenix',
@@ -2350,16 +2378,15 @@ class PhenixBuilder(CCIBuilder):
     'reduce',
     'probe',
     'king',
-    'dials',
-    'xia2',
     'phaser',
     'phasertng',
     'phaser_regression',
     'voyager_regression',
     'phaser_voyager',
-    'iota',
+    # 'dials',
+    # 'xia2',
+    # 'iota',
   ]
-  HOT_EXTRA = ['msgpack']
   LIBTBX_EXTRA = [
     'chem_data',
     'phenix',
@@ -2367,32 +2394,40 @@ class PhenixBuilder(CCIBuilder):
     'phenix_regression',
     'phenix_examples',
     'phenix_pathwalker',
+    'Colabs',
     'solve_resolve',
     'reel',
     'phaser',
+    'phasertng',
     'phaser_regression',
+    'voyager_regression',
     'phaser_voyager',
     'labelit',
     'elbow',
     'amber_adaptbx',
     'reduce',
     'probe',
-    'dials',
-    'xia2',
-    'prime',
+    'cootbx',
+    'qttbx',
+    # 'dials',
+    # 'xia2',
+    # 'prime',
   ]
 
-  # select dials-3.2 branch
+  # select dials-3.8 branch
   def _add_git(self, module, parameters, destination=None):
     super(PhenixBuilder, self)._add_git(module, parameters, destination)
-    if (module == 'dials' or module == 'dxtbx' or module == 'xia2') and self.python3:
+    if module == 'boost':
+      workdir = ['modules', module]
+      self.add_step(self.shell(command=['git', 'checkout', '1.74'], workdir=workdir))
+    elif (module == 'dials' or module == 'dxtbx' or module == 'xia2') and self.python3:
       workdir = ['modules', module]
       if module == 'dxtbx':
         self.add_step(self.shell(command=['git', 'remote', 'set-url', 'origin', 'https://github.com/dials/dxtbx.git'], workdir=workdir))
         self.add_step(self.shell(command=['git', 'fetch', 'origin'], workdir=workdir))
-      self.add_step(self.shell(command=['git', 'checkout', 'dials-3.2'], workdir=workdir))
+      self.add_step(self.shell(command=['git', 'checkout', 'dials-3.8'], workdir=workdir))
       self.add_step(self.shell(
-        command=['git', 'branch', '--set-upstream-to=origin/dials-3.2', 'dials-3.2'],
+        command=['git', 'branch', '--set-upstream-to=origin/dials-3.8', 'dials-3.8'],
         workdir=workdir))
 
   def add_module(self, module, workdir=None, module_directory=None):
@@ -2404,7 +2439,7 @@ class PhenixBuilder(CCIBuilder):
     super(PhenixBuilder, self).add_module(module, workdir, module_directory)
 
     # update phenix_regression and phenix_examples with git-lfs
-    if module == 'phenix_examples' or module == 'phenix_regression':
+    if module == 'phenix_examples' or module == 'phenix_regression' or module == 'chem_data':
       # prepend path for check
       dev_env = os.path.join('.', 'dev_env', 'bin')
       if sys.platform == 'win32':
@@ -2484,17 +2519,20 @@ in your path. """)
 
   def add_install(self):
     Builder.add_install(self)
-    #self.rebuild_docs()
-
 
   def get_libtbx_configure(self):
     configlst = super(PhenixBuilder, self).get_libtbx_configure()
+    if '--enable_cxx11' in configlst:
+      configlst.remove('--enable_cxx11')
+    set_std = ['cxxstd' in conf for conf in configlst]
+    if set_std.count(True) == 0:
+      if platform.mac_ver()[-1] == 'arm64':
+        configlst.append('--cxxstd=c++14')
+      else:
+        configlst.append('--cxxstd=c++11')
     if not self.isPlatformMacOSX():
       configlst.append("--enable_openmp_if_possible=True")
-    #if self.isPlatformMacOSX():
-    #  configlst.append("--compiler=clang-omp")
     return configlst
-
 
   def rebuild_docs(self):
     self.add_command('phenix_html.rebuild_docs')
@@ -2688,11 +2726,6 @@ class PhenixExternalRegression(PhenixBuilder):
       self.add_test_command('afitt.run_tests',
                             env = self.get_environment()
                            )
-    # erraser
-    if self.subcategory in [None, "rosetta"]:
-      self.add_test_command('erraser.run_tests',
-                            env = self.get_environment()
-                           )
     # GLR
     if self.subcategory in [None, "glr"]:
       self.add_test_command('elbow.run_glr_tests',
@@ -2784,24 +2817,14 @@ class QRBuilder(PhenixBuilder):
       environment[env] = dirs
     return environment
 
-class PhenixTNGBuilder(PhenixBuilder):
+class PhenixReleaseBuilder(PhenixBuilder):
   '''
-  Phenix with phasertng and c++11
+  Phenix with DIALS
   '''
-  CODEBASES = PhenixBuilder.CODEBASES + ['phasertng', 'phaser_voyager', 'voyager_regression']
-  LIBTBX = PhenixBuilder.LIBTBX + ['phasertng', 'phaser_voyager', 'voyager_regression']
-
-  def get_libtbx_configure(self):
-    configlst = super(PhenixTNGBuilder, self).get_libtbx_configure()
-    configlst.append('--enable_cxx11')
-    return configlst
-
-  # select Boost 1.74
-  def _add_git(self, module, parameters, destination=None):
-    super(PhenixTNGBuilder, self)._add_git(module, parameters, destination)
-    if module == 'boost':
-      workdir = ['modules', module]
-      self.add_step(self.shell(command=['git', 'checkout', '1.74'], workdir=workdir))
+  extra_codebases = ['dials', 'iota', 'xia2']
+  extra_libtbx = extra_codebases + ['prime']
+  CODEBASES_EXTRA = PhenixBuilder.CODEBASES_EXTRA + extra_codebases
+  LIBTBX_EXTRA = PhenixBuilder.LIBTBX_EXTRA + extra_libtbx
 
 def set_builder_defaults(options):
   '''
@@ -2813,8 +2836,16 @@ def set_builder_defaults(options):
       # restore default for CentOS 7
       if sys.platform.startswith('linux') and '.el7.' in platform.platform():
         options.no_boost_src = False
-    if options.python == '27':
-      options.python = '37'
+  if options.builder == 'phenix_voyager' or options.builder == 'phenix' \
+    or options.builder == 'molprobity':
+    # Apple Silicon uses Boost 1.78 in environment, Python 3.9
+    if platform.mac_ver()[-1] == 'arm64':
+      options.no_boost_src = True
+      options.python = '39'
+    if not options.no_boost_src:
+      options.no_boost_src = True
+      if sys.platform.startswith('linux') and '.el7.' in platform.platform():
+        options.no_boost_src = False
     if options.use_conda is None:
       options.use_conda = ''
 
@@ -2825,7 +2856,8 @@ def run(root=None):
     'cctbxlite': CCTBXLiteBuilder,
     'cctbx': CCTBXBuilder,
     'phenix': PhenixBuilder,
-    'phenix_voyager': PhenixTNGBuilder,
+    'phenix_voyager': PhenixBuilder,
+    'phenix_release': PhenixReleaseBuilder,
     'xfellegacy': XFELLegacyBuilder,
     'xfel': XFELBuilder,
     'labelit': LABELITBuilder,
@@ -2939,8 +2971,8 @@ def run(root=None):
                     default=False)
   python_args = parser.add_mutually_exclusive_group(required=False)
   python_args.add_argument('--python',
-                    default='27', type=str, nargs='?', const='27',
-                    choices=['27', '36', '37', '38', '39'],
+                    default='37', type=str, nargs='?', const='37',
+                    choices=['27', '37', '38', '39', '310'],
                     help="""When set, a specific Python version of the
 conda environment will be used. This only affects environments selected with
 the --builder flag. For non-conda dependencies, any Python 3 implies

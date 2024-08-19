@@ -1,3 +1,79 @@
+author {
+  name = Adams PD
+  orcid = 0000-0001-9333-8219
+}
+
+author {
+  name = Afonine PV
+  orcid = 0000-0002-5052-991X
+}
+
+author {
+  name = Chen VB
+  orcid = 0000-0003-2492-979X
+}
+
+author {
+  name = Hintze B
+  orcid = 0000-0002-4871-2096
+}
+
+author {
+  name = Hung L-W
+  name = Hung LW
+  orcid = 0000-0001-6690-8458
+}
+
+author {
+  name = Liebschner D
+  orcid = 0000-0003-3921-3209
+}
+
+author {
+  name = Millán C
+  orcid = 0000-0002-9283-2220
+}
+
+author {
+  name = Moriarty NW
+  orcid = 0000-0001-8857-9464
+}
+
+author {
+  name = Oeffner RD
+  orcid = 0000-0003-3107-2202
+}
+
+author {
+  name = Poon BK
+  orcid = 0000-0001-9633-6067
+}
+
+author {
+  name = Read RJ
+  orcid = 0000-0001-8273-0047
+}
+
+author {
+  name = Richardson JS
+  orcid = 0000-0002-3311-2944
+}
+
+author {
+  name = Sammito MD
+  orcid = 0000-0002-8346-9247
+}
+
+author {
+  name = Sobolev OV
+  orcid = 0000-0002-0623-3214
+}
+
+author {
+  name = Terwilliger TC
+  orcid = 0000-0001-6384-0320
+}
+
 journal {
   name = Acta Cryst. D
   name = Acta Crystallogr D Biol Crystallogr
@@ -357,6 +433,78 @@ citation {
 }
 
 citation {
+  article_id = predict_and_build_cryo_em
+  authors = Terwilliger TC, Poon BK, Afonine PV, Schlicksup CJ, Croll TI, Millán C, Richardson JS, Read RJ, Adams PD
+  title = Improved AlphaFold modeling with implicit experimental information
+  journal = Nature Methods
+  volume = 19
+  pages = 1376-1382
+  year = 2022
+  doi_id =  doi:10.1038/s41592-022-01645-6
+  pmid = 36266465
+}
+
+citation {
+  article_id = predict_and_build_xray
+  authors = Terwilliger TC, Afonine PV, Liebschner, D., Croll TI, McCoy, AJ, Oeffner, RD., Williams, CJ, Poon, BK, Richardson JS, Read RJ, Adams PD
+  title = Accelerating crystal structure determination with iterative AlphaFold prediction
+  journal = Acta Cryst D
+  volume = 79
+  pages = 234-244
+  year = 2023
+  doi_id =  doi:10.1107/S205979832300102X
+  pmid = 36876433
+}
+
+citation {
+  article_id = alphafold_hypothesis
+  authors = Terwilliger TC, Afonine PV, Liebschner, D., Croll TI, McCoy, AJ, Oeffner, RD., Williams, CJ, Poon, BK, Richardson JS, Read RJ, Adams PD
+  title = AlphaFold predictions: great hypotheses but no match for experiment
+  journal = BiorXiv
+  volume = None
+  pages = None
+  year = 2023
+  doi_id = 10.1101/2022.11.21.517405
+  pmid = None
+}
+
+citation {
+  article_id = colabfold
+  authors = Mirdita M, Schütze K, Moriwaki Y, Heo L, Ovchinnikov S, Steinegger M
+  title = Making protein folding accessible to all
+  journal = Nature Methods
+  volume = 19
+  pages = 679–682
+  year = 2022
+  doi_id =  doi:10.1038/s41592-022-01488-1
+  pmid = 35637307
+}
+
+citation {
+  article_id = mmseqs2b
+  authors = Mirdita M, Steinegger M, Söding J
+  title = MMseqs2 desktop and local web server app for fast interactive sequence searches
+  journal = Bioinformatics
+  volume = 35
+  pages = 2856-2858
+  year = 2019
+  doi_id =  10.1093/bioinformatics/bty1057
+  pmid = 30615063
+}
+citation {
+  article_id = mmseqs2
+  authors = Steinegger M, Söding J
+  title = MMseqs2 enables sensitive protein sequence searching for the analysis of massive data sets
+  journal = Nature biotechnology
+  volume = 35
+  pages = 1026-1028
+  year = 2017
+  doi_id =  10.1038/nbt.3988
+  pmid = 35637307
+}
+
+
+citation {
   article_id = merritt_server
   authors = Merritt EA
   title = X-ray Anomalous Scattering
@@ -411,7 +559,7 @@ citation {
   volume = 58
   pages = 2213-5
   year = 2002
-  doi_id =  doi:10.1107/S0907444902016384
+  doi_id =  10.1107/S0907444902016384
   pmid = 12454504
 }
 
@@ -473,7 +621,7 @@ citation {
   journal = J. Appl. Cryst.
   volume = 35
   pages = 126-136
-  doi_id = doi:10.1107/S0021889801017824
+  doi_id = 10.1107/S0021889801017824
 }
 
 citation {
@@ -484,9 +632,20 @@ citation {
   journal = Acta Cryst. D
   volume = 59
   pages = 1966-1973.
-  doi_id = doi:10.1107/S0907444903018043
+  doi_id = 10.1107/S0907444903018043
 }
 
+citation {
+  article_id = map_comparison
+  authors = Urzhumtsev, A,  Afonine, PV, Lunin, VY, Terwilliger, TC, Adams, PD
+  title = Metrics for comparison of crystallographic maps
+  journal = Acta Crystallogr D Biol Crystallogr
+  volume = D70
+  pages = 2593-2606
+  year = 2014
+  doi_id = 10.1107/S1399004714016289
+  pmid = 25286844
+}
 citation {
   article_id = ias
   authors = Afonine PV, Grosse-Kunstleve RW, Adams PD, Lunin VY, \
@@ -524,7 +683,7 @@ citation {
   journal = Protein Science
   volume = 27
   pages = 293-315
-  doi_id =  doi:10.1002/pro.3330
+  doi_id =  10.1002/pro.3330
 }
 
 citation {
@@ -559,7 +718,7 @@ citation {
   volume = 58
   pages = 1948-54
   year = 2002
-  doi_id = doi:10.1107/S0907444902016657
+  doi_id = 10.1107/S0907444902016657
   pmid = 12393927
 }
 
@@ -584,6 +743,7 @@ citation {
   volume = 75
   pages = 861-877
   doi_id = "10.1107/S2059798319011471"
+  pmid = 31588918
 }
 
 citation {
@@ -607,7 +767,7 @@ citation {
   volume = 65
   pages = 297-300
   pmid = 19237753
-  doi_id = doi:10.1107/S0907444908044296
+  doi_id = 10.1107/S0907444908044296
 }
 
 citation {
@@ -1244,6 +1404,17 @@ citation {
 }
 
 citation {
+  article_id = phenix.mosaic
+  authors = Afonine PV, Adams PD, Sobolev OV, Urzhumtsev A
+  title = Accounting for nonuniformity of bulk-solvent: a mosaic model
+  journal = None
+  volume = None
+  pages = None
+  year = 2030
+  doi_id = None
+}
+
+citation {
   article_id = phenix.validation_cryoem
   authors = Afonine PV, Klaholz BP, Moriarty NW, Poon BK, Sobolev OV, Terwilliger TC, Adams PD, Urzhumtsev A
   title = New tools for the analysis and validation of cryo-EM maps and atomic models
@@ -1411,4 +1582,70 @@ citation {
   volume = 12
   pages = 15-25
   year = 2021
+}
+
+citation {
+  article_id = emplacement_theory
+  authors = Read RJ, Millán C, McCoy AJ, Terwilliger TC
+  title = Likelihood-based signal and noise analysis for docking of models into cryo-EM maps
+  journal = Acta Cryst. D
+  volume = 79
+  pages = 271-280
+  year = 2023
+  pmid = 36920335
+  doi_id = 10.1107/S2059798323001596
+}
+
+citation {
+  article_id = emplacement_program
+  authors = Millán C, McCoy AJ, Terwilliger TC, Read RJ
+  title = Likelihood-based docking of models into cryo-EM maps
+  journal = Acta Cryst. D
+  volume = 79
+  pages = 281-289
+  year = 2023
+  pmid = 36920336
+  doi_id = 10.1107/S2059798323001602
+}
+citation {
+  article_id = lddt
+  authors = Mariani V, Biasini M, Barbato A, Schwede T.
+  title = lDDT: a local superposition-free score for comparing protein structures and models using distance difference tests
+  journal = Bioinformatics
+  volume = 29
+  pages = 2722-2728
+  year = 2013
+  doi_id = 10.1093/bioinformatics/btt473
+  pmid = 23986568
+}
+citation {
+  article_id = alphafold
+  authors = Jumper J, Evans R, Pritzel A, Green T, Figurnov M, Ronneberger O, Tunyasuvunakool K, Bates R, Žídek A, Potapenko A, Bridgland A, Meyer C, Kohl SAA, Ballard AJ, Cowie A, Romera-Paredes B, Nikolov S, Jain R, Adler J, Back T, Petersen S, Reiman D, Clancy E, Zielinski M, Steinegger M, Pacholska M, Berghammer T, Bodenstein S, Silver D, Vinyals O, Senior AW, Kavukcuoglu K, Kohli P, Hassabis D
+  title = Highly accurate protein structure prediction with AlphaFold
+  journal = Nature
+  volume = 596
+  pages = 583-589
+  year = 2021
+  doi_id =  doi:10.1038/s41586-021-03819-2
+  pmid = 34265844
+}
+
+citation {
+  article_id = qmr_ligand
+  authors = Liebschner D, Moriarty NW, Poon BK, Adams PD
+  title = In situ ligand restraints from quantum-mechanical methods
+  journal = Acta Cryst. D
+  volume = 79
+  pages = 100-110
+  year = 2023
+  pmid = 36762856
+  doi_id = 10.1107/S2059798323000025
+}
+
+citation {
+  article_id = qmr_nqh
+  authors = Moriarty NW, Moussa J, Adams PD
+  title = Protonation of histidine rings using quantum mechanical methods
+  journal = Acta Cryst. D
+  year = 2024
 }

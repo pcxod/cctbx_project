@@ -4,7 +4,9 @@ import sys
 import libtbx.load_env
 
 tst_list_base = [
+  "$D/regression/tst_mrc_io.py",
   "$D/regression/tst_wildcard.py",
+  "$D/gui_tools/tst.py",
   "$D/regression/tst_simple_parser.py",
   "$D/regression/tst_phil.py",
   "$D/regression/tst_pdb_cif_inputs.py",
@@ -16,13 +18,19 @@ tst_list_base = [
   "$D/regression/tst_map_model_manager_3.py",
   "$D/regression/tst_map_model_manager_4.py",
   "$D/regression/tst_map_model_manager_model_sharpening_5.py",
+  "$D/regression/tst_map_model_manager_model_sharpening_5_cif.py",
   "$D/regression/tst_map_model_manager_call_consistency.py",
   "$D/regression/tst_map_model_manager_external_sharpening_7.py",
   "$D/regression/tst_map_model_manager_half_map_sharpening_6.py",
   "$D/regression/tst_map_model_manager_tls_from_map_8.py",
+  "$D/regression/tst_map_model_manager_cif.py",
+  "$D/regression/tst_map_model_manager_9_remove_origin_shift_and_unit_cell_crystal_symmetry.py",
+  "$D/regression/tst_map_model_manager_9_remove_origin_shift_and_unit_cell_crystal_symmetry_cif.py",
+  "$D/regression/tst_map_model_manager_local_resolution_10.py",
   "$D/regression/tst_map_tools.py",
   "$D/regression/tst_patterson.py",
   "$D/regression/tst_restraints_merge.py",
+  "$D/regression/tst_atom_selections_10k.py",
   "$D/ranges.py",
   "$D/regression/tst_crystal_symmetry_from_any.py",
   "$D/regression/tst_poscar.py",
@@ -60,6 +68,7 @@ tst_list_base = [
   "$D/pdb/modified_rna_dna_names.py",
   "$D/regression/secondary_structure/tst_sheet.py",
   "$D/regression/secondary_structure/tst_annotation.py",
+  "$D/regression/secondary_structure/tst_annotation_long.py",
   "$D/pdb/secondary_structure.py",
   "$D/pdb/tst_atom_selection_string.py",
   "$D/pdb/tst_secondary_structure.py",
@@ -96,6 +105,8 @@ tst_list_base = [
   "$D/regression/tst_bioinformatics.py",
   "$D/regression/tst_box_around_molecule.py",
   "$D/regression/tst_mmcif_segids.py",
+  "$D/regression/tst_mmcif_input.py",
+  "$D/regression/tst_hierarchy_forward_compatible_pdb.py",
   "$D/regression/tst_mmcif_multimodel.py",
   "$D/regression/tst_add_conformations.py",
   "$D/regression/tst_symmetry.py",
@@ -119,6 +130,7 @@ tst_list_base = [
   "$D/regression/ncs/tst_mmcif_biomt_reduction_output.py",
   "$D/regression/ncs/tst_ncs_search_ligs.py",
   "$D/regression/ncs/tst_ncs_search_broken_chain.py",
+  "$D/regression/ncs/tst_ncs_search_shortcut_1.py",
   "$D/regression/ncs/tst_ncs_groups_preprocessing.py",
   "$D/regression/ncs/tst_ncs_input.py",
   "$D/regression/ncs/tst_ncs_user_selections.py",
@@ -134,11 +146,24 @@ tst_list_base = [
   "$D/bioinformatics/test/tst_ncbi_blast_xml.py",
   "$D/bioinformatics/pdb_info.py",
   "$D/regression/tst_cif_as_pdb_1atom.py",
+  "$D/regression/tst_cif_1.py",
   "$D/regression/tst_split_data_cif.py",
   "$D/regression/tst_all_chain_ids.py",
   "$D/regression/tst_extract_xtal_data.py",
   "$D/regression/tst_cli_parser.py",
   "$D/regression/tst_mtz_as_cif.py",
+  "$D/regression/tst_group_rounding.py",
+  "$D/regression/tst_hierarchy_occupancies_rounding.py",
+  "$D/regression/tst_hierarchy_merge_atoms_at_end_to_residues.py",
+  "$D/regression/tst_hierarchy_long_chain_ids_1.py",
+  "$D/regression/tst_hierarchy_long_resname_1.py",
+  "$D/regression/tst_hierarchy_long_resname_2.py",
+  "$D/regression/tst_hierarchy_long_resname_3.py",
+  "$D/regression/tst_hierarchy_long_resname_4.py",
+  "$D/regression/tst_hierarchy_copy_select.py",
+  "$D/regression/tst_hierarchy_id_str.py",
+  "$D/regression/tst_hierarchy_altlocs.py",
+  "$D/regression/tst_fetch.py",
   ]
 
 # failing tests on Windows, Python 2.7
@@ -146,7 +171,9 @@ tst_list_windows_fail = [
   "$D/detectors/tst_debug_write.py",
 ]
 
-tst_list_fail = ["$D/regression/ncs/tst_ncs_reordered_chains.py",
+tst_list_fail = [
+  "$D/regression/ncs/tst_ncs_reordered_chains.py",
+  "$D/regression/tst_mmcif_to_from_hierarchy.py",
   ]
 if sys.platform == 'win32':
   tst_list_fail += tst_list_windows_fail

@@ -15,6 +15,7 @@ from libtbx import group_args, str_utils
 import iotbx.pdb
 import iotbx.cif.model
 import iotbx.ncs
+from cctbx import sgtbx
 from iotbx.pdb.amino_acid_codes import one_letter_given_three_letter
 # from iotbx.pdb.atom_selection import AtomSelectionError
 from iotbx.pdb.misc_records_output import link_record_output
@@ -23,7 +24,7 @@ from iotbx.cif import category_sort_function
 from cctbx.array_family import flex
 from cctbx import xray
 from cctbx import adptbx
-from cctbx import geometry_restraints
+
 from cctbx import adp_restraints
 from cctbx import crystal
 
@@ -35,8 +36,8 @@ import mmtbx.monomer_library.server
 from mmtbx.geometry_restraints.torsion_restraints.utils import check_for_internal_chain_ter_records
 import mmtbx.tls.tools as tls_tools
 from mmtbx import ias
-from mmtbx import utils
-from mmtbx import ncs
+
+
 from mmtbx.ncs.ncs_utils import apply_transforms
 from mmtbx.command_line import find_tls_groups
 from mmtbx.monomer_library.pdb_interpretation import grand_master_phil_str
@@ -47,6 +48,7 @@ from mmtbx.refinement import print_statistics
 from mmtbx.refinement import anomalous_scatterer_groups
 from mmtbx.refinement import geometry_minimization
 import cctbx.geometry_restraints.nonbonded_overlaps as nbo
+import collections
 
 from mmtbx.rotamer import nqh
 
@@ -189,7 +191,7 @@ class manager(object):
   """
 
   def __init__(self,
-      model_input,
+      model_input               = None,
       pdb_hierarchy             = None,
       crystal_symmetry          = None,
       restraint_objects         = None,
@@ -197,12 +199,13 @@ class manager(object):
       stop_for_unknowns         = True,
       log                       = None,
       expand_with_mtrix         = True,
+      process_biomt             = True,
       skip_ss_annotations       = False):
     # Assert basic assumptions
     if(model_input is not None): assert pdb_hierarchy is None
     if(pdb_hierarchy is not None):
       assert model_input is None
-      assert crystal_symmetry is not None
+      # assert crystal_symmetry is not None
     # Internals
     self._processed         = False
     self._xray_structure    = None
@@ -229,6 +232,7 @@ class manager(object):
     self.original_xh_lengths = None
     self.riding_h_manager = None
     self._pdb_interpretation_params = None
+    self._neutralized = False
     # Used for reprocessing (that needs to go). Only used in this file.
     # XXX REMOVE WHEN POSSIBLE! XXX
     self.scattering_dict_info = None
@@ -267,7 +271,8 @@ class manager(object):
     if(self._model_input is not None):
       if(self._crystal_symmetry is None):
         inp_cs = self._model_input.crystal_symmetry()
-        if(inp_cs and not inp_cs.is_empty() and not inp_cs.is_nonsense()):
+        if(inp_cs and not inp_cs.is_empty() and not inp_cs.is_nonsense() and
+           not inp_cs.is_incomplete()):
           self._crystal_symmetry = inp_cs
     # Keep track of the source of model
     if self._model_input is not None:
@@ -285,7 +290,7 @@ class manager(object):
       self.expand_with_MTRIX_records()
     # Handle BIOMT. Keep track of BIOMT matrices (to allow to expand later)
     self.biomt_operators = None
-    if(self._model_input is not None):
+    if(self._model_input is not None and process_biomt):
       try: # ugly work-around for limited support of BIOMT
         self.biomt_operators = self._model_input.process_BIOMT_records()
       except RuntimeError: pass
@@ -456,6 +461,24 @@ class manager(object):
       filename = None
     return filename
 
+  def distances_symmetric(self, other):
+    """
+    Min distances between matching atoms accounting for pseudo-symmetric
+    residues. Slow.
+    """
+    assert self.size() == other.size()
+    atoms_1 = self.get_hierarchy().atoms()
+    atoms_2 = other.get_hierarchy().atoms()
+    result = flex.double()
+    for i, ai in enumerate(atoms_1):
+      dbest = 1.e9
+      for j, aj in enumerate(atoms_2):
+        d = ai.distance(aj)
+        if d<dbest:
+          dbest=d
+      result.append(dbest)
+    return result
+
   def get_xray_structure(self):
     if(self._xray_structure is None):
       cs = self.crystal_symmetry()
@@ -603,6 +626,9 @@ class manager(object):
     return state
 
   def __setstate__(self, state):
+    if sys.version_info.major >= 3:
+      from libtbx.easy_pickle import fix_py2_pickle
+      state = fix_py2_pickle(state)
     self.__dict__.update(state)
 
     # Restore methods from pdb hierarchy
@@ -633,8 +659,8 @@ class manager(object):
       sc = (0, 0, 0)
 
     return "Model manager "+\
-      "%s" %(self.model_number()) if self.model_number() is not None else "" + \
-      "\n%s\nChains: %s Residues %s (%s - %s)\nWorking coordinate shift %s)" %(
+      ("%s" %(self.model_number()) if self.model_number() is not None else "") + \
+      "\nSymmetry: %s Chains: %s Residues: %s (%s - %s)\nWorking coordinate shift %s)" %(
       str(self.unit_cell_crystal_symmetry()).replace("\n"," "),
       str(nchains),
       str(nres),
@@ -850,6 +876,20 @@ class manager(object):
      shift_cart = shift_cart_to_apply,
      crystal_symmetry = self._unit_cell_crystal_symmetry)
 
+  def set_symmetry_and_shift_to_match_other(self, other):
+    ''' Transfer all symmetry and shift_cart from other to this model.
+        Does not change coordinates.
+
+        NOTE: You might use this method if you superimpose this model on
+        other and want this model to take on the symmetry and
+        shift_cart of other.
+    '''
+    self.set_shift_cart((0,0,0)) # Required to set crystal_symmetry
+    self.set_crystal_symmetry(crystal_symmetry = other.crystal_symmetry())
+    self.set_unit_cell_crystal_symmetry(
+        crystal_symmetry = other.unit_cell_crystal_symmetry())
+    self.set_shift_cart(other.shift_cart())
+
   def set_unit_cell_crystal_symmetry(self, crystal_symmetry):
     '''
       Set the unit_cell_crystal_symmetry (original crystal symmetry)
@@ -1029,6 +1069,9 @@ class manager(object):
   def set_refinement_flags(self, flags):
     self.refinement_flags = flags
 
+  def get_refinement_flags(self):
+    return self.refinement_flags
+
   def get_number_of_atoms(self):
     return self.get_hierarchy().atoms().size()
 
@@ -1047,11 +1090,11 @@ class manager(object):
     return self._site_symmetry_table
 
   def altlocs_present(self):
-    result = False
-    conformer_indices = self.get_hierarchy().get_conformer_indices()
+    conformer_indices = \
+      self.get_hierarchy().get_conformer_indices().conformer_indices
     if(len(list(set(list(conformer_indices))))>1):
       result = True
-    return result
+    return False
 
   def aa_residues_with_bound_sidechains(self):
     """
@@ -1412,8 +1455,13 @@ class manager(object):
       model_ph.append_model(m.detached_copy())
     self.reset_after_changing_hierarchy()
 
-  def reset_after_changing_hierarchy(self):
+  def atom_counts(self):
+    c = collections.Counter()
+    for a in self.get_hierarchy().atoms():
+      c[a.element.strip()]+=1
+    return c
 
+  def reset_after_changing_hierarchy(self):
     '''  Regenerate xray_structure after changing hierarchy '''
     self.update_xrs()
     self._update_atom_selection_cache()
@@ -1421,6 +1469,14 @@ class manager(object):
     self.get_hierarchy().atoms().reset_i_seq() # redo the numbering
     self.unset_restraints_manager() # no longer applies
     self.unset_ncs_constraints_groups()
+
+  def adopt_xray_structure(self, xray_structure=None):
+    if xray_structure is None:
+      return
+    self.get_hierarchy().adopt_xray_structure(xray_structure)
+    self._xray_structure = xray_structure
+    self._atom_selection_cache = None
+    self.model_statistics_info = None
 
   def set_xray_structure(self, xray_structure):
     # XXX Delete as a method or make sure all TLS, NCS, refinement flags etc
@@ -1446,6 +1502,11 @@ class manager(object):
     if self._ener_lib is None:
       self._ener_lib = mmtbx.monomer_library.server.ener_lib()
     return self._ener_lib
+
+  def get_states_collector(self):
+    return mmtbx.utils.states(
+      xray_structure = self.get_xray_structure(),
+      pdb_hierarchy  = self.get_hierarchy())
 
   def rotamer_outlier_selection(self):
     rm = self.get_rotamer_manager()
@@ -1506,7 +1567,11 @@ class manager(object):
       hierarchy_to_output = hierarchy_to_output.deep_copy()
     if (self._shift_cart is not None) and (not do_not_shift_back):
       self._shift_back(hierarchy_to_output)
+    hierarchy_to_output.clear_label_asym_id_lookups()
     return hierarchy_to_output
+
+  def can_be_output_as_pdb(self):
+    return self.get_hierarchy().fits_in_pdb_format()
 
   def model_as_pdb(self,
       output_cs = True,
@@ -1543,6 +1608,7 @@ class manager(object):
         do_not_shift_back=do_not_shift_back)
 
     if hierarchy_to_output is not None:
+      hierarchy_to_output.round_occupancies_in_place(2)
       result.write(hierarchy_to_output.as_pdb_string(
           crystal_symmetry=cs_to_output,
           atoms_reset_serial_first_value=atoms_reset_serial_first_value,
@@ -1632,13 +1698,103 @@ class manager(object):
       return False
     return True
 
+  def as_pdb_or_mmcif_string(self,
+       target_format = None,
+       segid_as_auth_segid = True,
+       remark_section = None,
+       **kw):
+    '''
+     Shortcut for pdb_or_mmcif_string_info with write_file=False, returning
+       only the string representing this hierarchy. The string may be in
+       PDB or mmCIF format, with target_format used if it is feasible.
+
+     Method to allow shifting from general writing as pdb to
+     writing as mmcif, with the change in two places (here and model.py)
+     Use default of segid_as_auth_segid=True here (different than
+       as_mmcif_string())
+     :param target_format: desired output format, pdb or mmcif
+     :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
+          in mmcif output
+     :param remark_section: if supplied and format is pdb, add this text
+     :param **kw:  any keywords suitable for as_pdb_string()
+        and as_mmcif_string()
+     :returns text string representing this hierarchy
+    '''
+
+    info = self.pdb_or_mmcif_string_info(
+       target_format = target_format,
+       segid_as_auth_segid = segid_as_auth_segid,
+       remark_section = remark_section,
+       write_file = False,
+       **kw)
+    return info.pdb_string
+
+  def pdb_or_mmcif_string_info(self,
+      target_filename = None,
+      target_format = None,
+      segid_as_auth_segid = True,
+      write_file = False,
+      data_manager = None,
+      overwrite = True,
+      remark_section = None,
+      **kw):
+    # Method to allow shifting from general writing as pdb
+    # to writing as mmcif, with the change in two places (here and hierarchy.py)
+
+    # NOTE: Normally use the data_manager to write any files and use
+    #  tools in the hierarchy to manipulate any aspects of a hierarchy.
+
+    #  If you need a pdb string, normally use as_pdb_or_mmcif_string
+    #   instead of this general function
+    #  Note default of segid_as_auth_segid = True, different from
+    #     as_mmcif_string()
+
+    if target_format in ['None',None]:  # set the default format here
+      target_format = 'pdb'
+    assert target_format in ['pdb','mmcif']
+
+    if target_format == 'pdb':
+      if self.get_hierarchy().fits_in_pdb_format():
+        pdb_str = self.model_as_pdb(**kw)
+        is_mmcif = False
+        if remark_section:
+          pdb_str = "%s\n%s" %(remark_section, pdb_str)
+      else:
+        pdb_str = self.model_as_mmcif(
+          segid_as_auth_segid = segid_as_auth_segid,**kw)
+        is_mmcif = True
+    else:
+      pdb_str = self.model_as_mmcif(segid_as_auth_segid = segid_as_auth_segid,**kw)
+      is_mmcif = True
+    if target_filename:
+      import os
+      path,ext = os.path.splitext(target_filename)
+      if is_mmcif:
+        ext = ".cif"
+      else:
+        ext = ".pdb"
+      target_filename = "%s%s" %(path,ext)
+    if write_file and target_filename:
+      if not data_manager:
+        from iotbx.data_manager import DataManager
+        data_manager = DataManager()
+      target_filename = data_manager.write_model_file(pdb_str, target_filename,
+        overwrite = overwrite)
+    return group_args(group_args_type = 'pdb_string and filename',
+      pdb_string = pdb_str,
+      file_name = target_filename,
+      is_mmcif = is_mmcif)
+
   def model_as_mmcif(self,
       cif_block_name = "default",
       output_cs = True,
       additional_blocks = None,
       align_columns = False,
       do_not_shift_back = False,
-      try_unique_with_biomt = False):
+      try_unique_with_biomt = False,
+      skip_restraints=False,
+      segid_as_auth_segid = False,
+      ):
     if try_unique_with_biomt:
       if not self.can_be_unique_with_biomt():
         return ""
@@ -1656,7 +1812,8 @@ class manager(object):
           additional_blocks = ab,
           align_columns = align_columns,
           do_not_shift_back = do_not_shift_back,
-          try_unique_with_biomt = False)
+          try_unique_with_biomt = False,
+          segid_as_auth_segid = segid_as_auth_segid)
     out = StringIO()
     cif = iotbx.cif.model.cif()
     cif_block = None
@@ -1669,9 +1826,12 @@ class manager(object):
         do_not_shift_back=do_not_shift_back)
     if hierarchy_to_output is not None:
       if cif_block is not None:
-        cif_block.update(hierarchy_to_output.as_cif_block())
+        hierarchy_to_output.round_occupancies_in_place(3)
+        cif_block.update(hierarchy_to_output.as_cif_block(
+          segid_as_auth_segid = segid_as_auth_segid))
       else:
-        cif_block = hierarchy_to_output.as_cif_block()
+        cif_block = hierarchy_to_output.as_cif_block(
+          segid_as_auth_segid = segid_as_auth_segid)
 
     if self.restraints_manager_available():
       ias_selection = self.get_ias_selection()
@@ -1728,8 +1888,9 @@ class manager(object):
     cif_block.sort(key=category_sort_function)
     cif[cif_block_name] = cif_block
 
-    restraints = self.extract_restraints_as_cif_blocks()
-    cif.update(restraints)
+    if not skip_restraints and self.restraints_manager_available():
+      restraints = self.extract_restraints_as_cif_blocks()
+      cif.update(restraints)
 
     if self.restraints_manager_available():
       links = grm_geometry.get_cif_link_entries(self.get_mon_lib_srv())
@@ -1770,13 +1931,6 @@ class manager(object):
   def input_model_format_pdb(self):
     return self._original_model_format == "pdb"
 
-  def model_as_str(self, output_cs=True):
-    if(  self.input_model_format_cif()):
-      return self.model_as_mmcif(output_cs=output_cs)
-    elif(self.input_model_format_pdb()):
-      return self.model_as_pdb(output_cs=output_cs)
-    else: raise RuntimeError("Model source is unknown.")
-
   def get_current_pdb_interpretation_params(self):
     if(self._pdb_interpretation_params is not None):
       return self._pdb_interpretation_params
@@ -1800,9 +1954,11 @@ class manager(object):
     #
     if(not self._pdb_interpretation_params.pdb_interpretation.sort_atoms and
        self._pdb_hierarchy is not None):
-      self._xray_structure = None
-      self._pdb_hierarchy = None
-      assert not self._mtrix_expanded
+      if self._model_input is not None:
+        # otherwise it fails here: = processed_pdb_files_srv.process_pdb_files(
+        self._xray_structure = None
+        self._pdb_hierarchy = None
+        assert not self._mtrix_expanded
     #
     if(self._pdb_interpretation_params.pdb_interpretation.sort_atoms and
        self._pdb_hierarchy is not None):
@@ -1882,6 +2038,23 @@ class manager(object):
     self._processed_pdb_file = None
     # Order of calling this matetrs!
     self.link_records_in_pdb_format = link_record_output(acp)
+
+  def has_atoms_in_special_positions(self, selection, log=None):
+    pdb_hierarchy = self.get_hierarchy()
+    atom_labels = list(pdb_hierarchy.atoms_with_labels())
+    sel_cache = self.get_atom_selection_cache()
+    site_symmetry_table = self.get_xray_structure().site_symmetry_table()
+    disallowed_i_seqs = site_symmetry_table.special_position_indices()
+    isel = sel_cache.selection(selection).iselection()
+    isel_special = isel.intersection(disallowed_i_seqs)
+    if (len(isel_special) != 0):
+      print("  WARNING: selection includes atoms on special positions", file=log)
+      print("    selection: %s" % selection, file=log)
+      print("    bad atoms:", file=log)
+      for i_seq in isel_special :
+        print("    %s" % atom_labels[i_seq].id_str(), file=log)
+      return True
+    return False
 
   def has_hd(self):
     if self._has_hd is None:
@@ -2199,7 +2372,7 @@ class manager(object):
       cctbx_depreciation_warning('get_specific_h_bond_type takes int argument')
       i_seq = i_seq.i_seq
     if i_seq>=len(self._type_h_bonds):
-      print('get_specific_h_bond_type(): i_seq is larger than array length. Perhaps due to an unsupported selection.')
+      raise Sorry('get_specific_h_bond_type(%s): i_seq is larger than array length %s. Perhaps due to an unsupported selection.' % (i_seq, len(self._type_h_bonds)))
     type_h_bond = self._type_h_bonds[i_seq]
     return type_h_bond
 
@@ -2208,7 +2381,7 @@ class manager(object):
       cctbx_depreciation_warning('get_specific_vdw_radii takes int argument')
       i_seq = i_seq.i_seq
     if i_seq>=len(self._type_energies):
-      print('get_specific_vdw_radius(): i_seq is larger than array length. Perhaps due to an unsupported selection.')
+      raise Sorry('get_specific_vdw_radius(%s): i_seq is larger than array length %s. Perhaps due to an unsupported selection.' % (i_seq, len(self._type_energies)))
     e = self.get_ener_lib()
     type_energy = self._type_energies[i_seq]
     if vdw_radius_without_H:
@@ -2230,7 +2403,7 @@ class manager(object):
       cctbx_depreciation_warning('get_specific_ion_radius takes int argument')
       i_seq = i_seq.i_seq
     if i_seq>=len(self._type_energies):
-      print('get_specific_ion_radius(): i_seq is larger than array length. Perhaps due to an unsupported selection.')
+      raise Sorry('get_specific_ion_radius(): i_seq is larger than array length. Perhaps due to an unsupported selection.')
     e = self.get_ener_lib()
     type_energy = self._type_energies[i_seq]
     ion_radii = e.lib_atom[type_energy].ion_radius
@@ -2317,6 +2490,11 @@ class manager(object):
       log = None,
       set_inelastic_form_factors=None,
       iff_wavelength=None):
+    # XXX Fix for electron table: ions are not supported.
+    # XXX Need to remove this once a better table is available.
+    if(scattering_table == "electron"):
+      self.neutralize_scatterers()
+    #
     self.get_xray_structure()
     self.scattering_dict_info = group_args(
         scattering_table=scattering_table,
@@ -2403,6 +2581,20 @@ class manager(object):
 
   def get_model_input(self):
     return self._model_input
+
+  def twin_law_from_model_input(self):
+    """
+    Extract twin_law from model_input, if available and extractable
+    """
+    twin_law = None
+    mi = self.get_model_input()
+    if(mi is None): return None
+    twin_law = mi.extract_f_model_core_constants().twin_law
+    if twin_law is not None:
+     try: sgtbx.rt_mx(symbol=twin_law, r_den=12, t_den=144)
+     except ValueError as e:
+       twin_law = None
+    return twin_law
 
   def get_riding_h_manager(self, idealize=True, force=False):
     """
@@ -2655,16 +2847,29 @@ class manager(object):
     self.reset_after_changing_hierarchy()
     self.unset_riding_h_manager()
 
-  def rotatable_hd_selection(self, iselection=True, use_shortcut=True):
-    rmh_sel = mmtbx.hydrogens.rotatable(
-      pdb_hierarchy      = self.get_hierarchy(),
-      mon_lib_srv        = self.get_mon_lib_srv(),
-      restraints_manager = self.get_restraints_manager(),
-      log                = self.log,
-      use_shortcut       = use_shortcut)
-    sel_i = []
-    for s in rmh_sel: sel_i.extend(s[1])
-    result = flex.size_t(sel_i)
+  def rotatable_hd_selection(self,
+                             iselection=True,
+                             use_shortcut=True,
+                             from_riding_manager=False):
+    if from_riding_manager:
+      self.setup_riding_h_manager()
+      riding_h_manager = self.get_riding_h_manager()
+      para = riding_h_manager.h_parameterization
+      result = flex.size_t()
+      for p in para:
+        if p is not None:
+          if p.htype in ['alg1b', 'prop']:
+            result.append(p.ih)
+    else:
+      rmh_sel = mmtbx.hydrogens.rotatable(
+        pdb_hierarchy      = self.get_hierarchy(),
+        mon_lib_srv        = self.get_mon_lib_srv(),
+        restraints_manager = self.get_restraints_manager(),
+        log                = self.log,
+        use_shortcut       = use_shortcut)
+      sel_i = []
+      for s in rmh_sel: sel_i.extend(s[1])
+      result = flex.size_t(sel_i)
     if(iselection): return result
     else:           return flex.bool(self.size(), result)
 
@@ -2710,15 +2915,23 @@ class manager(object):
     return out.getvalue()
 
   def neutralize_scatterers(self):
-    neutralized = False
+    if(self._neutralized): return
     xrs = self.get_xray_structure()
+    atoms = self.get_hierarchy().atoms()
     scatterers = xrs.scatterers()
-    for scatterer in scatterers:
+    for i_seq, scatterer in enumerate(scatterers):
       neutralized_scatterer = re.sub('[^a-zA-Z]', '', scatterer.scattering_type)
       if (neutralized_scatterer != scatterer.scattering_type):
-        neutralized = True
+        self._neutralized = True
         scatterer.scattering_type = neutralized_scatterer
-    if neutralized:
+        # propagate into hierarchy
+        atoms[i_seq].charge = '  '
+        # propagate into pdb_inp
+        # necessary if grm is constructed as it may drop xrs
+        if self._model_input:
+          self._model_input.atoms()[i_seq].charge='  '
+    if self._neutralized:
+      xrs.discard_scattering_type_registry()
       self.set_xray_structure(xray_structure = xrs)
       self.unset_restraints_manager()
 
@@ -2905,7 +3118,7 @@ class manager(object):
     self.get_hierarchy().atoms().reset_i_seq()
     self._sync_xrs_labels()
 
-  def add_hydrogens(self, correct_special_position_tolerance,
+  def add_hydrogens(self, correct_special_position_tolerance=1.0,
         element = "H", neutron = False, occupancy=0.01):
     result = []
     xs = self.get_xray_structure()
@@ -3013,7 +3226,8 @@ class manager(object):
         sites_individual = True,
         s_occupancies    = neutron)
     self.reprocess_pdb_hierarchy_inefficient()
-    self.idealize_h_minimization()
+    self.idealize_h_minimization(
+        correct_special_position_tolerance=correct_special_position_tolerance)
 
   def pairs_within(self, radius):
     cs = self.crystal_symmetry()
@@ -3038,7 +3252,7 @@ class manager(object):
     """
     raw_records = self.model_as_pdb()
     pdb_inp = iotbx.pdb.input(source_info=None, lines=raw_records)
-    pip = self._pdb_interpretation_params
+    pip = self.get_current_pdb_interpretation_params()
     pip.pdb_interpretation.clash_guard.max_number_of_distances_below_threshold = 100000000
     pip.pdb_interpretation.clash_guard.max_fraction_of_distances_below_threshold = 1.0
     pip.pdb_interpretation.proceed_with_excessive_length_bonds=True
@@ -3120,7 +3334,9 @@ class manager(object):
       b_isos                      = bs)
 
   def deep_copy(self):
-    return self.select(selection = flex.bool(self.size(), True))
+    new_model = self.select(selection = flex.bool(self.size(), True))
+    new_model.set_ss_annotation(self.get_ss_annotation())
+    return new_model
 
   def add_ias(self, fmodel=None, ias_params=None, file_name=None,
                                                              build_only=False):
@@ -3277,7 +3493,7 @@ class manager(object):
     )
     return result
 
-  def solvent_selection(self, include_ions=False):
+  def solvent_selection(self, include_ions=False, offset=None):
     result = flex.bool()
     get_class = iotbx.pdb.common_residue_names_get_class
     for a in self.get_hierarchy().atoms():
@@ -3287,6 +3503,9 @@ class manager(object):
       elif (a.segid.strip() == "ION") and (include_ions):
         result.append(True)
       else: result.append(False)
+    if(offset is not None):
+      for i in offset:
+        result[i] = False
     return result
 
   def xray_structure_macromolecule(self):
@@ -3381,9 +3600,9 @@ class manager(object):
     new._mon_lib_srv = self._mon_lib_srv
     new._ener_lib = self._ener_lib
     new._original_model_format = self._original_model_format
-    # brain dead way to avoid issues. Needs to be a selection to retain full functionality
-    self._type_energies = []
-    self._type_h_bonds = []
+    if hasattr(self, '_type_h_bonds') and len(self._type_h_bonds)==len(selection):
+      new._type_energies = self._type_energies.select(selection)
+      new._type_h_bonds = self._type_h_bonds.select(selection)
     return new
 
   def number_of_ordered_solvent_molecules(self):
@@ -3498,6 +3717,7 @@ class manager(object):
     time_model_show += timer.elapsed()
 
   def add_solvent(self, solvent_xray_structure,
+                        conformer_indices=None,
                         atom_name    = "O",
                         residue_name = "HOH",
                         chain_id     = " ",
@@ -3515,6 +3735,7 @@ class manager(object):
     if (i_seq is None or i_seq < 0): i_seq = 0
     self.append_single_atoms(
       new_xray_structure=solvent_xray_structure,
+      conformer_indices=conformer_indices,
       atom_names=atom_names,
       residue_names=residue_names,
       nonbonded_types=nonbonded_types,
@@ -3530,6 +3751,7 @@ class manager(object):
 
   def append_single_atoms(self,
       new_xray_structure,
+      conformer_indices,
       atom_names,
       residue_names,
       nonbonded_types,
@@ -3549,11 +3771,13 @@ class manager(object):
     number_of_new_atoms = new_xray_structure.scatterers().size()
     self._xray_structure = \
       self._xray_structure.concatenate(new_xray_structure)
+    # Occupancy
     occupancy_flags = None
     if(refine_occupancies):
       occupancy_flags = []
       for i in range(1, new_xray_structure.scatterers().size()+1):
         occupancy_flags.append([flex.size_t([ms+i-1])])
+    #
     if(self.refinement_flags is not None and
        self.refinement_flags.individual_sites):
       ssites = flex.bool(new_xray_structure.scatterers().size(), True)
@@ -3590,23 +3814,27 @@ class manager(object):
     #
     self._append_pdb_atoms(
       new_xray_structure=new_xray_structure,
+      conformer_indices=conformer_indices,
       atom_names=atom_names,
       residue_names=residue_names,
       chain_id=chain_id,
       segids=segids,
       i_seq_start=i_seq_start,
       reset_labels=reset_labels)
-   #
     if(self.restraints_manager is not None):
       geometry = self.restraints_manager.geometry
       if (geometry.model_indices is None):
         model_indices = None
       else:
         model_indices = flex.size_t(number_of_new_atoms, 0)
-      if (geometry.conformer_indices is None):
+      if(geometry.conformer_indices is None):
         conformer_indices = None
       else:
-        conformer_indices = flex.size_t(number_of_new_atoms, 0)
+        if conformer_indices is not None:
+          assert conformer_indices.conformer_indices.size() == number_of_new_atoms
+          conformer_indices = conformer_indices.conformer_indices
+        else:
+          conformer_indices = flex.size_t(number_of_new_atoms, 0)
       if (geometry.sym_excl_indices is None):
         sym_excl_indices = None
       else:
@@ -3649,6 +3877,7 @@ class manager(object):
       atom_names,
       residue_names,
       chain_id,
+      conformer_indices=None,
       segids=None,
       i_seq_start=0,
       reset_labels=False):
@@ -3663,6 +3892,13 @@ class manager(object):
     i_seq = i_seq_start
     for j_seq, sc in enumerate(new_xray_structure.scatterers()):
       i_seq += 1
+      altloc=""
+      if conformer_indices is not None:
+        ci = conformer_indices.conformer_indices[j_seq]
+        cm = conformer_indices.index_altloc_mapping
+        if not ci in cm.values() and ci==0: altloc = ""
+        else:
+          altloc = list(cm.keys())[list(cm.values()).index(ci)]
       element, charge = sc.element_and_charge_symbols()
       new_atom = (iotbx.pdb.hierarchy.atom()
         .set_serial(new_serial=iotbx.pdb.hy36encode(width=5, value=n_seq+i_seq))
@@ -3675,7 +3911,7 @@ class manager(object):
         .set_hetero(new_hetero=True))
       if (segids is not None):
         new_atom.segid = segids[j_seq]
-      new_atom_group = iotbx.pdb.hierarchy.atom_group(altloc="",
+      new_atom_group = iotbx.pdb.hierarchy.atom_group(altloc=altloc,
         resname=residue_names[j_seq])
       new_atom_group.append_atom(atom=new_atom)
       new_residue_group = iotbx.pdb.hierarchy.residue_group(
@@ -3868,7 +4104,7 @@ class manager(object):
     return mmtbx.model.statistics.occupancy(
       hierarchy = self.get_hierarchy())
 
-  def adp_statistics(self):
+  def adp_statistics(self, use_z_scores=False):
     rm = self.restraints_manager
     if(self.ias_manager is not None):
       rm = None
@@ -3876,7 +4112,8 @@ class manager(object):
       pdb_hierarchy               = self.get_hierarchy(),
       xray_structure              = self.get_xray_structure(),
       use_hydrogens               = False, #XXX
-      geometry_restraints_manager = rm)
+      geometry_restraints_manager = rm,
+      use_z_scores                = use_z_scores)
 
   def show_adp_statistics(self,
                           out,
@@ -3886,7 +4123,12 @@ class manager(object):
     self.adp_statistics().show(log = out, prefix = prefix)
 
   def energies_adp(self, iso_restraints, compute_gradients, use_hd):
+    if self.restraints_manager is None: return None
     assert self.refinement_flags is not None
+    if iso_restraints is None:
+      import mmtbx.refinement.adp_refinement
+      iso_restraints = mmtbx.refinement.adp_refinement.\
+        adp_restraints_master_params.extract().iso
     xrs = self._xray_structure
     sel_ = xrs.use_u_iso() | xrs.use_u_aniso()
     selection = sel_
@@ -3937,6 +4179,62 @@ class manager(object):
       return True
     else:
       return False
+
+  def merge_other_models(self, other_list):
+    """
+    Merge list of other (model objects) in with this one
+    Requirements:  other models must have same number of PDB 'model' objects and
+      there must be no duplicate chain/residue combinations
+
+    parameters:
+      other_list:  model objects to merge
+    """
+    if not other_list:
+      return
+    for other in other_list:
+      self.merge_other_model(other, skip_check = True)
+
+    # Make sure that we have no duplicate atoms by creating grm
+    try:
+      self.process()
+    except Exception as e:
+      raise Sorry("Unable to merge models:\n%s" %(str(e)))
+
+    return self
+
+  def merge_other_model(self, other, skip_check = False):
+    """
+    Merge other (another model object) in with this one
+    Requirements:  other model must have same number of PDB 'model' objects and
+      there must be no duplicate chain/residue combinations
+
+    parameters:
+      other:  model object to merge
+      skip_check:  skip creating grm to check result
+    """
+    if not other:
+      return
+
+    ph = self.get_hierarchy()
+    other_ph = other.get_hierarchy()
+
+    if len(list(ph.models())) != len(list(other_ph.models())):
+      raise Sorry("Cannot merge models that have differing numbers of"+
+        " PDB 'model' entries")
+
+    for m_model, other_m_model in zip(ph.models(), other_ph.models()):
+      for chain in other_m_model.chains():
+        new_chain = chain.detached_copy()
+        m_model.append_chain(new_chain)
+    self.reset_after_changing_hierarchy()
+
+    # Make sure that we have no duplicate atoms by creating grm
+    try:
+      self.process()
+    except Exception as e:
+      raise Sorry("Unable to merge models:\n%s" %(str(e)))
+
+    return self
 
   def is_same_model(self, other):
     """
@@ -4071,7 +4369,8 @@ class manager(object):
     vals = list(chain_ids_match_dict.values())
     for v in vals:
       assert len(vals[0]) == len(v), chain_ids_match_dict
-    result.reset_i_seq_if_necessary()
+    result.atoms().reset_i_seq()
+    result.atoms().reset_serial()
     self._pdb_hierarchy = result
     if self._pdb_hierarchy.models_size() == 1:
       # Drop model.id if there is only one model.
@@ -4126,24 +4425,28 @@ class manager(object):
     if not self._biomt_mtrix_container_is_good(self.biomt_operators):
       return
     # Check if BIOMT and MTRIX are identical and then do not apply BIOMT
-    br = self.biomt_operators.r
-    bt = self.biomt_operators.t
-    mr = self.mtrix_operators.r
-    mt = self.mtrix_operators.t
-    if(len(br)==len(mr) and len(bt)==len(mt)):
-      cntr1=0
-      for bri in br:
-        for mri in mr:
-          if((bri-mri).is_approx_zero(eps=1.e-4)):
-            cntr1+=1
-            break
-      cntr2=0
-      for bti in bt:
-        for mti in mt:
-          if((bti-mti).is_approx_zero(eps=1.e-4)):
-            cntr2+=1
-            break
-      if(cntr1==len(br) and cntr2==len(bt)): return
+    # Only if already expanded with MTRIX.
+    if self.mtrix_expanded():
+      br = self.biomt_operators.r
+      bt = self.biomt_operators.t
+      mr = self.mtrix_operators.r
+      mt = self.mtrix_operators.t
+      if(len(br)==len(mr) and len(bt)==len(mt)):
+        cntr1=0
+        for bri in br:
+          for mri in mr:
+            if((bri-mri).is_approx_zero(eps=1.e-4)):
+              cntr1+=1
+              break
+        cntr2=0
+        for bti in bt:
+          for mti in mt:
+            if((bti-mti).is_approx_zero(eps=1.e-4)):
+              cntr2+=1
+              break
+        if(cntr1==len(br) and cntr2==len(bt)):
+          # print("BIOMT and MTRIX are identical")
+          return
     #
     self._expand_symm_helper(self.biomt_operators)
     self._biomt_expanded = True

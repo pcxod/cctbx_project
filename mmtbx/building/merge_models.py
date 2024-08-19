@@ -498,10 +498,9 @@ def get_cc_dict(hierarchy=None,crystal_symmetry=None,
     asc=hierarchy.atom_selection_cache()
     sel=asc.selection(string = atom_selection)
     sel_hierarchy=hierarchy.select(sel)
-    pdb_inp=sel_hierarchy.as_pdb_input(crystal_symmetry=crystal_symmetry)
-    ph=pdb_inp.construct_hierarchy()
-
-    xrs = pdb_inp.xray_structure_simple(crystal_symmetry=crystal_symmetry)
+    sel_hierarchy.atoms().reset_i_seq()
+    xrs = sel_hierarchy.extract_xray_structure(
+      crystal_symmetry=crystal_symmetry)
     xrs.scattering_type_registry(table = table)
 
     cc_calculator=mmtbx.maps.correlation.from_map_and_xray_structure_or_fmodel(
@@ -509,7 +508,7 @@ def get_cc_dict(hierarchy=None,crystal_symmetry=None,
       map_data       = map_data,
       d_min          = d_min)
 
-    for m in ph.models():
+    for m in sel_hierarchy.models():
       for chain in m.chains():
         cc_list=flex.double()
         cc_dict[model.id]=cc_list
@@ -551,15 +550,6 @@ def smooth_cc_values(cc_dict=None,
            i,cc_dict[key][i],smoothed_cc_dict[key][i]), file=out)
 
   return smoothed_cc_dict
-
-def remove_ter(text): # remove blank lines and TER records
-  new_lines=[]
-  for line in flex.split_lines(text):
-    if not line.replace(" ",""): continue
-    if line.startswith("TER"): continue
-    new_lines.append(line)
-  return "\n".join(new_lines)
-
 
 # NOTE: Match defaults here and in params at top of file
 #     : copy from defaults if params is not None below
@@ -660,7 +650,6 @@ def run(
   if n_models==1:  # nothing to do
     return hierarchy
 
-  #xrs = pdb_inp.xray_structure_simple(crystal_symmetry=crystal_symmetry)
   xrs = hierarchy.extract_xray_structure(crystal_symmetry=crystal_symmetry)
   xrs.scattering_type_registry(table=scattering_table)
   if not resolution:
@@ -695,6 +684,7 @@ def run(
 
   # Save composite model, chain by chain
   composite_model_stream=StringIO()
+  sel_ph_list = []
 
   for chain_id_and_resseq in chain_id_and_resseq_list:
     f=StringIO()
@@ -704,8 +694,8 @@ def run(
     asc=hierarchy.atom_selection_cache()
     sel=asc.selection(string = atom_selection)
     sel_hierarchy=hierarchy.select(sel)
-    pdb_inp=sel_hierarchy.as_pdb_input(crystal_symmetry=crystal_symmetry)
-    ph=pdb_inp.construct_hierarchy()
+    sel_hierarchy.atoms().reset_i_seq()
+    ph=sel_hierarchy
 
     print("\nWorking on chain_id='%s' resseq %d:%d\n" %(
        chain_id_and_resseq[0],chain_id_and_resseq[1][0],chain_id_and_resseq[1][1]), file=out)
@@ -721,7 +711,7 @@ def run(
        verbose=verbose,out=out)
 
     # figure out all the places where crossover can occur.
-    # FIXME: order of keys changes in py2/3 vthis could be bad
+    # FIXME: order of keys changes in py2/3 vthis could be bad. No all are same.
     n_residues=cc_dict[list(cc_dict.keys())[0]].size()
 
     crossover_dict=get_crossover_dict(
@@ -811,7 +801,6 @@ def run(
 
     # Note residue values. We are going to pick each residue from one of
     # the models
-
     for model in ph.models():
       for chain in model.chains():
         if chain.id != chain_id: continue
@@ -820,27 +809,25 @@ def run(
           residue_list.append(rg.resseq)
     residue_list.sort()
     assert len(best_model.source_list)==len(residue_list)
-
+    from mmtbx.secondary_structure.find_ss_from_ca import remove_ter_or_break
     for i in range(len(residue_list)):
       atom_selection=get_atom_selection(model_id=best_model.source_list[i],
         resseq_sel=residue_list[i])
       asc=ph.atom_selection_cache()
       sel=asc.selection(string = atom_selection)
       sel_hierarchy=ph.select(sel)
-      print(remove_ter(sel_hierarchy.as_pdb_string()), file=composite_model_stream)
-
-  #  All done, make a new pdb_hierarchy
-  pdb_string=composite_model_stream.getvalue()
-  pdb_inp=iotbx.pdb.input(source_info=None, lines = pdb_string)
-  pdb_hierarchy=pdb_inp.construct_hierarchy()
+      sel_hierarchy = remove_ter_or_break(sel_hierarchy)
+      sel_ph_list.append(sel_hierarchy)
+  from iotbx.pdb.utils import add_hierarchies
+  pdb_hierarchy = remove_ter_or_break(add_hierarchies(sel_ph_list,
+    create_new_chain_ids_if_necessary = False))
 
   if pdb_out:
-    f=open(pdb_out,'w')
-    print(pdb_hierarchy.as_pdb_string(crystal_symmetry=crystal_symmetry), file=f)
-    print("Final model is in: %s\n" %(f.name))
-    f.close()
+    pdb_out = pdb_hierarchy.write_pdb_or_mmcif_file(target_filename = pdb_out,
+      crystal_symmetry = crystal_symmetry)
+    print("Final model is in: %s\n" %(pdb_out))
 
-  return pdb_hierarchy
+  return pdb_hierarchy, pdb_out
 
 if   (__name__ == "__main__"):
   args=sys.argv[1:]

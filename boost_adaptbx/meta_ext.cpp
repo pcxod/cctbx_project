@@ -437,8 +437,15 @@ namespace {
 #endif
     }
     else if (PyUnicode_Check(obj)) {
+#ifdef IS_PY3K
+      const Py_UCS1* c2;
+      n = PyUnicode_GET_LENGTH(obj);
+      c2 = PyUnicode_1BYTE_DATA(obj);
+      c = reinterpret_cast<const char*>(c2);
+#else
       n = PyUnicode_GET_DATA_SIZE(obj);
       c = PyUnicode_AS_DATA(obj);
+#endif
     }
     else {
 #ifdef IS_PY3K
@@ -606,7 +613,7 @@ namespace {
           /* For performance, we don't want to call
              PyOS_snprintf here (extra layers of
              function call). */
-          sprintf(p, "\\x%02x", c & 0xff);
+          snprintf(p, sizeof(p), "\\x%02x", c & 0xff);
           p += 4;
         }
         else

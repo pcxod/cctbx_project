@@ -182,7 +182,7 @@ class molprobity(slots_getstate_setstate):
     if(self.model is None and pdb_hierarchy is not None):
       import mmtbx.model
       self.model = mmtbx.model.manager(
-        model_input = pdb_hierarchy.as_pdb_input())
+        pdb_hierarchy = pdb_hierarchy)
       self.model.process(make_restraints=True)
 
     pdb_hierarchy = self.model.get_hierarchy()
@@ -257,8 +257,7 @@ class molprobity(slots_getstate_setstate):
       if (flags.nqh):
         self.nqh_flips = clashscore.nqh_flips(
           pdb_hierarchy=pdb_hierarchy)
-    if (pdb_hierarchy.contains_rna() and flags.rna and
-        libtbx.env.has_module(name="suitename")):
+    if (pdb_hierarchy.contains_rna() and flags.rna):
       if (geometry_restraints_manager is not None):
         self.rna = rna_validate.rna_validation(
           pdb_hierarchy=pdb_hierarchy,
@@ -283,6 +282,7 @@ class molprobity(slots_getstate_setstate):
         xray_structure=xray_structure,
         geometry_restraints_manager=geometry_restraints_manager,
         ignore_hd=(not nuclear),
+        reverse_sort=True,
         cdl=getattr(all_chain_proxies, "use_cdl", None))
     if (sequences is not None) and (flags.seq):
       self.sequence = sequence.validation(
@@ -616,7 +616,7 @@ class molprobity(slots_getstate_setstate):
     enabled.
     """
     coot_script = libtbx.env.find_in_repositories(
-      relative_path="cctbx_project/cootbx/validation_lists.py",
+      relative_path="cootbx/validation_lists.py",
       test=os.path.isfile)
     if (coot_script is None):
       raise Sorry("Can't find template Python script for Coot.")
@@ -790,17 +790,17 @@ class pdb_header_info(slots_getstate_setstate):
     for name in self.__slots__ :
       setattr(self, name, None)
     if (pdb_file is not None):
-      import iotbx.pdb.hierarchy
+      import iotbx.pdb
       from iotbx.pdb import extract_rfactors_resolutions_sigma
-      pdb_in = iotbx.pdb.hierarchy.input(file_name=pdb_file)
+      pdb_in = iotbx.pdb.input(file_name=pdb_file)
       published_results = extract_rfactors_resolutions_sigma.extract(
-        file_lines=pdb_in.input.remark_section(), file_name=None)
+        file_lines=pdb_in.remark_section(), file_name=None)
       if (published_results is not None):
         self.r_work = published_results.r_work
         self.r_free = published_results.r_free
         self.d_min = published_results.high
         self.d_max = published_results.low
-      self.refinement_program = pdb_in.input.get_program_name()
+      self.refinement_program = pdb_in.get_program_name()
       # XXX phenix.refine hack, won't work for other programs
       with open(pdb_file) as f:
         lines = f.readlines()
@@ -811,7 +811,7 @@ class pdb_header_info(slots_getstate_setstate):
           self.rms_angles = float(fields[-1])
           break
       if (pdb_hierarchy is not None):
-        tls_groups = pdb_in.input.extract_tls_params(pdb_hierarchy).tls_params
+        tls_groups = pdb_in.extract_tls_params(pdb_hierarchy).tls_params
         if (tls_groups is not None):
           self.n_tls_groups = len(tls_groups)
 
@@ -1024,7 +1024,7 @@ class multi_criterion_view(slots_getstate_setstate):
     import numpy
     values = []
     for outlier in self.data():
-      values.append(outlier.get_real_space_plot_values(False))
+      values.append(outlier.get_real_space_plot_values(True))
     values = numpy.array(values).transpose()
     if (len(values) > 0):
       rho_min = min(min(values[2]), min(values[3]))

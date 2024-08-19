@@ -2,6 +2,8 @@ from __future__ import absolute_import, division, print_function
 import boost_adaptbx.boost.python as bp
 ext = bp.import_ext("iotbx_pdb_hierarchy_ext")
 from iotbx_pdb_hierarchy_ext import *
+ext2 = bp.import_ext("iotbx_pdb_ext")
+from iotbx_pdb_ext import xray_structures_simple_extension
 from libtbx.str_utils import show_sorted_by_counts
 from libtbx.utils import Sorry, plural_s, null_out
 from libtbx import Auto, dict_with_default_0, group_args
@@ -11,7 +13,7 @@ from iotbx.pdb.modified_aa_names import lookup as aa_3_as_1_mod
 from iotbx.pdb.modified_rna_dna_names import lookup as na_3_as_1_mod
 from iotbx.pdb.utils import all_chain_ids, all_label_asym_ids
 import iotbx.cif.model
-from cctbx import crystal
+from cctbx import crystal, adptbx, uctbx
 from cctbx.array_family import flex
 import six
 from six.moves import cStringIO as StringIO
@@ -347,6 +349,8 @@ class __hash_eq_mixin(object):
     return hash(self.memory_id())
 
   def __eq__(self, other):
+    if other == None:
+      return False
     if (isinstance(other, self.__class__)):
       return (self.memory_id() == other.memory_id())
     return False
@@ -372,36 +376,55 @@ class _():
   >>> hierarchy = iotbx.pdb.hierarchy.root()
   """
 
+  __getstate_manages_dict__ = True
+
   def __getstate__(self):
+    # check that the only possible attributes that are set are
+    #   _lai_lookup
+    #   _label_seq_id_dict
+    # these are not pickled and are not restored when unpickling
+    # if more attributes are added to the hierarchy class in Python,
+    # the pickling code needs to be updated.
+    attribute_check = set(self.__dict__.keys()) - set(['_lai_lookup', '_label_seq_id_dict'])
+    assert len(attribute_check) == 0, attribute_check
     version = 2
     pdb_string = StringIO()
-    py3out = self._as_pdb_string_cstringio(  # NOTE py3out will be None in py2
-      cstringio=pdb_string,
-      append_end=True,
-      interleaved_conf=0,
-      atoms_reset_serial_first_value=None,
-      atom_hetatm=True,
-      sigatm=True,
-      anisou=True,
-      siguij=True)
-    if six.PY3:
-      pdb_string.write(py3out)
+    if self.fits_in_pdb_format():
+      py3out = self._as_pdb_string_cstringio(  # NOTE py3out will be None in py2
+        cstringio=pdb_string,
+        append_end=True,
+        interleaved_conf=0,
+        atoms_reset_serial_first_value=None,
+        atom_hetatm=True,
+        sigatm=True,
+        anisou=True,
+        siguij=True)
+      if six.PY3:
+        pdb_string.write(py3out)
+    else:
+      cif_object = iotbx.cif.model.cif()
+      cif_object['pickled'] = self.as_cif_block()
+      cif_object.show(out=pdb_string)
     return (version, pickle_import_trigger(), self.info, pdb_string.getvalue())
 
   def __setstate__(self, state):
     assert len(state) >= 3
+    if sys.version_info.major >= 3:
+      from libtbx.easy_pickle import fix_py2_pickle
+      state = fix_py2_pickle(state)
     version = state[0]
     if   (version == 1): assert len(state) == 3
     elif (version == 2): assert len(state) == 4
     else: raise RuntimeError("Unknown version of pickled state.")
     self.info = state[-2]
     import iotbx.pdb
-    models = iotbx.pdb.input(
-      source_info="pickle",
-      lines=flex.split_lines(state[-1])).construct_hierarchy(sort_atoms=False).models()
-    self.pre_allocate_models(number_of_additional_models=len(models))
-    for model in models:
-      self.append_model(model=model)
+    ph = iotbx.pdb.input(
+      source_info="string",
+      lines=flex.split_lines(state[-1])).construct_hierarchy(sort_atoms=False)
+
+    self.pre_allocate_models(number_of_additional_models=len(ph.models()))
+    for model in ph.models():
+      self.append_model(model=model.detached_copy())
 
   def chains(self):
     """
@@ -620,6 +643,254 @@ class _():
       level_id_exception=level_id_exception)
     return out.getvalue()
 
+  def is_forward_compatible_hierarchy(self):
+    """ Determine if this is a forward_compatible hierarchy"""
+    if hasattr(self,'_conversion_info'):
+      return True
+    else:
+      return False
+
+  def conversion_info(self):
+    """ Get the conversion info for this forward_compatible hierarchy"""
+    assert self.is_forward_compatible_hierarchy(),\
+      "Only a forward_compatible hierarchy has conversion info"
+    return self._conversion_info
+
+  def convert_multi_word_text_to_forward_compatible(self, text):
+    """ Use conversion info to convert words in a text string to
+     forward-compatible equivalents
+     :params text:  text to convert
+     :returns modified text
+    """
+    c = self.conversion_info()
+    return c.convert_multi_word_text_to_forward_compatible(text = text)
+
+  def as_forward_compatible_hierarchy(self, conversion_info = None):
+    """ Convert a standard hierarchy to a forward_compatible_hierarchy
+
+     :params conversion_info
+
+     :returns pdb_hierarchy with chain ID and residue names converted to
+        strings compatible with PDB formatting.  Returned hierarchy is
+        a deep_copy and contains the attribute _conversion_info with the
+        conversion_info used
+
+     Typical use: running a method with cmd_text (text commands) and supplying
+        a hierarchy (or string from it).  Convert the hierarchy and the
+        cmd_text, run the method, convert the results back:
+
+     # Convert the hierarchy to forward compatible
+     ph_fc = ph.as_forward_compatible_hierarchy()
+
+     # Convert any commands. Can be done one word at a time also
+     cmd_text_fc = ph_fc.convert_multi_word_text_to_forward_compatible(cmd_text)
+
+     # Run the method with converted hierarchy and commands
+     result = do_something(ph = ph_fc, command_text = cmd_text_fc)
+
+     # Convert back any resulting hierarchy
+     new_ph = result.ph.forward_compatible_hierarchy_as_standard(
+              conversion_info = ph_fc.conversion_info())
+
+     # Convert back any words in the results that referred to converted
+     #  items. Keys are chain_id and resname
+     new_result_items = []
+     for result_item,key in zip(results.text_words, results.text_keys):
+       new_result_item = ph_fc.conversion_info().\
+          get_full_text_from_forward_compatible_pdb_text(key = key,
+          forward_compatible_pdb_text = result_item)
+       new_result_items.append(new_result_item)
+
+    """
+    assert not self.is_forward_compatible_hierarchy(), \
+        "Cannot make a hierarchy forward compatible twice"
+    if not conversion_info:
+      from iotbx.pdb.forward_compatible_pdb_cif_conversion \
+         import forward_compatible_pdb_cif_conversion
+      conversion_info = forward_compatible_pdb_cif_conversion(hierarchy = self)
+    ph = self.deep_copy() # do not alter original
+    conversion_info.convert_hierarchy_to_forward_compatible_pdb_representation(
+       ph)
+    return ph
+
+  def forward_compatible_hierarchy_as_standard(self, conversion_info = None):
+    """ Convert a forward_compatible_hierarchy to a standard one.
+     Inverse of as_forward_compatible_hierarchy.  Restores chain IDs and
+     residue names using conversion_info object
+
+    :params: conversion_info:  optional conversion_info object specifying
+          conversion to be applied
+
+    :returns pdb_hierarchy with original (standard) chain ID and residue names
+
+    """
+
+    assert self.is_forward_compatible_hierarchy() or \
+        (conversion_info is not None), \
+       "Only a forward_compatible_hierarchy or a "+\
+        "hierarchy and conversion_info can be converted back to standard"
+    if not conversion_info:
+      conversion_info = self.conversion_info()
+    ph = self.deep_copy() # do not alter original
+    conversion_info.convert_hierarchy_to_full_representation(ph)
+    return ph
+
+  def as_forward_compatible_string(self, **kw):
+    """ Create a forward_compatible PDB string from a hierarchy and
+     throw away the conversion information.
+
+     One-way conversion useful for creating a file that is in PDB format.
+
+    :params **kw: any params suitable for as_pdb_string()
+    :returns text string
+    """
+
+    from iotbx.pdb.forward_compatible_pdb_cif_conversion \
+       import hierarchy_as_forward_compatible_pdb_string
+    return hierarchy_as_forward_compatible_pdb_string(self, **kw)
+
+  def as_pdb_or_mmcif_string(self,
+       target_format = None,
+       segid_as_auth_segid = True,
+       remark_section = None,
+       **kw):
+    '''
+     Shortcut for pdb_or_mmcif_string_info with write_file=False, returning
+       only the string representing this hierarchy. The string may be in
+       PDB or mmCIF format, with target_format used if it is feasible.
+
+     Method to allow shifting from general writing as pdb to
+     writing as mmcif, with the change in two places (here and model.py)
+     Use default of segid_as_auth_segid=True here (different than
+       as_mmcif_string())
+     :param target_format: desired output format, pdb or mmcif
+     :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
+          in mmcif output
+     :param remark_section: if supplied and format is pdb, add this text
+     :param **kw:  any keywords suitable for as_pdb_string()
+        and as_mmcif_string()
+     :returns text string representing this hierarchy
+    '''
+
+    info = self.pdb_or_mmcif_string_info(
+       target_format = target_format,
+       segid_as_auth_segid = segid_as_auth_segid,
+       remark_section = remark_section,
+       write_file = False,
+       **kw)
+    return info.pdb_string
+
+  def write_pdb_or_mmcif_file(self,
+       target_filename,
+       target_format = None,
+       data_manager = None,
+       overwrite = True,
+       segid_as_auth_segid = True,
+       remark_section = None,
+       **kw):
+    '''
+     Shortcut for pdb_or_mmcif_string_info with write_file=True, returning
+       only the name of the file that is written. The file may be written
+       in PDB or mmCIF format, with target_format used if feasible.
+
+     Method to allow shifting from general writing as pdb to
+     writing as mmcif, with the change in two places (here and model.py)
+     Use default of segid_as_auth_segid=True here (different than
+       as_mmcif_string())
+     :param target_format: desired output format, pdb or mmcif
+     :param target_filename: desired output file name, to be modified to
+        match the output format
+     :param data_manager:  data_manager to write files
+     :param overwrite:  parameter to set overwrite=True in data_manager if True
+     :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
+          in mmcif output
+     :param remark_section: if supplied and format is pdb, add this text
+     :param **kw:  any keywords suitable for as_pdb_string()
+        and as_mmcif_string()
+     :returns name of file that is written
+    '''
+
+    info = self.pdb_or_mmcif_string_info(
+       target_filename = target_filename,
+       target_format = target_format,
+       data_manager = data_manager,
+       overwrite = overwrite,
+       segid_as_auth_segid = segid_as_auth_segid,
+       remark_section = remark_section,
+       write_file = True,
+       **kw)
+    return info.file_name
+
+  def pdb_or_mmcif_string_info(self,
+       target_format = None, target_filename = None,
+       data_manager = None,
+       overwrite = True,
+       segid_as_auth_segid = True,
+       write_file = False,
+       remark_section = None,
+       **kw):
+    """
+     NOTE: Normally use instead either as_pdb_or_mmcif_string
+     write_pdb_or_mmcif_file.
+
+     Method to allow shifting from general writing as pdb to
+     writing as mmcif, with the change in two places (here and model.py)
+     Use default of segid_as_auth_segid=True here (different than
+       as_mmcif_string())
+     :param target_format: desired output format, pdb or mmcif
+     :param target_filename: desired output file name, to be modified to
+        match the output format
+     :param data_manager:  data_manager to write files
+     :param overwrite:  parameter to set overwrite=True in data_manager if True
+     :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
+          in mmcif output
+     :param write_file: Write the string to the target file
+     :param remark_section: if supplied and format is pdb, add this text
+     :param **kw:  any keywords suitable for as_pdb_string()
+        and as_mmcif_string()
+
+     :returns group_args object with attributes
+       pdb_string, file_name (the actual file name used) and is_mmcif
+    """
+
+    if target_format in ['None',None]:  # set the default format here
+      target_format = 'pdb'
+    assert target_format in ['pdb','mmcif']
+
+    if target_format == 'pdb':
+      if self.fits_in_pdb_format():
+        pdb_str = self.as_pdb_string(**kw)
+        is_mmcif = False
+        if remark_section:
+          pdb_str = "%s\n%s" %(remark_section, pdb_str)
+      else:
+        pdb_str = self.as_mmcif_string(
+          segid_as_auth_segid = segid_as_auth_segid, **kw)
+        is_mmcif = True
+    else:
+      pdb_str = self.as_mmcif_string(
+        segid_as_auth_segid = segid_as_auth_segid, **kw)
+      is_mmcif = True
+    if target_filename:
+      import os
+      path,ext = os.path.splitext(target_filename)
+      if is_mmcif:
+        ext = ".cif"
+      else:
+        ext = ".pdb"
+      target_filename = "%s%s" %(path,ext)
+    if target_filename and write_file:
+      if not data_manager:
+        from iotbx.data_manager import DataManager
+        data_manager = DataManager()
+      target_filename = data_manager.write_model_file(pdb_str, target_filename,
+        overwrite = overwrite)
+
+    return group_args(group_args_type = 'pdb_string and filename',
+      pdb_string = pdb_str,
+      file_name = target_filename,
+      is_mmcif = is_mmcif)
+
   def as_pdb_string(self,
         crystal_symmetry=None,
         cryst1_z=None,
@@ -631,7 +902,8 @@ class _():
         sigatm=True,
         anisou=True,
         siguij=True,
-        output_break_records=True, # TODO deprecate
+        output_break_records=True, # TODO deprecate XXX no, this is still needed
+        force_write = False,
         cstringio=None,
         return_cstringio=Auto):
     """
@@ -645,8 +917,11 @@ class _():
     :param anisou: write ANISOU records for anisotropic atoms
     :param sigatm: write SIGATM records if applicable
     :param siguij: write SIGUIJ records if applicable
+    :param force_write:  write even if it does not fit in pdb format
     :returns: Python str
     """
+    if (not self.fits_in_pdb_format()) and (not force_write):
+      return ""
     if (cstringio is None):
       cstringio = StringIO()
       if (return_cstringio is Auto):
@@ -675,27 +950,6 @@ class _():
       return cstringio
     return cstringio.getvalue()
 
-# MARKED_FOR_DELETION_OLEG
-# REASON: This is not equivalent conversion. Hierarchy does not have a lot
-# of information pdb_input and cif_input should have. Therefore this
-# function should not be used at all to avoid confusion and having crippled
-# input objects. Moreover, the use of mmtbx.model should eliminate the
-# need in this tranformation.
-# Currently used exclusively in Tom's code.
-
-  def as_pdb_input(self, crystal_symmetry=None):
-    """
-    Generate corresponding pdb.input object.
-    """
-    import iotbx.pdb
-    pdb_str = self.as_pdb_string(crystal_symmetry=crystal_symmetry)
-    pdb_inp = iotbx.pdb.input(
-      source_info="pdb_hierarchy",
-      lines=flex.split_lines(pdb_str))
-    return pdb_inp
-
-# END_MARKED_FOR_DELETION_OLEG
-
   def as_list_of_residue_names(self):
     sequence=[]
     for model in self.models():
@@ -709,27 +963,35 @@ class _():
        unit_cell_crystal_symmetry = None,
        shift_cart = None):
     ''' Returns simple version of model object based on this hierarchy
-     Requires crystal_symmetry.  Optional unit_cell_crystal_symmetry and
-     shift_cart
+     Expects but does not require crystal_symmetry.
+     Optional unit_cell_crystal_symmetry and shift_cart.
+
+     Note that if crystal_symmetry is not supplied,
+     this uses a text representation of the hierarchy so that
+     values for xyz, occ, b, and crystal_symmetry are all rounded.
      '''
     import mmtbx.model
+
+    # make up crystal_symmetry if not present
+    crystal_symmetry = self.generate_crystal_symmetry(crystal_symmetry)
+
     mm = mmtbx.model.manager(
-          model_input = self.deep_copy().as_pdb_input(),
+          model_input = None, # REQUIRED
+          pdb_hierarchy = self,
           crystal_symmetry = crystal_symmetry,
           )
     mm.set_unit_cell_crystal_symmetry_and_shift_cart(
           unit_cell_crystal_symmetry = unit_cell_crystal_symmetry,
           shift_cart = shift_cart)
+    mm.info().file_name = None
     return mm
 
-
-  def as_dict_of_resseq_as_int_residue_names(self):
-    max_models = 1
+  def as_dict_of_chain_id_resseq_as_int_residue_names(self):
     dd =  {}
-    for m in self.models()[:max_models]:
-      for c in m.chains():
-        new_dd = c.as_dict_of_resseq_as_int_residue_names()
-        dd[c.id] = new_dd
+    m = self.only_model()
+    for c in m.chains():
+      new_dd = c.as_dict_of_resseq_as_int_residue_names()
+      dd[c.id] = new_dd
     return dd
 
   def as_sequence(self,
@@ -788,7 +1050,21 @@ class _():
     else: # usual
       return seq_fasta_lines
 
+  def generate_crystal_symmetry(self, crystal_symmetry):
+    cryst1_substitution_buffer_layer = None
+    if (crystal_symmetry is None):
+      crystal_symmetry = crystal.symmetry()
+    if (crystal_symmetry.unit_cell() is None):
+      crystal_symmetry = crystal_symmetry.customized_copy(
+        unit_cell=uctbx.non_crystallographic_unit_cell(
+          sites_cart=self.atoms().extract_xyz(),
+          buffer_layer=cryst1_substitution_buffer_layer))
+    if (crystal_symmetry.space_group_info() is None):
+      crystal_symmetry = crystal_symmetry.cell_equivalent_p1()
+    return crystal_symmetry
+
   def extract_xray_structure(self, crystal_symmetry=None,
+     enable_scattering_type_unknown = False,
      min_distance_sym_equiv=None):
     """
     Generate the equivalent cctbx.xray.structure object.  If the crystal
@@ -796,26 +1072,64 @@ class _():
     is usually best to keep the original xray structure object around, but this
     method is helpful in corner cases.
     """
-    if min_distance_sym_equiv is not None: # use it
-      return self.as_pdb_input(crystal_symmetry).xray_structure_simple(
-        min_distance_sym_equiv=min_distance_sym_equiv)
-    else:  # usual just use whatever is default in xray_structure_simple
-      return self.as_pdb_input(crystal_symmetry).xray_structure_simple()
+    # Abbreviated copy-paste from iotbx/pdb/__init__.py: def xray_structures_simple()
+    # Better than getting iotbx.pdb.input from hierarchy.as_pdb_string()
+    from cctbx import xray
+    import scitbx.stl.set
+    non_unit_occupancy_implies_min_distance_sym_equiv_zero = True
+    if min_distance_sym_equiv is None:
+      min_distance_sym_equiv = 0.5
 
-  def adopt_xray_structure(self, xray_structure, assert_identical_id_str=True):
+    # Make up crystal symmetry if not present
+    crystal_symmetry = self.generate_crystal_symmetry(crystal_symmetry)
+    unit_cell = crystal_symmetry.unit_cell()
+    scale_r = (0,0,0,0,0,0,0,0,0)
+    scale_t = (0,0,0)
+    scale_matrix = None
+    result = []
+    from iotbx.pdb import default_atom_names_scattering_type_const
+    atom_names_scattering_type_const = default_atom_names_scattering_type_const
+    mi = flex.size_t([m.atoms_size() for m in self.models()])
+    for i in range(1, len(mi)):
+      mi[i] += mi[i-1]
+    loop = xray_structures_simple_extension(
+      False, # one_structure_for_each_model,
+      False, # unit_cube_pseudo_crystal,
+      False, # fractional_coordinates,
+      False, # scattering_type_exact,
+      enable_scattering_type_unknown,
+      self.atoms_with_labels(),
+      mi,
+      scitbx.stl.set.stl_string(atom_names_scattering_type_const),
+      unit_cell,
+      scale_r,
+      scale_t)
+    special_position_settings = crystal_symmetry.special_position_settings(
+      min_distance_sym_equiv=min_distance_sym_equiv)
+    try :
+      while (next(loop)):
+        result.append(xray.structure(
+          special_position_settings=special_position_settings,
+          scatterers=loop.scatterers,
+          non_unit_occupancy_implies_min_distance_sym_equiv_zero=
+            non_unit_occupancy_implies_min_distance_sym_equiv_zero))
+    except ValueError as e :
+      raise Sorry(str(e))
+    return result[0]
+
+  def adopt_xray_structure(self, xray_structure):
     """
     Apply the current (refined) atomic parameters from the cctbx.xray.structure
-    object to the atoms in the PDB hierarchy.  This will fail if the labels of
-    the scatterers do not match the atom labels.
+    object to the atoms in the PDB hierarchy.
     """
-    from cctbx import adptbx
     if(self.atoms_size() != xray_structure.scatterers().size()):
       raise RuntimeError("Incompatible size of hierarchy and scatterers array.")
-    awl = self.atoms_with_labels()
+      # raise RuntimeError("Incompatible size of hierarchy and scatterers array: %d and %d" % (
+      #   self.atoms_size(), xray_structure.scatterers().size()))
     scatterers = xray_structure.scatterers()
     uc = xray_structure.unit_cell()
     orth = uc.orthogonalize
-    def set_attr(sc, a):
+    for sc, a in zip(scatterers, self.atoms()):
       a.set_xyz(new_xyz=orth(sc.site))
       a.set_occ(new_occ=sc.occupancy)
       a.set_b(new_b=adptbx.u_as_b(sc.u_iso_or_equiv(uc)))
@@ -829,23 +1143,6 @@ class _():
       element, charge = sc.element_and_charge_symbols()
       a.set_element(element)
       a.set_charge(charge)
-    def get_id(l):
-      r = [pos for pos, char in enumerate(l) if char == '"']
-      if(len(r)<2): return None
-      i,j = r[-2:]
-      r = "".join(l[i:j+1].replace('"',"").replace('"',"").split())
-      return r
-    for sc, a in zip(scatterers, awl):
-      id_str = a.id_str()
-      resname_from_sc = id_str[10:13]
-      cl1 = common_residue_names_get_class(resname_from_sc)
-      cl2 = common_residue_names_get_class(a.resname)
-      if assert_identical_id_str:
-        l1 = get_id(sc.label)
-        l2 = get_id(a.id_str())
-        if(l1 != l2):
-          raise RuntimeError("Mismatch: \n %s \n %s \n"%(sc.label,a.id_str()))
-      set_attr(sc=sc, a=a)
 
   def apply_rotation_translation(self, rot_matrices, trans_vectors):
     """
@@ -1018,9 +1315,10 @@ class _():
     assert self.atoms_size() > iseq, "%d, %d" % (self.atoms_size(), iseq)
     return self.get_auth_asym_id(self.atoms()[iseq].parent().parent().parent())
 
-  def get_auth_asym_id(self, chain):
+  def get_auth_asym_id(self, chain, segid_as_auth_segid = False):
     auth_asym_id = chain.id
-    if len(chain.atoms()[0].segid.strip()) > len(auth_asym_id):
+    if (not segid_as_auth_segid) and \
+       len(chain.atoms()[0].segid.strip()) > len(auth_asym_id):
       auth_asym_id = chain.atoms()[0].segid.strip()
     if auth_asym_id.strip() == '':
       # chain id is empty, segid is empty, just duplicate label_asym_id
@@ -1039,6 +1337,7 @@ class _():
       # fill self._lai_lookup for the whole hierarchy
       number_label_asym_id = 0
       label_asym_ids = all_label_asym_ids()
+
       for model in self.models():
         for chain in model.chains():
           previous = None
@@ -1078,7 +1377,11 @@ class _():
     return self.get_auth_seq_id(self.atoms()[iseq].parent().parent())
 
   def get_auth_seq_id(self, rg):
-    return rg.resseq.strip()
+    resseq_strip = rg.resseq.strip()
+    if len(resseq_strip) == 4:
+      return str(hy36decode(4, rg.resseq.strip()))
+    else:
+      return resseq_strip
 
   def get_label_seq_id_iseq(self, iseq):
     assert self.atoms_size() > iseq, "%d, %d" % (self.atoms_size(), iseq)
@@ -1106,15 +1409,27 @@ class _():
               self._label_seq_id_dict[ag.memory_id()] = label_seq_id_str
     return self._label_seq_id_dict[atom_group.memory_id()]
 
+  def clear_label_asym_id_lookups(self):
+    """ Make sure we have fresh lookups in case the hierarchy was modified since
+        they were calculated."""
+    if hasattr(self, '_lai_lookup'):
+      del self._lai_lookup
+    if hasattr(self, '_label_seq_id_dict'):
+      del self._label_seq_id_dict
+
   def as_cif_block(self,
       crystal_symmetry=None,
       coordinate_precision=5,
       occupancy_precision=3,
       b_iso_precision=5,
-      u_aniso_precision=5):
+      u_aniso_precision=5,
+      segid_as_auth_segid=False,
+      output_break_records=False):
+
     if crystal_symmetry is None:
       crystal_symmetry = crystal.symmetry()
     cs_cif_block = crystal_symmetry.as_cif_block(format="mmcif")
+    self.clear_label_asym_id_lookups()
 
     h_cif_block = iotbx.cif.model.block()
     coord_fmt_str = "%%.%if" %coordinate_precision
@@ -1122,7 +1437,7 @@ class _():
     b_iso_fmt_str = "%%.%if" %b_iso_precision
     u_aniso_fmt_str = "%%.%if" %u_aniso_precision
 
-    atom_site_loop = iotbx.cif.model.loop(header=(
+    atom_site_header = [
       '_atom_site.group_PDB',
       '_atom_site.id',
       '_atom_site.label_atom_id',
@@ -1146,7 +1461,17 @@ class _():
       #'_atom_site.auth_comp_id',
       #'_atom_site.auth_atom_id',
       '_atom_site.pdbx_PDB_model_num',
-    ))
+     ]
+    if segid_as_auth_segid:
+      atom_site_header.append('_atom_site.auth_segid',)
+    if output_break_records:
+      # Determine if there are any break records here to write out
+      if not self.contains_break_records():
+        output_break_records = False # no point
+    if output_break_records:  # set up _atom_site.auth_break
+      atom_site_header.append('_atom_site.auth_break',)
+
+    atom_site_loop = iotbx.cif.model.loop(header=tuple(atom_site_header))
 
     aniso_loop = iotbx.cif.model.loop(header=(
       '_atom_site_anisotrop.id',
@@ -1190,6 +1515,11 @@ class _():
     #atom_site_loop['_atom_site.auth_comp_id'].append(comp_id)
     #atom_site_loop['_atom_site.auth_atom_id'].append(atom.name.strip())
     atom_site_pdbx_PDB_model_num = atom_site_loop['_atom_site.pdbx_PDB_model_num']
+    if segid_as_auth_segid:
+      atom_site_auth_segid = atom_site_loop['_atom_site.auth_segid']
+    if output_break_records:
+      atom_site_auth_break = atom_site_loop['_atom_site.auth_break']
+
     atom_site_anisotrop_id = aniso_loop['_atom_site_anisotrop.id']
     atom_site_anisotrop_pdbx_auth_atom_id = \
       aniso_loop['_atom_site_anisotrop.pdbx_auth_atom_id']
@@ -1227,10 +1557,14 @@ class _():
     chain_ids = all_chain_ids()
     for model in self.models():
       model_id = model.id
+      is_first_in_chain = True
       if model_id == '': model_id = '1'
       for chain in model.chains():
-        auth_asym_id = self.get_auth_asym_id(chain)
+        auth_asym_id = self.get_auth_asym_id(chain,
+           segid_as_auth_segid = segid_as_auth_segid)
         for residue_group in chain.residue_groups():
+          is_first_after_break = not (
+            is_first_in_chain or residue_group.link_to_previous)
           label_asym_id = self.get_label_asym_id(residue_group)
           seq_id = self.get_auth_seq_id(residue_group)
           icode = residue_group.icode
@@ -1239,6 +1573,7 @@ class _():
             comp_id = atom_group.resname.strip()
             entity_id = '?' # XXX how do we determine this?
             for atom in atom_group.atoms():
+
               group_pdb = "ATOM"
               if atom.hetero: group_pdb = "HETATM"
               x, y, z = [coord_fmt_str %i for i in atom.xyz]
@@ -1283,6 +1618,10 @@ class _():
               #atom_site_loop['_atom_site.auth_comp_id'].append(comp_id)
               #atom_site_loop['_atom_site.auth_atom_id'].append(atom.name.strip())
               atom_site_pdbx_PDB_model_num.append(model_id.strip())
+              if segid_as_auth_segid:
+                atom_site_auth_segid.append(atom.segid)
+              if output_break_records:
+                atom_site_auth_break.append("1" if is_first_after_break else "0")
 
               if atom.uij_is_defined():
                 u11, u22, u33, u12, u13, u23 = [
@@ -1301,6 +1640,9 @@ class _():
                 atom_site_anisotrop_U12.append(u12)
                 atom_site_anisotrop_U13.append(u13)
                 atom_site_anisotrop_U23.append(u23)
+              is_first_in_chain = False
+              is_first_after_break = False
+              # end of atom loop
 
     for key in ('_atom_site.phenix_scat_dispersion_real',
                 '_atom_site.phenix_scat_dispersion_imag'):
@@ -1320,15 +1662,120 @@ class _():
     #
     return h_cif_block
 
-  def write_mmcif_file(self,
-                       file_name,
+  def remove_hetero(self):
+    for model in self.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for atom_group in residue_group.atom_groups():
+            have_het = False
+            for atom in atom_group.atoms():
+              if atom.hetero:
+                have_het = True
+                break
+            if have_het:
+              residue_group.remove_atom_group(atom_group)
+    # clean up
+    need_fixing = True
+    while need_fixing:
+      need_fixing = False
+      for model in self.models():
+        if len(list(model.chains())) == 0:
+          self.remove_model(model)
+          need_fixing = True
+        for chain in model.chains():
+          if len(list(chain.residue_groups())) == 0:
+            model.remove_chain(chain)
+            need_fixing = True
+          for residue_group in chain.residue_groups():
+            if len(list(residue_group.atom_groups())) == 0:
+              chain.remove_residue_group(residue_group)
+              need_fixing = True
+            for atom_group in residue_group.atom_groups():
+              if len(list(atom_group.atoms())) == 0:
+                residue_group.remove_atom_group(atom_group)
+                need_fixing = True
+
+  def contains_hetero(self):
+    for model in self.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for atom_group in residue_group.atom_groups():
+            for atom in atom_group.atoms():
+              if atom.hetero:
+                return True
+    return False
+
+  def contains_break_records(self):
+    for model in self.models():
+      for chain in model.chains():
+        is_first_in_chain = True
+        for rg in chain.residue_groups():
+          is_first_after_break = not (is_first_in_chain or rg.link_to_previous)
+          if is_first_after_break:
+            return True
+          is_first_in_chain = False
+    return False
+
+  def guess_chemical_elements(self,
+     check_pseudo = False,
+     convert_atom_names_to_uppercase = True,
+     allow_incorrect_spacing = None):
+    ''' Attempt to guess chemical elements for all atoms in hierarchy
+       where this is not set.  Normally used only just after reading in
+       PDB-formatted files that do not have elements specified
+    '''
+    # Standard set of chemical elements based on atom names (and leading spaces)
+    atoms = self.atoms()
+    if convert_atom_names_to_uppercase:
+      for at in atoms:
+        at.name = at.name.upper()
+    atoms.set_chemical_element_simple_if_necessary()
+
+    # Check to see if all have an element now
+    elements = atoms.extract_element().strip()
+    if elements.all_ne(""): # all done
+      return
+
+    # Check for incorrect spacings (atom name has space before it but should
+    #  not or opposite)
+    if allow_incorrect_spacing:
+      from iotbx.pdb.utils import set_element_ignoring_spacings
+      set_element_ignoring_spacings(self)
+
+    # Check for pseudo-atoms (ZU ZC etc that represent groups of atoms)
+    if check_pseudo:
+      from iotbx.pdb.utils import check_for_pseudo_atoms
+      check_for_pseudo_atoms(self)
+
+  def as_mmcif_string(self,
                        crystal_symmetry=None,
-                       data_block_name=None):
+                       data_block_name=None,
+                       segid_as_auth_segid=False,
+                       output_break_records=False):
     cif_object = iotbx.cif.model.cif()
     if data_block_name is None:
       data_block_name = "phenix"
     cif_object[data_block_name] = self.as_cif_block(
-      crystal_symmetry=crystal_symmetry)
+      crystal_symmetry=crystal_symmetry,
+      segid_as_auth_segid = segid_as_auth_segid,
+      output_break_records = output_break_records)
+    f = StringIO()
+    cif_object.show(out = f)
+    return f.getvalue()
+
+  def write_mmcif_file(self,
+                       file_name,
+                       crystal_symmetry=None,
+                       data_block_name=None,
+                       segid_as_auth_segid=False,
+                       output_break_records=False):
+    cif_object = iotbx.cif.model.cif()
+    if data_block_name is None:
+      data_block_name = "phenix"
+    cif_object[data_block_name] = self.as_cif_block(
+      crystal_symmetry=crystal_symmetry,
+      segid_as_auth_segid = segid_as_auth_segid,
+      output_break_records = output_break_records)
     with open(file_name, "w") as f:
       print(cif_object, file=f)
 
@@ -1364,10 +1811,100 @@ class _():
     if ("" in altloc_indices): p = 0
     else:                      p = 1
     altlocs = sorted(altloc_indices.keys())
+    index_altloc_mapping = {}
     for i,altloc in enumerate(altlocs):
-      if (altloc == ""): continue
+      if (altloc == ""):
+        index_altloc_mapping[altloc]=0
+        continue
       conformer_indices.set_selected(altloc_indices[altloc], i+p)
-    return conformer_indices
+      index_altloc_mapping[altloc]=i+p
+    return group_args(
+      conformer_indices = conformer_indices,
+      index_altloc_mapping = index_altloc_mapping)
+
+  def sort_chains_by_id(self):
+    chain_ids = self.chain_ids()
+    if len(chain_ids) < 2:
+      return # nothing to do
+
+    unique_chain_ids = []
+    have_dups = False
+    for chain_id in chain_ids:
+      if chain_id in unique_chain_ids:
+        have_dups = True
+      else:
+        unique_chain_ids.append(chain_id)
+    if not have_dups:
+      return  # nothing to do
+
+    import iotbx.pdb.hierarchy
+    new_ph = iotbx.pdb.hierarchy.root()
+    for m0 in self.models():
+      detached_chain_dict = {}
+      m1 = iotbx.pdb.hierarchy.model()
+      m1.id = m0.id
+      new_ph.append_model(m1)
+      for c0 in m0.chains():
+        if not c0.id in list(detached_chain_dict.keys()):
+          detached_chain_dict[c0.id] = []
+        detached_chain_dict[c0.id].append(c0.detached_copy())
+      for chain_id in unique_chain_ids:
+        for c in detached_chain_dict[chain_id]:
+          m1.append_chain(c)
+
+    # Now clear out the original and attach new models to the original hierarchy
+    for m0 in self.models():
+      for c0 in m0.chains():
+        m0.remove_chain(chain = c0)
+
+    for m0, m1 in zip(self.models(), new_ph.models()):
+      for c1 in  m1.chains():
+        m0.append_chain(c1.detached_copy())
+
+    # and reset i_seq
+    atoms = self.atoms()
+    atoms.reset_i_seq()
+
+  def remove_ter_or_break(self):
+    import iotbx.pdb.hierarchy
+    new_ph = iotbx.pdb.hierarchy.root()
+    # Sort by chain ID first
+    self.sort_chains_by_id()
+    for m0 in self.models():
+        m1 = iotbx.pdb.hierarchy.model()
+        m1.id = m0.id
+        new_ph.append_model(m1)
+        last_chain = None
+        for c0 in m0.chains():
+         if (not last_chain) or (last_chain and c0.id != last_chain.id) :
+           new_chain = True
+           first = True
+           c1 = c0.detached_copy()
+           m1.append_chain(c1)
+           last_chain = c0
+         else:
+           for residue_group in c0.residue_groups():
+             c1.append_residue_group(residue_group.detached_copy())
+    for m1 in new_ph.models():
+      for c1 in m1.chains():
+        first = True
+        for residue_group in c1.residue_groups():
+           if not first:
+             residue_group.link_to_previous = True
+           first = False
+
+    # Now clear out the original and attach new models to the original hierarchy
+    for m0 in self.models():
+      for c0 in m0.chains():
+        m0.remove_chain(chain = c0)
+
+    for m0, m1 in zip(self.models(), new_ph.models()):
+      for c1 in  m1.chains():
+        m0.append_chain(c1.detached_copy())
+
+    # and reset i_seq
+    atoms = self.atoms()
+    atoms.reset_i_seq()
 
   def remove_incomplete_main_chain_protein(self,
        required_atom_names=['CA','N','C','O']):
@@ -1390,7 +1927,21 @@ class _():
         if (len(chain.residue_groups()) == 0):
           model.remove_chain(chain=chain)
 
-  def remove_alt_confs(self, always_keep_one_conformer):
+  def altlocs_present(self, skip_blank = True):
+    hierarchy = self
+    altlocs_present = []
+    for model in hierarchy.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for atom_group in residue_group.atom_groups():
+            if skip_blank and (atom_group.altloc.strip() == ''):
+              continue  # ignore blanks
+            if not atom_group.altloc in altlocs_present:
+              altlocs_present.append(atom_group.altloc)
+    return altlocs_present
+
+  def remove_alt_confs(self, always_keep_one_conformer, altloc_to_keep = None,
+                             keep_occupancy = False):
     hierarchy = self
     for model in hierarchy.models():
       for chain in model.chains():
@@ -1402,19 +1953,35 @@ class _():
             if (len(atom_groups) == 1) and (atom_groups[0].altloc == ''):
               continue
             atom_groups_and_occupancies = []
+            altlocs_found = []
             for atom_group in atom_groups :
-              if (atom_group.altloc == ''):
+              if (atom_group.altloc == ''): # always keep ''
                 continue
+
               mean_occ = flex.mean(atom_group.atoms().extract_occ())
               atom_groups_and_occupancies.append((atom_group, mean_occ))
-            atom_groups_and_occupancies.sort(key=operator.itemgetter(1), reverse=True)
-            for atom_group, occ in atom_groups_and_occupancies[1:] :
+              altlocs_found.append(atom_group.altloc)
+
+            if (altloc_to_keep is not None) and (altloc_to_keep in
+                    altlocs_found): # put altloc_to_keep first
+              for atom_group_and_occupancy in atom_groups_and_occupancies:
+                if atom_group_and_occupancy[0].altloc == altloc_to_keep:
+                  atom_groups_and_occupancies.remove(atom_group_and_occupancy)
+                  atom_groups_and_occupancies = [atom_group_and_occupancy] + \
+                     atom_groups_and_occupancies
+                  break
+            else: # put atom_group with highest occupancy first
+              atom_groups_and_occupancies.sort(key=operator.itemgetter(1),
+                 reverse=True)
+
+            for atom_group, occ in atom_groups_and_occupancies[1:]:
               residue_group.remove_atom_group(atom_group=atom_group)
             single_conf, occ = atom_groups_and_occupancies[0]
             single_conf.altloc = ''
           else :
             for atom_group in atom_groups :
-              if (not atom_group.altloc in ["", "A"]):
+              if (not atom_group.altloc in ["",
+                  altloc_to_keep if (altloc_to_keep is not None) else "A"]):
                 residue_group.remove_atom_group(atom_group=atom_group)
               else :
                 atom_group.altloc = ""
@@ -1428,9 +1995,10 @@ class _():
               residue_group.remove_atom_group(ags[i])
         if (len(chain.residue_groups()) == 0):
           model.remove_chain(chain=chain)
-    atoms = hierarchy.atoms()
-    new_occ = flex.double(atoms.size(), 1.0)
-    atoms.set_occ(new_occ)
+    if not keep_occupancy:
+      atoms = hierarchy.atoms()
+      new_occ = flex.double(atoms.size(), 1.0)
+      atoms.set_occ(new_occ)
 
   def rename_chain_id(self, old_id, new_id):
     for model in self.models():
@@ -1540,7 +2108,7 @@ class _():
     ''' Apply atom selection string and return deep copy with selected atoms'''
     asc=self.atom_selection_cache()
     sel = asc.selection(string = atom_selection)
-    return self.deep_copy().select(sel)  # deep copy is required
+    return self.select(sel, copy_atoms=True)  # independent copy is required
 
   def occupancy_groups_simple(self, common_residue_name_class_only=None,
                               always_group_adjacent=True,
@@ -1561,6 +2129,37 @@ class _():
         always_group_adjacent=always_group_adjacent))
     del sentinel
     return result
+
+  def round_occupancies_in_place(self, ndigits):
+    """Round occupancies of those alternative conformations that cannot be
+    rounded properly to the sum of 1 by standard round procedure in the output.
+    The rest occupancies left intact.
+
+    Args:
+        ndigits (int): number of significant digits after the dot
+    """
+    h_atoms = self.atoms()
+    ogs = self.occupancy_groups_simple()
+    for occ_group in ogs:
+      # check conditions
+      can_be_rounded = True
+      occs = []
+      occs_values = []
+      for g in occ_group:
+        occs.append(h_atoms.select(flex.size_t(g)).extract_occ())
+      for o in occs:
+        # occupancy of all atoms is the same?
+        if len(set(o)) == 1:
+          occs_values.append(o[0])
+        else:
+          can_be_rounded = False
+      if sum(occs_values) != 1.00:
+        can_be_rounded = False
+      # now round them up, values in occs_values are the ones to round
+      if can_be_rounded:
+        round_occs = group_rounding(occs_values, ndigits)
+        for i, g in enumerate(occ_group):
+          h_atoms.select(flex.size_t(g)).set_occ(flex.double([round_occs[i]]*len(g)))
 
   def chunk_selections(self, residues_per_chunk):
     result = []
@@ -1606,8 +2205,38 @@ class _():
           rg.remove_atom_group(ag)
           chain = rg.parent()
           chain.remove_residue_group(rg)
+          if chain.atoms_size() == 0:
+            model.remove_chain(chain)
         else:
           residues[key] = ag
+
+  def is_hierarchy_altloc_consistent(self, verbose=False):
+    altlocs = {}
+    for residue_group in self.residue_groups():
+      if not residue_group.have_conformers(): continue
+      for atom_group in residue_group.atom_groups():
+        rc = altlocs.setdefault(residue_group.id_str(), [])
+        if atom_group.altloc: rc.append(atom_group.altloc)
+    lens=[]
+    for key, item in altlocs.items():
+      l=len(item)
+      if l not in lens: lens.append(l)
+    if len(lens)>1:
+      outl = '  Uneven Alt. Locs.\n'
+      for key, item in altlocs.items():
+        outl += '    "%s" : %s\n' % (key, item)
+      if verbose: print(outl)
+      return False
+    return True
+
+  def format_correction_for_H(self, verbose=False): # remove 1-JUL-2024
+    for atom in self.atoms():
+      if atom.element_is_hydrogen():
+        if len(atom.name.strip())<4:
+          if (atom.name.find(atom.name.strip())==0 and
+              atom.name[0] not in ['1', '2', '3']):
+            atom.name=' %-3s' % atom.name.strip()
+            if verbose: print('corrected PDB format of %s' % atom.quote())
 
   def flip_symmetric_amino_acids(self):
     import time
@@ -1667,44 +2296,49 @@ class _():
     }
     data["TYR"]=data["PHE"]
 
+    for code, item in data.items():
+      current = item.get('pairs', [])
+      adds = []
+      for a1, a2 in current:
+        if a1[0]=='H' and a2[0]=='H':
+          adds.append(['D%s'%a1[1:], 'D%s'%a2[1:]])
+      item['pairs']+=adds
+
     sites_cart = self.atoms().extract_xyz()
     t0=time.time()
     info = ""
+    flips=0
     for rg in self.residue_groups():
+      flip_it=False
       for ag in rg.atom_groups():
         flip_data = data.get(ag.resname, None)
         if flip_data is None: continue
         assert not ('dihedral' in flip_data and 'chiral' in flip_data)
-        flip_it=False
-        if 'dihedral' in flip_data:
-          sites = []
-          for d in flip_data["dihedral"]:
-            atom = ag.get_atom(d)
-            if atom is None: break
-            sites.append(atom.xyz)
-          if len(sites)!=4: continue
-          dihedral = dihedral_angle(sites=sites, deg=True)
-          if abs(dihedral)>360./flip_data["value"][1]/4:
-            flip_it=True
-        elif 'chiral' in flip_data:
-          sites = []
-          for d in flip_data["chiral"]:
-            atom = ag.get_atom(d)
-            if atom is None: break
-            sites.append(atom.xyz)
-          if len(sites)!=4: continue
-          delta = chirality_delta(sites=[flex.vec3_double([xyz]) for xyz in sites],
-                                  volume_ideal=flip_data["value"][0],
-                                  both_signs=flip_data['value'][1],
-                                  )
-          if abs(delta)>2.:
-            flip_it=True
+        if not flip_it:
+          if 'dihedral' in flip_data:
+            sites = []
+            for d in flip_data["dihedral"]:
+              atom = ag.get_atom(d)
+              if atom is None: break
+              sites.append(atom.xyz)
+            if len(sites)!=4: continue
+            dihedral = dihedral_angle(sites=sites, deg=True)
+            if abs(dihedral)>360./flip_data["value"][1]/4:
+              flip_it=True
+          elif 'chiral' in flip_data:
+            sites = []
+            for d in flip_data["chiral"]:
+              atom = ag.get_atom(d)
+              if atom is None: break
+              sites.append(atom.xyz)
+            if len(sites)!=4: continue
+            delta = chirality_delta(sites=[flex.vec3_double([xyz]) for xyz in sites],
+                                    volume_ideal=flip_data["value"][0],
+                                    both_signs=flip_data['value'][1],
+                                    )
+            if abs(delta)>2.:
+              flip_it=True
         if flip_it:
-          info += '    Residue "%s %s %s":' % (
-            rg.parent().id,
-            ag.resname,
-            rg.resseq,
-          )
           flips_stored = []
           atoms = ag.atoms()
           for pair in flip_data["pairs"]:
@@ -1713,7 +2347,11 @@ class _():
             if atom1 is None and atom2 is None: continue
             if len(list(filter(None, [atom1, atom2]))) == 1:
               flips_stored=[]
-              info += ' not complete - not flipped'
+              info += '    Residue "%s %s %s": not complete - not flipped' % (
+                rg.parent().id,
+                ag.resname,
+                rg.resseq,
+              )
               break
             flips_stored.append([atom1,atom2])
           for atom1, atom2 in flips_stored:
@@ -1721,11 +2359,9 @@ class _():
               tmp = getattr(atom1, attr)
               setattr(atom1, attr, getattr(atom2, attr))
               setattr(atom2, attr, tmp)
-            info += ' "%s" <-> "%s"' % (atom1.name.strip(),
-                                        atom2.name.strip())
-          info += '\n'
-    if not info: info = '    None\n'
-    info += '  Time to flip residues: %0.2fs\n' % (time.time()-t0)
+          flips+=1
+    if flips or info:
+      info += '  Time to flip %d residue(s): %0.2fs\n' % (flips, time.time()-t0)
     return info
 
   def distance_based_simple_two_way_bond_sets(self,
@@ -1736,7 +2372,7 @@ class _():
     atoms.set_chemical_element_simple_if_necessary()
     sites_cart = atoms.extract_xyz()
     elements = atoms.extract_element()
-    conformer_indices = self.get_conformer_indices()
+    conformer_indices = self.get_conformer_indices().conformer_indices
     return distance_based_connectivity.build_simple_two_way_bond_sets(
       sites_cart=sites_cart,
       elements=elements,
@@ -1870,6 +2506,13 @@ class _():
     return last_resno
 
 
+  def has_icodes(self):
+    for m in self.models():
+      for chain in m.chains():
+        for rg in chain.residue_groups():
+          if rg.icode and rg.icode != ' ':
+            return True
+
   def chain_ids(self, unique_only = False):
     ''' Get list of chain IDS, return unique set if unique_only=True'''
     chain_ids=[]
@@ -1944,7 +2587,7 @@ class _():
     """
     atoms = self.atoms()
     # Get exchanged sites
-    from mmtbx import utils
+
     hd_group_selections = self.exchangeable_hd_selections()
     hd_site_d_iseqs, hd_site_h_iseqs = [], []
     for gsel in hd_group_selections:
@@ -2196,6 +2839,18 @@ class _():
         sequence.append(atom_group.resname)
         break
     return sequence
+
+  def as_dict_of_resseq_residue_names(self, strip_resseq = True):
+    dd = {}
+    for rg in self.residue_groups():
+      for atom_group in rg.atom_groups():
+        if strip_resseq:
+          resseq = rg.resseq.strip()
+        else:
+          resseq = rg.resseq
+        dd[resseq] = atom_group.resname
+        break
+    return dd
 
   def as_dict_of_resseq_as_int_residue_names(self):
     dd = {}
@@ -2831,7 +3486,11 @@ class _():
     return self
 
 # MARKED_FOR_DELETION_OLEG
-# Reason: so far fount only in iotbx/file_reader.py for no clear reason.
+# Reason: so far found only in iotbx/file_reader.py for no clear reason.
+# Tried, problems encountered:
+#   - used in file_reader.any_file to return results of reading model
+#   - any_file is used 100s times across all repositories including phaser, so
+#     coordinated effort is needed.
 
 class input_hierarchy_pair(object):
 
@@ -2885,6 +3544,8 @@ class input_hierarchy_pair(object):
     Returns a reference to the existing hierarchy.  For backwards compatibility
     only, and issues a :py:class:`warnings.DeprecationWarning`.
     """
+    # import traceback
+    # traceback.print_stack()
     warnings.warn("Please access input.hierarchy directly.",
       DeprecationWarning)
     return self.hierarchy
@@ -2936,34 +3597,6 @@ class input(input_hierarchy_pair):
         source_info=source_info, lines=flex.split_lines(pdb_string))
     super(input, self).__init__(input=pdb_inp, sort_atoms=sort_atoms)
 # END_MARKED_FOR_DELETION_OLEG
-
-class show_summary(input):
-
-  def __init__(self,
-        file_name=None,
-        pdb_string=None,
-        out=None,
-        prefix="",
-        flag_errors=True,
-        flag_warnings=True,
-        residue_groups_max_show=10,
-        duplicate_atom_labels_max_show=10,
-        level_id=None,
-        level_id_exception=ValueError):
-    input.__init__(self, file_name=file_name, pdb_string=pdb_string)
-    print(prefix+self.input.source_info(), file=out)
-    self.overall_counts = self.hierarchy.overall_counts()
-    self.overall_counts.show(
-      out=out,
-      prefix=prefix+"  ",
-      residue_groups_max_show=residue_groups_max_show,
-      duplicate_atom_labels_max_show=duplicate_atom_labels_max_show)
-    if (level_id is not None):
-      self.hierarchy.show(
-        out=out,
-        prefix=prefix+"  ",
-        level_id=level_id,
-        level_id_exception=level_id_exception)
 
 # MARKED_FOR_DELETION_OLEG
 # Reason: functionality is moved to mmtbx.model and uses better all_chain_ids
@@ -3216,3 +3849,43 @@ def substitute_atom_group(
       current_group.append_atom(atom)
   current_group.resname = new_group.resname
   return current_group
+
+def group_rounding(values, digits):
+  """Round values to number of digits after the dot maintaining the sum of 1.
+  Currently used for rounding occupancies, so when the total sum is != 1,
+  no rounding occurs.
+  Taken from: https://explainextended.com/2009/09/21/rounding-numbers-preserving-their-sum/
+
+  Args:
+      values (list): list of occupancies
+      digits (integer): how many digits after the dot should be left
+
+  Returns:
+      list: rounded occupancies
+  """
+  def sort_index(s):
+    # helper function to get sorted indices in reverse order, much like reindexing_array.
+    # used here for simplicity
+    return sorted(range(len(s)), key=lambda k: s[k], reverse=True)
+
+  if len(values) < 2:
+    return values
+  total_occs = sum(values)
+  if round(total_occs, 6) != 1:
+    return values
+  # Try standard rounding first.
+  result = [round(i, digits) for i in values]
+  if round(sum(result), digits) == 1:
+    return result
+  # Now when all the above failed, do the trick ourselves.
+  p_10 = pow(10,digits)
+  result = [i*p_10 for i in values]
+  total_occs *= p_10
+  sum_all_floor = sum([math.floor(i) for i in result])
+  n_to_ceil = int(total_occs - sum_all_floor)
+  sorted_index = sort_index([i % 1 for i in result])
+  for i in range(n_to_ceil):
+    result[sorted_index[i]] = math.ceil(result[sorted_index[i]])/p_10
+  for i in range(n_to_ceil, len(result)):
+    result[sorted_index[i]] = math.floor(result[sorted_index[i]])/p_10
+  return result

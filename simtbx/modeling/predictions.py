@@ -42,11 +42,16 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
     """
     mtz_file = mtz_col = None
     defaultF = params.predictions.default_Famplitude
+    from_pdb = None
+
     if params.predictions.use_diffBragg_mtz:
         mtz_file = params.simulator.structure_factors.mtz_name
         mtz_col = params.simulator.structure_factors.mtz_column
+        from_pdb = params.simulator.structure_factors.from_pdb
         defaultF = 0
     # returns the images and the experiment including any pre-modeling modifications (e.g. thinning out the detector)
+    if "num_mosaicity_samples" not in list(df):
+        df['num_mosaicity_samples'] = [params.simulator.crystal.num_mosaicity_samples]
 
     model_out = model_spots_from_pandas(
         df,
@@ -66,7 +71,8 @@ def get_predicted_from_pandas(df, params, strong=None, eid='', device_Id=0, spec
         show_timings=params.predictions.verbose,
         quiet=(not params.predictions.verbose),
         perpixel_wavelen=params.predictions.laue_mode,
-        det_thicksteps=params.predictions.thicksteps_override)
+        det_thicksteps=params.predictions.thicksteps_override,
+        from_pdb=from_pdb)
 
     if not params.predictions.laue_mode:
         panel_images, expt = model_out
@@ -192,7 +198,7 @@ def label_weak_spots_for_integration(fraction, predictions, num_res_bins=10):
     res_sort = np.sort(res)
     res_bins = [rb[0]-1e-6 for rb in np.array_split( res_sort, num_res_bins)] + [res_sort[-1]+1e-6]
     res_bin_assigments = np.digitize(res, res_bins)
-    is_weak_but_integratable = np.zeros(len(predictions)).astype(np.bool)
+    is_weak_but_integratable = np.zeros(len(predictions)).astype(bool)
     for i_res in range(1, num_res_bins+1):
         # grab weak spots in this res bin
         is_weak_and_in_bin = logi_and(res_bin_assigments == i_res, predictions["is_weak"])

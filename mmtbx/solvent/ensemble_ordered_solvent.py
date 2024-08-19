@@ -263,7 +263,7 @@ class manager(object):
       new_scatterers = flex.xray_scatterer(
         peaks_fo_fc.sites.size(),
         xray.scatterer(occupancy       = self.params.occupancy,
-        b                              = self.params.b_iso,
+        b                              = 20,
         scattering_type                = self.params.scattering_type,
         label                          = 'HOH'))
       new_scatterers.set_sites(peaks_fo_fc.sites)
@@ -380,16 +380,31 @@ class manager(object):
     if self.verbose > 0:
       silent = False
     else: silent = True
-    return find_peaks.manager(fmodel          = self.fmodel,
-                              map_type        = map_type,
+    #
+    from cctbx import maptbx
+    e_map = self.fmodel.electron_density_map()
+    crystal_symmetry = self.fmodel.xray_structure.crystal_symmetry()
+    crystal_gridding = maptbx.crystal_gridding(
+      unit_cell        = crystal_symmetry.unit_cell(),
+      space_group_info = crystal_symmetry.space_group_info(),
+      symmetry_flags   = maptbx.use_space_group_symmetry,
+      step             = 0.6)
+    coeffs = e_map.map_coefficients(
+      map_type     = map_type,
+      fill_missing = False,
+      isotropize   = True)
+    fft_map = coeffs.fft_map(crystal_gridding = crystal_gridding)
+    fft_map.apply_sigma_scaling()
+    map_data = fft_map.real_map_unpadded()
+    #
+    return find_peaks.manager(map_data        = map_data,
+                              xray_structure  = self.fmodel.xray_structure,
                               map_cutoff      = map_cutoff,
                               params          = self.fpp,
-                              use_all_data    = False,
-                              silent          = silent,
                               log             = self.log)
 
   def add_new_solvent(self):
-    b_solv = self.params.b_iso
+    b_solv = 20
     new_scatterers = flex.xray_scatterer(
               self.sites.size(),
               xray.scatterer(occupancy       = self.params.occupancy,

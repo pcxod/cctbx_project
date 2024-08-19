@@ -115,16 +115,14 @@ class select_model(object):
       params = master_phil.extract()
     self.model_names = model_names
     if (model_data is None):
-      from iotbx.file_reader import any_file
+      import iotbx.pdb
       model_data = []
       for file_name in model_names :
         if (not os.path.isfile(file_name)):
           raise RuntimeError("model_data is None, but %s is not a file." %
             file_name)
-        model_in = any_file(file_name,
-          force_type="pdb",
-          raise_sorry_if_errors=True).file_object
-        pdb_hierarchy = model_in.hierarchy
+        model_in = iotbx.pdb.input(file_name)
+        pdb_hierarchy = model_in.construct_hierarchy()
         xray_structure = model_in.xray_structure_simple()
         model_data.append((pdb_hierarchy, xray_structure))
     self.model_symmetries = []
@@ -140,7 +138,6 @@ class select_model(object):
     self.best_result = None
     self.best_model_name = None
     from mmtbx.pdb_symmetry import rms_difference
-    from iotbx import file_reader
     data_symmetry = f_obs.crystal_symmetry()
     data_space_group = data_symmetry.space_group()
     data_point_group = data_space_group.build_derived_point_group()
@@ -356,13 +353,11 @@ def strip_model(
   if (file_name is not None):
     print("Reading model from %s" % file_name, file=log)
     assert ([pdb_hierarchy, xray_structure] == [None, None])
-    from iotbx import file_reader
-    pdb_in = file_reader.any_file(file_name, force_type="pdb",
-      raise_sorry_if_errors=True)
-    pdb_in.check_file_type("pdb")
-    remarks = pdb_in.file_object.input.remark_section()
-    pdb_hierarchy = pdb_in.file_object.hierarchy
-    xray_structure = pdb_in.file_object.xray_structure_simple()
+    import iotbx.pdb
+    pdb_in = iotbx.pdb.input(file_name)
+    remarks = pdb_in.remark_section()
+    pdb_hierarchy = pdb_in.construct_hierarchy()
+    xray_structure = pdb_in.xray_structure_simple()
   else :
     # XXX work with copies, not the original structure
     pdb_hierarchy = pdb_hierarchy.deep_copy()
@@ -386,7 +381,6 @@ def strip_model(
       xray_structure = xray_structure.select(sele)
       print("  removed %d waters" % n_wat, file=log)
       pdb_hierarchy.atoms().reset_i_seq()
-  assert_identical_id_str = True
   if (remove_alt_confs):
     n_atoms_start = xray_structure.scatterers().size()
     pdb_hierarchy.remove_alt_confs(always_keep_one_conformer=False)
@@ -395,7 +389,6 @@ def strip_model(
     if (n_atoms_end != n_atoms_start):
       print("  removed %d atoms in alternate conformations" % \
         (n_atoms_end - n_atoms_start), file=log)
-      assert_identical_id_str = False
     xray_structure = xray_structure.select(i_seqs)
     pdb_hierarchy.atoms().reset_i_seq()
   if (convert_semet_to_met):
@@ -405,14 +398,12 @@ def strip_model(
     pdb_hierarchy.convert_semet_to_met()
   if (convert_to_isotropic):
     xray_structure.convert_to_isotropic()
-    pdb_hierarchy.adopt_xray_structure(xray_structure,
-      assert_identical_id_str=assert_identical_id_str)
+    pdb_hierarchy.adopt_xray_structure(xray_structure)
     print("  converted all atoms to isotropic B-factors", file=log)
   if (reset_occupancies):
     assert (remove_alt_confs)
     xray_structure.adjust_occupancy(occ_max=1.0, occ_min=1.0)
-    pdb_hierarchy.adopt_xray_structure(xray_structure,
-      assert_identical_id_str=assert_identical_id_str)
+    pdb_hierarchy.adopt_xray_structure(xray_structure)
     print("  reset occupancy to 1.0 for all atoms", file=log)
   if (reset_hetatm_flag):
     for atom in pdb_hierarchy.atoms():

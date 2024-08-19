@@ -6,15 +6,30 @@ from libtbx import adopt_init_args
 from cctbx import adptbx
 import iotbx.xplor.map
 import iotbx.phil
-from libtbx.str_utils import format_value
 from mmtbx import find_peaks
-from mmtbx.refinement import minimization
-import scitbx.lbfgs
 import mmtbx.utils
-from cctbx import miller
 from cctbx import maptbx
 from libtbx.test_utils import approx_equal
 from six.moves import range
+from libtbx.utils import user_plus_sys_time
+from libtbx.utils import null_out
+from mmtbx.solvent import map_to_water
+from libtbx import group_args
+import string
+import libtbx.log
+
+def get_unique_altloc(exclude):
+  for l in string.ascii_uppercase:
+    if not l in exclude:
+      return l
+
+def get_unique_altloc2(available, exclude):
+  l = None
+  for l in available:
+    if l in [' ', '']: continue
+    if not l in exclude:
+      return l
+  return l
 
 output_params_str = """
   output_residue_name = HOH
@@ -34,18 +49,16 @@ output_params_str = """
 """
 
 h_bond_params_str = """
-  h_bond_min_mac = 1.8
+  dist_min = 1.8
     .type = float
-    .short_caption = H-bond minimum for solvent-model
+    .short_caption = Min distance between water and any atom
     .expert_level = 1
-  h_bond_min_sol = 1.8
+  dist_max = 3.2
     .type = float
-    .short_caption = H-bond minimum for solvent-solvent
+    .short_caption = Max distance between water and any atom
     .expert_level = 1
-  h_bond_max = 3.2
+  dist_min_altloc = 0.5
     .type = float
-    .short_caption = Maximum H-bond length
-    .expert_level = 1
 """
 
 adp_occ_params_str = """
@@ -70,12 +83,7 @@ adp_occ_params_str = """
     .help = For solvent refined as anisotropic: remove is less than this value
     .short_caption = Minimum anisotropic B-factor
     .expert_level = 1
-  b_iso = None
-    .type=float
-    .help = Initial B-factor value for newly added water
-    .short_caption = Initial B-factor value
-    .expert_level = 1
-  occupancy_min = 0.1
+  occupancy_min = 0.2
     .type=float
     .help = Minimum occupancy value, waters with smaller value will be rejected
     .short_caption = Minimum occupancy
@@ -101,6 +109,12 @@ master_params_str = """\
             after ferst few macro-cycles, filter_only - remove water only, \
             every_macro_cycle - do water update every macro-cycle
     .short_caption = Mode
+  mask_atoms_selection = protein and (name CA or name CB or name N or name C or name O)
+    .type = str
+    .help = Mask macromolecule atoms in peak picking map
+  include_altlocs = False
+    .type = bool
+    .help = Search for water with altlocs
   n_cycles = 1
     .type = int
     .short_caption = Number of cycles
@@ -109,20 +123,20 @@ master_params_str = """\
     .type=str
     .help = Map used to identify candidate water sites - by default this is \
       the standard difference map.
-  primary_map_cutoff = 3.0
+  primary_map_cutoff = 3.
     .type=float
     .short_caption = Primary map cutoff (sigma)
   secondary_map_and_map_cc_filter
     .short_caption = Secondary map filter
     .style = auto_align box
   {
-    cc_map_1_type = "Fc"
+    cc_map_1_type = "Fmodel"
       .type = str
       .short_caption = Model map type for CC calculation
-    cc_map_2_type = 2mFo-DFmodel
+    cc_map_2_type = 2mFobs-DFmodel
       .type = str
       .short_caption = Experimental map type for CC calculation
-    poor_cc_threshold = 0.7
+    poor_cc_threshold = 0.70
       .type = float
       .short_caption = Minimum map correlation
     poor_map_value_threshold = 1.0
@@ -130,12 +144,17 @@ master_params_str = """\
       .short_caption = Minimum map value (sigma)
   }
   %s
+  refine_oat = False
+    .type = bool
+    .help = Q & B coarse grid search.
+    .short_caption = Refine new solvent ADPs
+    .expert_level = 1
   refine_adp = True
     .type = bool
     .help = Refine ADP for newly placed solvent.
     .short_caption = Refine new solvent ADPs
     .expert_level = 1
-  refine_occupancies = False
+  refine_occupancies = True
     .type = bool
     .help = Refine solvent occupancies.
     .expert_level = 1
@@ -154,6 +173,258 @@ master_params_str = """\
 def master_params():
   return iotbx.phil.parse(master_params_str)
 
+class maps(object):
+  def __init__(self,
+               fmodel,
+               model,
+               mask_atoms_selection,
+               difference_map_type,
+               model_map_type,
+               data_map_type,
+               grid_step=0.6,
+               radius=2.0):
+    self.radius = radius
+    self.fmodel = fmodel
+    self.model  = model
+    self.e_map = fmodel.electron_density_map()
+    self.crystal_symmetry = fmodel.xray_structure.crystal_symmetry()
+    self.crystal_gridding = maptbx.crystal_gridding(
+      unit_cell        = self.crystal_symmetry.unit_cell(),
+      space_group_info = self.crystal_symmetry.space_group_info(),
+      symmetry_flags   = maptbx.use_space_group_symmetry,
+      step             = grid_step)
+    self.difference_map = self._get_real_map(map_type = difference_map_type)
+    self.model_map      = self._get_real_map(map_type = model_map_type)
+    self.data_map       = self._get_real_map(map_type = data_map_type)
+    #self._estimate_diff_map_cutoff()
+    # Compute mask in P1 to mask out desired regions
+    if mask_atoms_selection is not None:
+      bb_sel = self.model.selection(string=mask_atoms_selection)
+      if bb_sel.count(True)>0:
+        xrs = fmodel.xray_structure.select(bb_sel)
+        #
+        # Both ways to compute mask should be the same, but they are slighly not,
+        # expectedly.
+        #
+        mask_p1 = mmtbx.masks.mask_from_xray_structure(
+          xray_structure           = xrs,
+          p1                       = True,
+          for_structure_factors    = True,
+          solvent_radius           = 0,
+          shrink_truncation_radius = 0,
+          atom_radius              = 1.2,
+          n_real                   = self.crystal_gridding.n_real(),
+          in_asu                   = False).mask_data
+        maptbx.unpad_in_place(map=mask_p1)
+        sel0 = mask_p1 > 0.1
+        mask_p1 = mask_p1.set_selected(sel0,  1)
+        mask_p1 = mask_p1.set_selected(~sel0, 0)
+
+        #xrs = xrs.expand_to_p1()
+        #import boost_adaptbx.boost.python as bp
+        #cctbx_maptbx_ext = bp.import_ext("cctbx_maptbx_ext")
+        #radii = flex.double(xrs.scatterers().size(), 1.2)
+        #mask_p1 = cctbx_maptbx_ext.mask(
+        #  sites_frac                  = xrs.sites_frac(),
+        #  unit_cell                   = xrs.unit_cell(),
+        #  n_real                      = self.crystal_gridding.n_real(),
+        #  mask_value_inside_molecule  = 0,
+        #  mask_value_outside_molecule = 1,
+        #  radii                       = radii,
+        #  wrapping                    = True)
+
+        self.difference_map = self.difference_map * mask_p1
+
+  def _get_real_map(self, map_type):
+    coeffs = self.e_map.map_coefficients(
+      map_type     = map_type,
+      fill_missing = False,
+      isotropize   = True)
+    fft_map = coeffs.fft_map(crystal_gridding = self.crystal_gridding)
+    fft_map.apply_sigma_scaling()
+    return fft_map.real_map_unpadded()
+
+  def score_atom(self, atom, min_cc, min_value):
+    site_cart = atom.xyz
+    uc = self.crystal_symmetry.unit_cell()
+    site_frac = uc.fractionalize(site_cart)
+    sel = maptbx.grid_indices_around_sites(
+      unit_cell  = uc,
+      fft_n_real = self.model_map.focus(),
+      fft_m_real = self.model_map.all(),
+      sites_cart = flex.vec3_double([site_cart]),
+      site_radii = flex.double([self.radius]))
+    cc = flex.linear_correlation(
+      x=self.model_map.select(sel),
+      y=self.data_map.select(sel)).coefficient()
+    value_2 = self.data_map.eight_point_interpolation(site_frac)
+    diff_map_val = self.difference_map.eight_point_interpolation(site_frac)
+    result = (cc > min_cc and value_2 > min_value*atom.occ) and \
+             not (diff_map_val < -3)
+    return group_args(result = result, cc=cc, value_2=value_2)
+
+  def _estimate_diff_map_cutoff(self):
+    scatterers = self.fmodel.xray_structure.scatterers()
+    sel = flex.random_bool(scatterers.size(), 0.1)
+    result = flex.double()
+    cntr=0
+    for s, sc in zip(sel, scatterers):
+      if not s: continue
+      print(self.fmodel.r_work())
+      occ = sc.occupancy
+      sc.occupancy=0
+      self.fmodel.update_xray_structure(update_f_calc=True)
+
+      coeffs = self.fmodel.electron_density_map().map_coefficients(
+        map_type     = "mFobs-DFmodel",
+        fill_missing = False,
+        isotropize   = True)
+      fft_map = coeffs.fft_map(crystal_gridding = self.crystal_gridding)
+      fft_map.apply_sigma_scaling()
+      map_data = fft_map.real_map_unpadded()
+      mv = map_data.tricubic_interpolation(sc.site)
+      result.append(mv)
+
+      print(self.fmodel.r_work(), mv)
+      sc.occupancy=occ
+      self.fmodel.update_xray_structure(update_f_calc=True)
+      print(self.fmodel.r_work())
+      print()
+      if cntr>100: break
+      cntr+=1
+    mean = flex.mean(result)
+    if mean/2 > 3: cutoff = 3
+
+def fix_altlocs_and_filter(model, dist_min=1.8, fix_only=False):
+  present_altlocs = list(
+    model.get_hierarchy().get_conformer_indices().index_altloc_mapping.keys())
+  sps = model.crystal_symmetry().special_position_settings()
+  get_class = iotbx.pdb.common_residue_names_get_class
+  only_model = model.get_hierarchy().only_model()
+  eps = 1.e-3
+  dist_min = dist_min-eps
+  sites_cart = model.get_sites_cart()
+  atoms = only_model.atoms()
+  remove_sel = flex.size_t()
+  for agi in only_model.atom_groups(): # loop over water
+    if(not get_class(name=agi.resname) == "common_water"): continue
+    for ai in agi.atoms():
+      if ai.element_is_hydrogen(): continue # skip water H
+      #
+      selection_around_ai = get_sphere_selection(
+        sites_cart_all=sites_cart, special_position_settings=sps,
+        radius=dist_min, i_seq=ai.i_seq)
+      if len(selection_around_ai) == 0: continue
+      #
+      altlocs_inside = []
+      for j in selection_around_ai:
+        altlocs_inside.append( atoms[j].parent().altloc )
+      #
+      skip = False
+      for j in selection_around_ai:
+        aj = atoms[j]
+        if aj.element_is_hydrogen(): continue
+        agj = aj.parent()
+        if(agj.altloc in [' ', '']):
+          if(get_class(name=agj.resname) != "common_water"):
+            remove_sel.extend(agi.atoms().extract_i_seq())
+            skip=True
+          else:
+            new_altloc = get_unique_altloc2(
+              available = present_altlocs,
+              exclude   = altlocs_inside+[agi.altloc])
+            if new_altloc is not None: agj.altloc = new_altloc
+            else:
+              remove_sel.extend(agi.atoms().extract_i_seq())
+              skip = True
+      if skip: continue
+      #
+      altlocs_inside = []
+      for j in selection_around_ai:
+        altlocs_inside.append( atoms[j].parent().altloc )
+      #
+      if agi.altloc in altlocs_inside or agi.altloc in [' ', '']:
+        #print(ai.i_seq, selection_around_ai, altlocs_inside, [agi.altloc])
+        #new_altloc = get_unique_altloc(exclude=altlocs_inside+[agi.altloc])
+        new_altloc = get_unique_altloc2(
+              available = present_altlocs,
+              exclude   = altlocs_inside+[agi.altloc])
+        if new_altloc is not None:
+          agi.altloc = new_altloc
+        else:
+          remove_sel.extend(agi.atoms().extract_i_seq())
+  #
+  if remove_sel.size() > 0 and not fix_only:
+    remove_sel = ~flex.bool(model.size(), remove_sel)
+    model = model.select(selection = remove_sel)
+  return model
+
+def get_sphere_selection(
+      sites_cart_all, special_position_settings, radius, i_seq):
+  sel = flex.bool(sites_cart_all.size(), False)
+  sel[i_seq] = True
+  selection_around_i_seq = special_position_settings.pair_generator(
+    sites_cart      = sites_cart_all,
+    distance_cutoff = radius
+      ).neighbors_of(primary_selection = sel).iselection()
+  selection_around_i_seq = list(selection_around_i_seq)
+  if len(selection_around_i_seq) > 0:
+    selection_around_i_seq.remove(i_seq)
+  return selection_around_i_seq
+
+def filter_by_distance(model, fix_altlocs_and_filter_was_run, dist_min=1.8,
+                       dist_max=3.2):
+  interaction_selection = model.selection(
+    map_to_water.selection_string_interaction)
+  sps = model.crystal_symmetry().special_position_settings()
+  get_class = iotbx.pdb.common_residue_names_get_class
+  only_model = model.get_hierarchy().only_model()
+  sites_cart = model.get_sites_cart()
+  atoms = only_model.atoms()
+  remove_sel = flex.size_t()
+  for agi in only_model.atom_groups(): # loop over water
+    if(not get_class(name=agi.resname) == "common_water"): continue
+    for ai in agi.atoms():
+      if ai.element_is_hydrogen(): continue # skip water H
+      # Get selections
+      selection_around_ai_min = get_sphere_selection(
+        sites_cart_all=sites_cart, special_position_settings=sps,
+        radius=dist_min, i_seq=ai.i_seq)
+      selection_around_ai_max = get_sphere_selection(
+        sites_cart_all=sites_cart, special_position_settings=sps,
+        radius=dist_max, i_seq=ai.i_seq)
+      selection_shell = list( set(selection_around_ai_max) -
+                              set(selection_around_ai_min) )
+      #
+      altloc_i = ai.parent().altloc.strip()
+      # Make sure anything inside smaller sphere are altlocs
+      for j in selection_around_ai_min:
+        aj = atoms[j]
+        altloc_j = aj.parent().altloc
+        if fix_altlocs_and_filter_was_run:
+          if altloc_i =="" or altloc_i==" " or altloc_j =="" or altloc_j==" " or altloc_i==altloc_j:
+            remove_sel.extend(agi.atoms().extract_i_seq())
+
+      # Check water inside shell dist_min < dist < dist_max
+      found = False
+      for j in selection_shell:
+        if not interaction_selection[j]: continue
+        aj = atoms[j]
+        if aj.element_is_hydrogen(): continue
+        agj = aj.parent()
+        altloc_j = agj.altloc.strip()
+        if altloc_i=="" or altloc_j=="":        found = True
+        if altloc_i==altloc_j and altloc_i!="": found = True
+        if get_class(name=agj.resname) == "common_water":
+          if altloc_i!="" and altloc_j!="": found = True
+      if not found:
+        remove_sel.extend(agi.atoms().extract_i_seq())
+  #
+  if remove_sel.size() > 0:
+    remove_sel = ~flex.bool(model.size(), remove_sel)
+    model = model.select(selection = remove_sel)
+  return model
+
 class manager(object):
   def __init__(self, fmodel,
                      fmodels,
@@ -161,257 +432,314 @@ class manager(object):
                      is_neutron_scat_table,
                      params = master_params().extract(),
                      find_peaks_params = None,
-                     log = None):
+                     log = sys.stdout):
     adopt_init_args(self, locals())
-    assert (0 < len(self.params.output_atom_name) <= 4)
-    assert (len(self.params.output_chain_id) <= 2)
-    assert (0 < len(self.params.output_residue_name) <= 3)
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    if(self.params is None): self.params = master_params().extract()
-    if(self.find_peaks_params is None):
-      self.find_peaks_params = find_peaks.master_params.extract()
-    if(self.params.mode == "filter_only"): self.filter_only = True
-    else: self.filter_only = False
-    if(self.log is None): self.log = sys.stdout
-    assert self.model.get_xray_structure() == self.fmodel.xray_structure
-    self.sites = None
-    self.heights = None
-    self.convert_water_adp()
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    if(self.find_peaks_params.max_number_of_peaks is None):
-      if(self.model.solvent_selection().count(False) > 0):
-        self.find_peaks_params.max_number_of_peaks = \
-          self.model.solvent_selection().count(False)
-      else:
-        self.find_peaks_params.max_number_of_peaks = \
-          self.model.get_number_of_atoms()
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    self.move_solvent_to_the_end_of_atom_list()
-    if(not self.is_water_last()):
-      raise RuntimeError("Water picking failed: solvent must be last.")
-    self.show(message = "Start model:")
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    if(self.params.filter_at_start):
-      self.filter_solvent()
-      self.show(message = "Filtered:")
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    if(not self.filter_only):
-      assert self.params.primary_map_type is not None
-      peaks = self.find_peaks(
-        map_type   = self.params.primary_map_type,
-        map_cutoff = self.params.primary_map_cutoff).peaks_mapped()
-      if(peaks is not None):
-        self.sites, self.heights = peaks.sites, peaks.heights
-        self.add_new_solvent()
-        assert self.fmodel.xray_structure is self.model.get_xray_structure()
-        self.show(message = "Just added new:")
-        if(self.params.filter_at_start):
-          self.filter_solvent()
-          self.show(message = "Filtered:")
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
+
+    # XXX Rationalize this:
+
+    self.find_peaks_params.map_next_to_model.min_peak_peak_dist=self.params.dist_max
+    if self.params.include_altlocs:
+      self.find_peaks_params.peak_search.min_cross_distance=0.5
+      self.find_peaks_params.map_next_to_model.min_model_peak_dist=0.5
+      self.find_peaks_params.map_next_to_model.min_peak_peak_dist=0.5
+
+    self.ma         = libtbx.log.manager(log = self.log)
+    self.total_time = 0
+    self._maps      = None
+    self._peaks     = None
+    self.n_water    = None
+    self.model_size_init = self.model.size()
+    self.new_solvent_selection = None
     #
-    if(self.filter_only):
-      self.correct_drifted_waters(map_cutoff =
-          self.params.secondary_map_and_map_cc_filter.poor_map_value_threshold)
-    #
-    if([self.sites, self.heights].count(None)==0):
-      if(not self.filter_only and self.params.correct_drifted_waters):
-        self.correct_drifted_waters(map_cutoff =
-          self.params.secondary_map_and_map_cc_filter.poor_map_value_threshold)
-      for i in range(self.params.n_cycles):
-        self.refine_adp()
-        self.refine_occupancies()
-    self.show(message = "Before filtering:")
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    self.filter_solvent()
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    ###
-    if(self.params.secondary_map_and_map_cc_filter.cc_map_2_type is not None):
-      self.find_peaks_2fofc()
-      self.show(message = "%s map selection:"%
-        self.params.secondary_map_and_map_cc_filter.cc_map_2_type)
-    ###
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    self.show(message = "Final:")
-    self.move_solvent_to_the_end_of_atom_list()
-    self.convert_water_adp()
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
+    self._call(msg="Start",            func=None)
+    self._call(msg="Filter (dist)",    func=self._filter_dist_fix_altlocs)
+    self._call(msg="Filter (q & B)",   func=self._filter_q_b)
+    self._call(msg="Compute maps",     func=self._get_maps)
+    self._call(msg="Filter (map)",     func=self._filter_map)
+    self._call(msg="Find peaks",       func=self._find_peaks)
+    self._call(msg="Add new water",    func=self._add_new_solvent)
+    self._call(msg="Refine new water", func=self._refine)
+    self._call(msg="Filter (q & B)",   func=self._filter_q_b)
+    self._call(msg="Filter (dist only)",   func=self._filter_dist)
+    #self._call(msg="Correct drifted",  func=self._correct_drifted_waters)
 
-  def convert_water_adp(self):
-    hd_sel     = self.model.get_hd_selection()
-    sol_sel    = self.model.solvent_selection()
-    not_sol_sel= ~sol_sel
-    selection_aniso = self.model.get_xray_structure().use_u_aniso().deep_copy()
-    selection_iso   = self.model.get_xray_structure().use_u_iso().deep_copy()
-    if(  self.params.new_solvent == "anisotropic"):
-      selection_aniso.set_selected(sol_sel, True)
-      selection_iso  .set_selected(sol_sel, False)
-    elif(self.params.new_solvent == "isotropic"):
-      selection_aniso.set_selected(sol_sel, False)
-      selection_iso  .set_selected(sol_sel, True)
-    else:
-      assert 0
-    selection_aniso.set_selected(not_sol_sel, False)
-    selection_iso  .set_selected(not_sol_sel, False)
-    if(not self.is_neutron_scat_table):
-      selection_aniso.set_selected(hd_sel, False)
-      selection_iso.set_selected(hd_sel, False)
-    self.model.get_xray_structure().convert_to_anisotropic(selection = selection_aniso)
-    self.model.get_xray_structure().convert_to_isotropic(selection = selection_iso.iselection())
-    self.fmodel.update_xray_structure(
-      xray_structure = self.model.get_xray_structure(),
-      update_f_calc  = True)
+  def _call(self, msg, func = None):
+    timer = user_plus_sys_time()
+    self.ma.add_and_show(msg)
+    self._assert_same_model()
+    if(func is not None): func()
+    self._get_and_set_n_water_and_sync_fmodel_and_model_and_update_maps()
+    self._assert_same_model()
+    t = timer.elapsed()
+    self.total_time += t
+    self._add_to_message(this_step_time=t)
 
-  def move_solvent_to_the_end_of_atom_list(self):
-    xrs_sol =  self.model.get_xray_structure().select(self.model.solvent_selection())
-    if(xrs_sol.hd_selection().count(True) == 0):
-      self.reset_solvent(solvent_xray_structure = xrs_sol)
-    self.model.renumber_water()
-    self.fmodel.xray_structure = self.model.get_xray_structure()
+  def _add_to_message(self, this_step_time):
+    rs="r_work=%6.4f r_free=%6.4f"%(self.fmodel.r_work(), self.fmodel.r_free())
+    nw="n_water=%3d"%(self.n_water)
+    self.ma.add_and_show("  %s | %s | time (s): %s (total time: %s)"%(rs, nw,
+      ("%8.3f"%this_step_time).strip(), ("%8.3f"%self.total_time).strip()))
 
-  def is_water_last(self):
-    result = True
-    sol_sel = self.model.solvent_selection()
-    i_sol_sel = sol_sel.iselection()
-    i_mac_sel = (~sol_sel).iselection()
-    if(i_sol_sel.size() > 0 and i_mac_sel.size() > 0):
-      if(flex.min_default(i_sol_sel,0)-flex.max_default(i_mac_sel,0) != 1):
-        result = False
-    return result
+  def _get_and_set_n_water_and_sync_fmodel_and_model_and_update_maps(self):
+    n_water = self.model.solvent_selection().count(True)
+    if n_water!=self.n_water:
+      self.fmodel.update_xray_structure(
+        xray_structure = self.model.get_xray_structure(),
+        update_f_calc  = True,
+        update_f_mask  = True)
+      self._get_maps()
+    self.n_water = n_water
 
-  def filter_solvent(self):
-    sol_sel = self.model.solvent_selection()
-    hd_sel = self.model.get_hd_selection()
-    selection = self.model.get_xray_structure().all_selection()
+  def _assert_same_model(self):
+    mmtbx.utils.assert_xray_structures_equal( # XXX MAKE METHOD OF XRS
+      x1 = self.model.get_xray_structure(),
+      x2 = self.fmodel.xray_structure,
+      eps=1.e-3)
+
+  def _get_maps(self):
+    p = self.params
+    self._maps = maps(
+      fmodel               = self.fmodel,
+      model                = self.model,
+      mask_atoms_selection = p.mask_atoms_selection,
+      difference_map_type  = p.primary_map_type,
+      model_map_type       = p.secondary_map_and_map_cc_filter.cc_map_1_type,
+      data_map_type        = p.secondary_map_and_map_cc_filter.cc_map_2_type)
+
+  def _filter_dist_fix_altlocs(self):
+    if self.params.include_altlocs:
+      self.model = fix_altlocs_and_filter(
+        model    = self.model,
+        dist_min = self.params.dist_min)
+    self.model = filter_by_distance(
+      model                          = self.model,
+      fix_altlocs_and_filter_was_run = self.params.include_altlocs,
+      dist_min                       = self.params.dist_min,
+      dist_max                       = self.params.dist_max)
+
+  def _filter_dist(self):
+    self.model = filter_by_distance(
+      model                          = self.model,
+      fix_altlocs_and_filter_was_run = self.params.include_altlocs,
+      dist_min                       = self.params.dist_min,
+      dist_max                       = self.params.dist_max)
+
+  def _filter_q_b(self):
+    self._filter(filter_occ=True, filter_adp=True)
+
+  def _filter_map(self):
+    self._filter(filter_map=True)
+
+  def _filter(self,
+              filter_map=False,
+              filter_occ=False,
+              filter_adp=False):
+    mfp = self.params.secondary_map_and_map_cc_filter
+    selection = flex.bool(self.model.size(), True)
+    get_class = iotbx.pdb.common_residue_names_get_class
     scatterers = self.model.get_xray_structure().scatterers()
     occ = scatterers.extract_occupancies()
     b_isos = scatterers.extract_u_iso_or_u_equiv(
       self.model.get_xray_structure().unit_cell()) * math.pi**2*8
     anisotropy = scatterers.anisotropy(unit_cell =
       self.model.get_xray_structure().unit_cell())
-    #
-    distance_iselection = mmtbx.utils.select_water_by_distance(
-      sites_frac_all      = self.model.get_xray_structure().sites_frac(),
-      element_symbols_all = self.model.get_xray_structure().scattering_types(),
-      water_selection_o   = sol_sel.set_selected(hd_sel, False).iselection(),
-      dist_max            = self.params.h_bond_max,
-      dist_min_mac        = self.params.h_bond_min_mac,
-      dist_min_sol        = self.params.h_bond_min_sol,
-      unit_cell           = self.model.get_xray_structure().unit_cell())
-    distance_selection = flex.bool(scatterers.size(), distance_iselection)
-    #
-    selection &= distance_selection
-    selection &= b_isos >= self.params.b_iso_min
-    selection &= b_isos <= self.params.b_iso_max
-    selection &= occ >= self.params.occupancy_min
-    selection &= occ <= self.params.occupancy_max
-    # XXX selection &= anisotropy > self.params.anisotropy_min
-    selection.set_selected(hd_sel, True)
-    selection.set_selected(~sol_sel, True)
-    # ISOR
-    anisosel = anisotropy < self.params.anisotropy_min
-    anisosel.set_selected(hd_sel, False)
-    anisosel.set_selected(~sol_sel, False)
-    self.model.get_xray_structure().convert_to_isotropic(selection =
-      anisosel.iselection())
-    self.model.get_xray_structure().convert_to_anisotropic(selection =
-      anisosel.iselection())
-    #
-    xht = self.model.xh_connectivity_table()
-    if(xht is not None):
-      for ti in xht:
-        if(not selection[ti[0]]): selection[ti[1]]=False
-        if(selection[ti[0]]): selection[ti[1]]=True
-    if(selection.size() != selection.count(True)):
-      self.model = self.model.select(selection)
-      self.fmodel.update_xray_structure(
-        xray_structure = self.model.get_xray_structure(),
-        update_f_calc  = True)
+    for m in self.model.get_hierarchy().models():
+      for c in m.chains():
+        for conf in c.conformers():
+          for r in conf.residues():
+            if(not get_class(name=r.resname) == "common_water"): continue
+            i_seqs = r.atoms().extract_i_seq()
+            keep = True
+            has_oxygen = False # catch only H/D with no O water
+            for atom in r.atoms():
+              if(atom.element.strip().upper()=="O"): has_oxygen = True
+              if(atom.element_is_hydrogen()): continue
+              i_seq = atom.i_seq
+              # Occupancy
+              if filter_occ:
+                if(atom.occ > self.params.occupancy_max or
+                   atom.occ < self.params.occupancy_min): keep = False
+                assert approx_equal(atom.occ, occ[i_seq], 1.e-3)
+              # ADP
+              if filter_adp:
+                if(anisotropy[i_seq] < self.params.anisotropy_min): keep = False
+                if(b_isos[i_seq] < self.params.b_iso_min or
+                   b_isos[i_seq] > self.params.b_iso_max): keep = False
+              #
+              if filter_map:
+                good_map = self._maps.score_atom(
+                  atom      = atom,
+                  min_cc    = mfp.poor_cc_threshold,
+                  min_value = mfp.poor_map_value_threshold)
+                if(not good_map.result):
+                  keep = False
+            if(not has_oxygen): keep=False
+            if(not keep):
+              selection = selection.set_selected(i_seqs, False)
+    self.model = self.model.select(selection)
 
-  def reset_solvent(self, solvent_xray_structure):
-    self.model = self.model.remove_solvent()
+  def _refine(self):
+    if(self.params.mode == "filter_only"): return
+    if(self.model.size() == self.model_size_init or self.n_water==0): return
+    for i in range(self.params.n_cycles):
+      self.refine_oat()
+
+  def _find_peaks(self):
+    if(self.params.mode == "filter_only"): return
+    if(self.find_peaks_params is None):
+      self.find_peaks_params = find_peaks.master_params.extract()
+    self.find_peaks_params.max_number_of_peaks=self.model.get_number_of_atoms()
+    assert self.params.primary_map_type is not None
+    self._peaks = find_peaks.manager(
+      xray_structure = self.fmodel.xray_structure,
+      map_data       = self._maps.difference_map, # diff-map
+      map_cutoff     = self.params.primary_map_cutoff,
+      params         = self.find_peaks_params,
+      log            = null_out()).peaks_mapped()
+
+  def _write_pdb_file(self, file_name="tmp.pdb", sites_frac=None):
+    if sites_frac is not None:
+      fmt = "ATOM  %5d  O   HOH S%4d    %8.3f%8.3f%8.3f  1.00  0.00           O"
+      uc = self.fmodel.xray_structure.crystal_symmetry().unit_cell()
+      with open(file_name, "w") as fo:
+        for i, sf in enumerate(sites_frac):
+          sc = uc.orthogonalize(sf)
+          print(fmt%(i,i,sc[0],sc[1],sc[2]), file=fo)
+    else:
+      with open(file_name, "w") as fo:
+        fo.write(self.model.model_as_pdb())
+
+  def _add_new_solvent(self):
+    if(self._peaks is None): return
+    sites, heights = self._peaks.sites, self._peaks.heights
+    if(sites.size()==0): return
+    if(self.params.mode == "filter_only"): return
+
+    self.new_solvent_selection = flex.bool(self.model.size(), False)
+    self.new_solvent_selection.extend(flex.bool(sites.size(), True))
+
+    if self.params.refine_oat:
+      b_solv = 0
+      occ = 0.
+    else:
+      b_solv = 20
+      occ = 0.004
+
+    if(self.params.new_solvent == "isotropic"):
+      new_scatterers = flex.xray_scatterer(
+        sites.size(),
+        xray.scatterer(occupancy       = occ,
+                       b               = b_solv,
+                       scattering_type = self.params.scattering_type))
+    elif(self.params.new_solvent == "anisotropic"):
+      u_star = adptbx.u_iso_as_u_star(
+        self.model.crystal_symmetry().unit_cell(), adptbx.b_as_u(b_solv))
+      new_scatterers = flex.xray_scatterer(
+        sites.size(),
+        xray.scatterer(
+          occupancy       = occ,
+          u               = u_star,
+          scattering_type = self.params.scattering_type))
+    else: raise RuntimeError
+    new_scatterers.set_sites(sites)
+    solvent_xray_structure = xray.structure(
+      special_position_settings = self.model.get_xray_structure(),
+      scatterers                = new_scatterers)
     self.model.add_solvent(
       solvent_xray_structure = solvent_xray_structure,
+      conformer_indices      = None, #self._peaks.conformer_indices,
       residue_name           = self.params.output_residue_name,
       atom_name              = self.params.output_atom_name,
       chain_id               = self.params.output_chain_id,
       refine_occupancies     = self.params.refine_occupancies,
       refine_adp             = self.params.new_solvent)
+    ####
+    # This is an ugly work-around to set altlocs and conformer_indices
+    ####
+    if self.params.include_altlocs:
+      self.model = fix_altlocs_and_filter(model=self.model, fix_only=True)
+      ss = self.model.solvent_selection()
+      ms = self.model.select(ss)
+      self.model = self.model.select(~ss)
+      self.model.add_solvent(
+        solvent_xray_structure = ms.get_xray_structure(),
+        conformer_indices      = ms.get_hierarchy().get_conformer_indices(),
+        residue_name           = self.params.output_residue_name,
+        atom_name              = self.params.output_atom_name,
+        chain_id               = self.params.output_chain_id,
+        refine_occupancies     = self.params.refine_occupancies,
+        refine_adp             = self.params.new_solvent)
+    ###
 
-  def show(self, message):
-    print(message, file=self.log)
+  def refine_oat(self):
+    if self.new_solvent_selection is None: return
+    if(self.params.refine_oat and self.new_solvent_selection.count(True)>0):
+      from phenix.programs import oat
+      from cctbx import adptbx
+      atoms = self.model.get_hierarchy().atoms()
+      scatterers = self.fmodel.xray_structure.scatterers()
+      for i, sel in enumerate(self.new_solvent_selection):
+        if not sel: continue
+        r_start = self.fmodel.r_work()
+        scatterers[i].occupancy=0
+        scatterers[i].u_iso=0
+        self.fmodel.update_xray_structure(update_f_calc=True)
+        r_omit = self.fmodel.r_work()
+        fmodel_dc = self.fmodel.deep_copy()
+        oo = oat.loop(
+          fmodel  = fmodel_dc,
+          site    = atoms[i].xyz,
+          label   = "O",
+          qs = flex.double([0.3, 0.6, 0.9]),
+          bs = flex.double([10, 30, 60])
+          )
+        scatterers[i].occupancy = oo.o_best
+        scatterers[i].u_iso     = adptbx.b_as_u(oo.b_best)
+        self.fmodel.update_xray_structure(update_f_calc=True)
+        r_final = self.fmodel.r_work()
+        #print(atoms[i].quote(), "%8.6f %8.6f %8.6f %8.6f"%(
+        #  r_start, r_omit, r_final, oo.rw_best), "|", oo.o_best, oo.b_best)
+      self.model.adopt_xray_structure(
+        xray_structure = self.fmodel.xray_structure)
+      print("  ADP+occupancy (water only), OAT, final r_work=%6.4f r_free=%6.4f"%(
+        self.fmodel.r_work(), self.fmodel.r_free()), file=self.log)
+      #
+    if(self.params.refine_adp and self.params.refine_occupancies and
+       self.new_solvent_selection.count(True)>0):
+      from mmtbx.refinement import wrappers
+      o = wrappers.unrestrained_qbr_fsr(
+        fmodel     = self.fmodel,
+        model      = self.model,
+        refine_xyz = False,
+        selection  = self.new_solvent_selection,
+        q_min      = 0.004,
+        b_max      = 60,
+        b_min      = self.params.b_iso_min,
+        log        = self.log)
+      self.model.adopt_xray_structure(
+          xray_structure = self.fmodel.xray_structure)
+      print("  ADP+occupancy (water only), MIN, final r_work=%6.4f r_free=%6.4f"%(
+          self.fmodel.r_work(), self.fmodel.r_free()), file=self.log)
+
+  def _correct_drifted_waters(self):
+    if(self.params.mode != "filter_only"): return
+    if(not self.params.correct_drifted_waters): return
     sol_sel = self.model.solvent_selection()
-    xrs_mac_h = self.model.get_xray_structure().select(~sol_sel)
-    xrs_sol_h = self.model.get_xray_structure().select(sol_sel)
-    hd_sol = self.model.get_hd_selection().select(sol_sel)
-    hd_mac = self.model.get_hd_selection().select(~sol_sel)
-    xrs_sol = xrs_sol_h.select(~hd_sol)
-    xrs_mac = xrs_mac_h.select(~hd_mac)
-    scat = xrs_sol.scatterers()
-    occ = scat.extract_occupancies()
-    b_isos = scat.extract_u_iso_or_u_equiv(
-      self.model.get_xray_structure().unit_cell()) * math.pi**2*8
-    smallest_distances = xrs_mac.closest_distances(
-      sites_frac      = xrs_sol.sites_frac(),
-      distance_cutoff = self.find_peaks_params.map_next_to_model.\
-        max_model_peak_dist).smallest_distances
-    number = format_value("%-7d",scat.size())
-    b_min  = format_value("%-7.2f", flex.min_default( b_isos, None))
-    b_max  = format_value("%-7.2f", flex.max_default( b_isos, None))
-    b_ave  = format_value("%-7.2f", flex.mean_default(b_isos, None))
-    bl_min = format_value("%-7.2f", self.params.b_iso_min).strip()
-    bl_max = format_value("%-7.2f", self.params.b_iso_max).strip()
-    o_min  = format_value("%-7.2f", flex.min_default(occ, None))
-    o_max  = format_value("%-7.2f", flex.max_default(occ, None))
-    ol_min = format_value("%-7.2f", self.params.occupancy_min).strip()
-    ol_max = format_value("%-7.2f", self.params.occupancy_max).strip()
-    d_min  = format_value("%-7.2f", flex.min_default(smallest_distances, None))
-    d_max  = format_value("%-7.2f", flex.max_default(smallest_distances, None))
-    dl_min = format_value("%-7.2f",
-      self.find_peaks_params.map_next_to_model.min_model_peak_dist).strip()
-    dl_max = format_value("%-7.2f",
-      self.find_peaks_params.map_next_to_model.max_model_peak_dist).strip()
-    ani_min = format_value("%-7.2f", flex.min_default(scat.anisotropy(
-      unit_cell = xrs_sol.unit_cell()), None))
-    ani_min_l = format_value("%-7.2f",self.params.anisotropy_min).strip()
-    print("  number           = %s"%number, file=self.log)
-    print("  b_iso_min        = %s (limit = %s)"%(b_min, bl_min), file=self.log)
-    print("  b_iso_max        = %s (limit = %s)"%(b_max, bl_max), file=self.log)
-    print("  b_iso_mean       = %s             "%(b_ave), file=self.log)
-    print("  anisotropy_min   = %s (limit = %s)"%(ani_min,ani_min_l), file=self.log)
-    print("  occupancy_min    = %s (limit = %s)"%(o_min, ol_min), file=self.log)
-    print("  occupancy_max    = %s (limit = %s)"%(o_max, ol_max), file=self.log)
-    print("  dist_sol_mol_min = %s (limit = %s)"%(d_min, dl_min), file=self.log)
-    print("  dist_sol_mol_max = %s (limit = %s)"%(d_max, dl_max), file=self.log)
-
-  def find_peaks(self, map_type, map_cutoff):
-    self.fmodel.update_xray_structure(
-      xray_structure = self.model.get_xray_structure(),
-      update_f_calc  = True)
-    return find_peaks.manager(
-      fmodel     = self.fmodel,
-      map_type   = map_type,
-      map_cutoff = map_cutoff,
-      params     = self.find_peaks_params,
-      log        = self.log)
-
-  def correct_drifted_waters(self, map_cutoff):
-    self.fmodel.update_xray_structure(
-      xray_structure = self.model.get_xray_structure(),
-      update_f_calc  = True)
+    hd_sel  = self.model.get_hd_selection()
+    hd_sol = sol_sel & hd_sel
+    if(hd_sol.count(True)>0): return
+    map_cutoff = self.params.secondary_map_and_map_cc_filter.poor_map_value_threshold/2
     find_peaks_params_drifted = find_peaks.master_params.extract()
     find_peaks_params_drifted.map_next_to_model.min_model_peak_dist=0.01
     find_peaks_params_drifted.map_next_to_model.min_peak_peak_dist=0.01
     find_peaks_params_drifted.map_next_to_model.max_model_peak_dist=0.5
     find_peaks_params_drifted.peak_search.min_cross_distance=0.5
-    find_peaks_params_drifted.resolution_factor = \
-      self.find_peaks_params.resolution_factor
     peaks = find_peaks.manager(
-      fmodel         = self.fmodel,
-      map_type       = "2mFobs-DFmodel",
+      xray_structure = self.fmodel.xray_structure,
+      map_data       = self._maps.data_map,
       map_cutoff     = map_cutoff,
       params         = find_peaks_params_drifted,
-      log            = self.log).peaks_mapped()
+      log            = null_out()).peaks_mapped()
     if(peaks is not None and self.fmodel.r_work() > 0.01):
       sites_frac, heights = peaks.sites, peaks.heights
       model_sites_frac = self.model.get_xray_structure().sites_frac()
@@ -422,211 +750,3 @@ class manager(object):
         water_selection  = solvent_selection,
         unit_cell        = self.model.get_xray_structure().unit_cell())
       self.model.get_xray_structure().set_sites_frac(sites_frac = model_sites_frac)
-      self.fmodel.update_xray_structure(
-        xray_structure = self.model.get_xray_structure(),
-        update_f_calc  = True)
-
-  def find_peaks_2fofc(self):
-    if(self.fmodel.twin): # XXX Make it possible when someone consolidates fmodels.
-      print("Map CC and map value based filtering is disabled for twin refinement.", file=self.log)
-      return
-    print("Before RSCC filtering: ", \
-      self.model.solvent_selection().count(True), file=self.log)
-    assert self.fmodel.xray_structure is self.model.get_xray_structure()
-    assert len(list(self.model.get_hierarchy().atoms_with_labels())) == \
-      self.model.get_number_of_atoms()
-    par = self.params.secondary_map_and_map_cc_filter
-    selection = self.model.solvent_selection()
-    # filter by map cc and value
-    e_map_obj = self.fmodel.electron_density_map()
-    coeffs_1 = e_map_obj.map_coefficients(
-      map_type     = par.cc_map_1_type,
-      fill_missing = False,
-      isotropize   = True)
-    coeffs_2 = e_map_obj.map_coefficients(
-      map_type     = par.cc_map_2_type,
-      fill_missing = False,
-      isotropize   = True)
-    fft_map_1 = coeffs_1.fft_map(resolution_factor = 1./4)
-    fft_map_1.apply_sigma_scaling()
-    map_1 = fft_map_1.real_map_unpadded()
-    fft_map_2 = miller.fft_map(
-      crystal_gridding     = fft_map_1,
-      fourier_coefficients = coeffs_2)
-    fft_map_2.apply_sigma_scaling()
-    map_2 = fft_map_2.real_map_unpadded()
-    sites_cart = self.fmodel.xray_structure.sites_cart()
-    sites_frac = self.fmodel.xray_structure.sites_frac()
-    scatterers = self.model.get_xray_structure().scatterers()
-    assert approx_equal(self.model.get_xray_structure().sites_frac(), sites_frac)
-    unit_cell = self.fmodel.xray_structure.unit_cell()
-    for i, sel_i in enumerate(selection):
-      if(sel_i):
-        sel = maptbx.grid_indices_around_sites(
-          unit_cell  = unit_cell,
-          fft_n_real = map_1.focus(),
-          fft_m_real = map_1.all(),
-          sites_cart = flex.vec3_double([sites_cart[i]]),
-          site_radii = flex.double([1.5]))
-        cc = flex.linear_correlation(x=map_1.select(sel),
-          y=map_2.select(sel)).coefficient()
-        map_value_1 = map_1.eight_point_interpolation(sites_frac[i])
-        map_value_2 = map_2.eight_point_interpolation(sites_frac[i])
-        if((cc < par.poor_cc_threshold or
-           map_value_1 < par.poor_map_value_threshold or
-           map_value_2 < par.poor_map_value_threshold) and not
-           scatterers[i].element_symbol().strip().upper() in ["H","D"]):
-          selection[i]=False
-    #
-    sol_sel = self.model.solvent_selection()
-    hd_sel = self.model.get_hd_selection()
-    selection.set_selected(hd_sel, True)
-    selection.set_selected(~sol_sel, True)
-    xht = self.model.xh_connectivity_table()
-    if(xht is not None):
-      for ti in xht:
-        if(not selection[ti[0]]): selection[ti[1]]=False
-        if(selection[ti[0]]): selection[ti[1]]=True
-    if(selection.size() != selection.count(True)):
-      self.model = self.model.select(selection)
-      self.fmodel.update_xray_structure(
-        xray_structure = self.model.get_xray_structure(),
-        update_f_calc  = True)
-    print("After RSCC filtering: ", \
-      self.model.solvent_selection().count(True), file=self.log)
-
-  def add_new_solvent(self):
-    if(self.params.b_iso is None):
-      sol_sel = self.model.solvent_selection()
-      xrs_mac_h = self.model.get_xray_structure().select(~sol_sel)
-      hd_mac = self.model.get_hd_selection().select(~sol_sel)
-      xrs_mac = xrs_mac_h.select(~hd_mac)
-      b = xrs_mac.extract_u_iso_or_u_equiv() * math.pi**2*8
-      b_solv = flex.mean_default(b, None)
-      if(b_solv is not None and b_solv < self.params.b_iso_min or
-         b_solv > self.params.b_iso_max):
-        b_solv = (self.params.b_iso_min + self.params.b_iso_max) / 2.
-    else:
-      b_solv = self.params.b_iso
-    if(self.params.new_solvent == "isotropic"):
-      new_scatterers = flex.xray_scatterer(
-        self.sites.size(),
-        xray.scatterer(occupancy       = self.params.occupancy,
-                       b               = b_solv,
-                       scattering_type = self.params.scattering_type))
-    elif(self.params.new_solvent == "anisotropic"):
-      u_star = adptbx.u_iso_as_u_star(self.model.get_xray_structure().unit_cell(),
-        adptbx.b_as_u(b_solv))
-      new_scatterers = flex.xray_scatterer(
-        self.sites.size(),
-        xray.scatterer(
-          occupancy       = self.params.occupancy,
-          u               = u_star,
-          scattering_type = self.params.scattering_type))
-    else: raise RuntimeError
-    new_scatterers.set_sites(self.sites)
-    solvent_xray_structure = xray.structure(
-      special_position_settings = self.model.get_xray_structure(),
-      scatterers                = new_scatterers)
-    xrs_sol = self.model.get_xray_structure().select(self.model.solvent_selection())
-    xrs_mac = self.model.get_xray_structure().select(~self.model.solvent_selection())
-    xrs_sol = xrs_sol.concatenate(other = solvent_xray_structure)
-    sol_sel = flex.bool(xrs_mac.scatterers().size(), False)
-    sol_sel.extend( flex.bool(xrs_sol.scatterers().size(), True) )
-    self.model.add_solvent(
-      solvent_xray_structure = solvent_xray_structure,
-      residue_name           = self.params.output_residue_name,
-      atom_name              = self.params.output_atom_name,
-      chain_id               = self.params.output_chain_id,
-      refine_occupancies     = self.params.refine_occupancies,
-      refine_adp             = self.params.new_solvent)
-    self.fmodel.update_xray_structure(
-      xray_structure = self.model.get_xray_structure(),
-      update_f_calc  = True)
-
-  def refine_adp(self):
-    if(not self.filter_only and self.params.refine_adp and
-       self.model.refinement_flags.individual_adp and
-       self.model.solvent_selection().count(True) > 0):
-      self.fmodels.update_xray_structure(
-         xray_structure = self.model.get_xray_structure(),
-         update_f_calc  = True,
-         update_f_mask  = True)
-      print("ADP refinement (water only), start r_work=%6.4f r_free=%6.4f"%(
-        self.fmodel.r_work(), self.fmodel.r_free()), file=self.log)
-      # set refinement flags (not exercised!)
-      hd_sel     = self.model.get_hd_selection()
-      not_hd_sel = ~hd_sel
-      sol_sel    = self.model.solvent_selection()
-      not_sol_sel= ~sol_sel
-      selection_aniso = self.model.get_xray_structure().use_u_aniso().deep_copy()
-      if(self.params.new_solvent == "anisotropic"):
-        selection_aniso.set_selected(sol_sel, True)
-      selection_iso   = self.model.get_xray_structure().use_u_iso().deep_copy()
-      selection_aniso.set_selected(not_sol_sel, False)
-      selection_iso  .set_selected(not_sol_sel, False)
-      if(not self.is_neutron_scat_table):
-        selection_aniso.set_selected(hd_sel, False)
-        selection_iso.set_selected(hd_sel, False)
-      selection_aniso.set_selected(selection_iso, False)
-      selection_iso.set_selected(selection_aniso, False)
-      self.model.set_refine_individual_adp(
-        selection_aniso = selection_aniso, selection_iso = selection_iso)
-      lbfgs_termination_params = scitbx.lbfgs.termination_parameters(
-          max_iterations = 25)
-      minimized = minimization.lbfgs(
-        restraints_manager       = None,
-        fmodels                  = self.fmodels,
-        model                    = self.model,
-        is_neutron_scat_table    = self.is_neutron_scat_table,
-        refine_adp               = True,
-        lbfgs_termination_params = lbfgs_termination_params)
-      print("ADP refinement (water only), final r_work=%6.4f r_free=%6.4f"%(
-        self.fmodel.r_work(), self.fmodel.r_free()), file=self.log)
-
-  def refine_occupancies(self):
-    if(not self.filter_only and self.params.refine_occupancies and
-       self.model.refinement_flags.occupancies and
-       self.model.solvent_selection().count(True) > 0):
-      self.fmodels.update_xray_structure(
-         xray_structure = self.model.get_xray_structure(),
-         update_f_calc  = True,
-         update_f_mask  = True)
-      print("occupancy refinement (water only), start r_work=%6.4f r_free=%6.4f"%(
-        self.fmodel.r_work(), self.fmodel.r_free()), file=self.log)
-      self.fmodels.fmodel_xray().xray_structure.scatterers().flags_set_grads(
-        state = False)
-      i_selection = self.model.solvent_selection().iselection()
-      self.fmodels.fmodel_xray().xray_structure.scatterers(
-        ).flags_set_grad_occupancy(iselection = i_selection)
-      lbfgs_termination_params = scitbx.lbfgs.termination_parameters(
-        max_iterations = 25)
-      minimized = mmtbx.refinement.minimization.lbfgs(
-        restraints_manager       = None,
-        fmodels                  = self.fmodels,
-        model                    = self.model,
-        is_neutron_scat_table    = self.is_neutron_scat_table,
-        lbfgs_termination_params = lbfgs_termination_params)
-      self.fmodels.fmodel_xray().xray_structure.adjust_occupancy(
-        occ_max   = self.params.occupancy_max,
-        occ_min   = self.params.occupancy_min,
-        selection = i_selection)
-      #
-      print("occupancy refinement (water only), start r_work=%6.4f r_free=%6.4f"%(
-        self.fmodel.r_work(), self.fmodel.r_free()), file=self.log)
-
-def show_histogram(data,
-                   n_slots,
-                   out=None,
-                   prefix=""):
-    if (out is None): out = sys.stdout
-    print(prefix, file=out)
-    histogram = flex.histogram(data    = data,
-                               n_slots = n_slots)
-    low_cutoff = histogram.data_min()
-    for i,n in enumerate(histogram.slots()):
-      high_cutoff = histogram.data_min() + histogram.slot_width() * (i+1)
-      print("%7.3f - %7.3f: %d" % (low_cutoff, high_cutoff, n), file=out)
-      low_cutoff = high_cutoff
-    out.flush()
-    return histogram

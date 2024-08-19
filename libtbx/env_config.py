@@ -38,6 +38,7 @@ default_enable_cuda = False
 default_enable_kokkos = False
 default_opt_resources = False
 default_enable_cxx11 = False
+default_cxxstd = None
 default_use_conda = False
 
 def is_64bit_architecture():
@@ -581,11 +582,14 @@ class environment:
     return abs(self.build_path / '..' / path)
 
   def under_base(self, path, return_relocatable_path=False):
-    if self.build_options.use_conda:
-      return abs(self.build_path / '..' / 'conda_base' / path)
-    else:
-      return abs(self.build_path / '..' / 'base' / path)
-    # return abs(os.path.join(abs(self.build_path), '..', 'base', path))
+    result = self.build_path / '..' / 'conda_base' / path
+    if self.installed:
+      result = self.bin_path.anchor / path
+    elif not self.build_options.use_conda:
+      result = self.build_path / '..' / 'base' / path
+    if not return_relocatable_path:
+      result = abs(result)
+    return result
 
   def under_build(self, path, return_relocatable_path=False):
     result = self.as_relocatable_path(path)
@@ -985,6 +989,7 @@ Wait for the command to finish, then try again.""" % vars())
         force_32bit=command_line.options.force_32bit,
         msvc_arch_flag=command_line.options.msvc_arch_flag,
         enable_cxx11=command_line.options.enable_cxx11,
+        cxxstd=command_line.options.cxxstd,
         skip_phenix_dispatchers=command_line.options.skip_phenix_dispatchers)
       self.build_options.get_flags_from_environment()
       # if an installed environment exists, override with build_options
@@ -1204,6 +1209,7 @@ Wait for the command to finish, then try again.""" % vars())
         print(r'@for %%F in ("%LIBTBX_PREFIX%") do @set LIBTBX_PREFIX=%%~dpF', file=f)
         print('@set LIBTBX_PREFIX=%LIBTBX_PREFIX:~0,-1%', file=f)
         print('@set LIBTBX_DISPATCHER_NAME=%~nx0', file=f)
+        print('@set PATH=%LIBTBX_PREFIX%\\..;%LIBTBX_PREFIX%\\..\\mingw-w64\\bin;%LIBTBX_PREFIX%\\..\\bin;%LIBTBX_PREFIX%\\..\\..\\Scripts;%PATH%', file=f)
         def write_dispatcher_include(where):
           for line in self.dispatcher_include(where=where):
             if (line.startswith("@")):
@@ -1616,6 +1622,7 @@ Wait for the command to finish, then try again.""" % vars())
     bin_path = [self.bin_path]
     if self.build_options.use_conda:
       bin_path.append(self.as_relocatable_path(get_conda_prefix()) / 'Library' / 'bin')
+      bin_path.append(self.as_relocatable_path(get_conda_prefix()) / 'Library' / 'mingw-w64' / 'bin')
     essentials.append(("PATH", bin_path))
     for n,v in essentials:
       if (len(v) == 0): continue
@@ -2644,6 +2651,7 @@ class build_options:
         force_32bit=False,
         msvc_arch_flag=default_msvc_arch_flag,
         enable_cxx11=default_enable_cxx11,
+        cxxstd=default_cxxstd,
         skip_phenix_dispatchers=False):
 
     adopt_init_args(self, locals())
@@ -2928,6 +2936,12 @@ class pre_process_args:
       action="store_true",
       default=default_enable_cxx11,
       help="use C++11 standard")
+    parser.option(None, "--cxxstd",
+      action="store",
+      type="choice",
+      default=default_cxxstd,
+      choices=['c++11', 'c++14'], # this should just be the argument to the -std flag
+      help="Set the C++ standard. This cannot be set along with --enable_cxx11")
     parser.option("--skip_phenix_dispatchers",
       action="store_true",
       default=False,
@@ -2961,6 +2975,14 @@ class pre_process_args:
           and os.name != "nt"):
         raise RuntimeError(
           "The --msvc_arch_flag option is not valid for this platform.")
+
+      # check that only enable_cxx11 or cxxstd is set
+      if self.command_line.options.enable_cxx11 \
+        and self.command_line.options.cxxstd is not None:
+        raise RuntimeError('''
+Both --enable_cxx11 and --cxxstd have been set. Please only set one of
+these options.
+      ''')
 
   def option_repository(self, option, opt, value, parser):
     if (not op.isdir(value)):
@@ -3096,6 +3118,9 @@ def unpickle(build_path=None, env_name="libtbx_env"):
   # XXX backward compatibility 2022-01-19
   if not hasattr(env.build_options, "enable_kokkos"):
     env.build_options.enable_kokkos = False
+  # XXX backward compatibility 2022-12-07
+  if not hasattr(env.build_options, "cxxstd"):
+    env.build_options.cxxstd = None
   # update installed location
   if env.installed:
     sys_prefix = get_conda_prefix()

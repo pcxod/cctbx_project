@@ -1,12 +1,12 @@
 from __future__ import absolute_import, division, print_function
 from mmtbx.monomer_library import pdb_interpretation
 from mmtbx.refinement.occupancies import occupancy_selections
-from mmtbx.command_line import fmodel
+from iotbx.cli_parser import run_program
+from mmtbx.programs import fmodel
 import mmtbx.model
-from iotbx import file_reader
 import iotbx.pdb
 import iotbx.phil
-from libtbx.test_utils import approx_equal, Exception_expected
+from libtbx.test_utils import approx_equal
 from libtbx.utils import format_cpu_times, null_out, Sorry
 import libtbx.load_env
 from six.moves import cStringIO as StringIO
@@ -82,7 +82,7 @@ def exercise_00(verbose):
     as_flex_arrays    = False)
   res = extract_serials(model.get_atoms(), res)
   base_21_23 = target[:]
-  target.extend([[[18]], [[19]], [[20]], [[22]]])
+  target.extend([[[18]], [[19]], [[20]]])
   assert approx_equal(res, target)
   # 1
   res = occupancy_selections(
@@ -99,7 +99,7 @@ def exercise_00(verbose):
     as_flex_arrays    = False,
     other_individual_selection_strings = ['resseq 0 and not (altloc A or altloc B)'])
   res = extract_serials(model.get_atoms(), res)
-  target.extend([[[18]], [[19]], [[20]], [[22]]])
+  target.extend([[[18]], [[19]], [[20]]])
   assert approx_equal(res, target)
   # 2
   other_constrained_groups = make_up_other_constrained_groups_obj(
@@ -120,7 +120,7 @@ def exercise_00(verbose):
     as_flex_arrays    = False,
     other_constrained_groups = other_constrained_groups)
   res = extract_serials(model.get_atoms(), res)
-  target.extend([[[18]], [[19]], [[20]], [[22]]])
+  target.extend([[[18]], [[19]], [[20]]])
   assert approx_equal(res, target)
   # 3
   other_constrained_groups = make_up_other_constrained_groups_obj(
@@ -1205,7 +1205,7 @@ HETATM   83  O   HOH A   8      -6.471   5.227   7.124  1.00 22.62           O
 HETATM   84  O   HOH A   9      10.431   1.858   3.216  1.00 19.71           O
 HETATM   85  O   HOH A  10     -11.286   1.756  -1.468  1.00 17.08           O
 HETATM   86  O  AHOH A  11      11.808   4.179   9.970  0.60 23.99           O
-HETATM   87  O   HOH A  12      13.605   1.327   9.198  1.00 26.17           O
+HETATM   87  O  AHOH A  12      13.605   1.327   9.198  0.60 26.17           O
 HETATM   88  O   HOH A  13      -2.749   3.429  10.024  1.00 39.15           O
 HETATM   89  O   HOH A  14      -1.500   0.682  10.967  1.00 43.49           O
 TER
@@ -1224,10 +1224,10 @@ TER
       "random_seed=12345",
       "output.file_name=%s.mtz" % prefix,
     ]
-    fmodel.run(args=args, log=null_out())
-  pdb_file = file_reader.any_file(pdb_in)
-  hierarchy = pdb_file.file_object.hierarchy
-  xrs = pdb_file.file_object.xray_structure_simple()
+    run_program(program_class=fmodel.Program, args=args, logger=null_out())
+  pdb_file = iotbx.pdb.input(pdb_in)
+  hierarchy = pdb_file.construct_hierarchy()
+  xrs = pdb_file.xray_structure_simple()
   for atom in hierarchy.atoms():
     atom.b = 5
     if (atom.occ < 1.0):
@@ -1245,23 +1245,26 @@ def exercise_regroup_3d(verbose):
     "tst_group_correlated_occupancy_start.pdb",
     "tst_group_correlated_occupancy_in.pdb",
   ]
-  for i_file, pdb_file in enumerate(pdb_files):
-    model = get_model(pdb_file, log)
-    try :
-      constraint_groups = occupancy_selections(
-        model = model,
+  #
+  constraint_groups = occupancy_selections(
+        model = get_model("tst_group_correlated_occupancy_start.pdb", log),
         constrain_correlated_3d_groups=True,
         log=null_out())
-    except Sorry as s :
-      if (i_file == 0):
-        raise
-      else :
-        assert ("Inconsistent occupancies" in str(s)), str(s)
-    else :
-      if (i_file == 1):
-        raise Exception_expected
-      else :
-        assert (len(constraint_groups) == 1)
+  for g in constraint_groups:
+     assert [ [ggg for ggg in gg] for gg in g ] == \
+       [[29, 30, 31, 32, 33, 34, 35, 36, 37, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 84, 85],
+        [38, 39, 40, 41, 42, 43, 44, 45, 46, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80]]
+  #
+  sorry_found = False
+  try:
+    constraint_groups = occupancy_selections(
+      model = get_model("tst_group_correlated_occupancy_in.pdb", log),
+      constrain_correlated_3d_groups=True,
+      log=null_out())
+  except Sorry as s:
+    assert ("Inconsistent occupancies" in str(s)), str(s)
+    sorry_found = True
+  assert sorry_found
 
 def run():
   verbose = "--verbose" in sys.argv[1:]

@@ -475,9 +475,11 @@ class symmetry(object):
   def is_nonsense(self):
     uc = self.unit_cell()
     if uc is None:
-      return False
+      return True
+    if(self.space_group_info() is None or self.space_group() is None):
+      return True
     ucp = uc.parameters()
-    return ((abs(1.-ucp[0])<1.e-3 and
+    result = ((abs(1.-ucp[0])<1.e-3 and
              abs(1.-ucp[1])<1.e-3 and
              abs(1.-ucp[2])<1.e-3) or
           (abs(0.-ucp[0])<1.e-3 and
@@ -489,9 +491,13 @@ class symmetry(object):
           (abs(0.-ucp[3])<1.e-3 and
              abs(0.-ucp[4])<1.e-3 and
              abs(0.-ucp[5])<1.e-3))
+    return result
 
   def is_empty(self):
     return self.unit_cell() is None and self.space_group_info() is None
+
+  def is_incomplete(self):
+    return self.unit_cell() is None or self.space_group() is None
 
 def select_crystal_symmetry(
       from_command_line     = None,

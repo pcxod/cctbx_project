@@ -16,6 +16,7 @@ if os.environ.get("CCTBX_NO_UUID", None) is not None:
 
 from xfel.merging.application.mpi_helper import mpi_helper
 from xfel.merging.application.mpi_logger import mpi_logger
+from libtbx.mpi4py import mpi_abort_on_exception
 
 # Note, when modifying this list, be sure to modify the README in xfel/merging
 
@@ -48,7 +49,7 @@ class Script(object):
   def __del__(self):
     self.mpi_helper.finalize()
 
-  def parse_input(self):
+  def parse_input(self, args=None):
     '''Parse input at rank 0 and broadcast the input parameters and options to all ranks'''
 
     if self.mpi_helper.rank == 0:
@@ -69,7 +70,7 @@ class Script(object):
         epilog=help_message)
 
       # Parse the command line. quick_parse is required for MPI compatibility
-      params, options = self.parser.parse_args(show_diff_phil=True,quick_parse=True)
+      params, options = self.parser.parse_args(args, show_diff_phil=True,quick_parse=True)
 
       # Log the modified phil parameters
       diff_phil_str = self.parser.diff_phil.as_str()
@@ -102,7 +103,8 @@ class Script(object):
     self.mpi_logger.log("Received input parameters and options")
     self.mpi_logger.log_step_time("BROADCAST_INPUT_PARAMS", True)
 
-  def run(self):
+  @mpi_abort_on_exception
+  def run(self, args=None):
     import datetime
     time_now = datetime.datetime.now()
 
@@ -113,7 +115,7 @@ class Script(object):
     self.mpi_logger.log_step_time("TOTAL")
 
     self.mpi_logger.log_step_time("PARSE_INPUT_PARAMS")
-    self.parse_input()
+    self.parse_input(args)
     self.mpi_logger.log_step_time("PARSE_INPUT_PARAMS", True)
 
     if self.params.mp.debug.cProfile:
@@ -190,28 +192,14 @@ class Script(object):
         self.mpi_logger.log("Ending step with %d experiments"%len(experiments))
 
     if self.params.output.save_experiments_and_reflections:
-      if len(reflections) and 'id' not in reflections:
-        from dials.array_family import flex
-        id_ = flex.int(len(reflections), -1)
-        if experiments:
-          for expt_number, expt in enumerate(experiments):
-            sel = reflections['exp_id'] == expt.identifier
-            id_.set_selected(sel, expt_number)
-        else:
-          for expt_number, exp_id in enumerate(set(reflections['exp_id'])):
-            sel = reflections['exp_id'] == exp_id
-            id_.set_selected(sel, expt_number)
-        reflections['id'] = id_
-
-        assert (reflections['id'] == -1).count(True) == 0, ((reflections['id'] == -1).count(True), len(reflections))
-
       if self.mpi_helper.size == 1:
         filename_suffix = ""
       else:
         filename_suffix = "_%06d"%self.mpi_helper.rank
 
       if len(reflections):
-        reflections.as_pickle(os.path.join(self.params.output.output_dir, "%s%s.refl"%(self.params.output.prefix, filename_suffix)))
+        assert 'id' in reflections
+        reflections.as_file(os.path.join(self.params.output.output_dir, "%s%s.refl"%(self.params.output.prefix, filename_suffix)))
       if experiments:
         experiments.as_file(os.path.join(self.params.output.output_dir, "%s%s.expt"%(self.params.output.prefix, filename_suffix)))
 
@@ -225,11 +213,14 @@ class Script(object):
     if self.params.output.expanded_bookkeeping:
       if self.params.input.persistent_refl_cols is None:
         self.params.input.persistent_refl_cols = []
-      keysCreatedByMerge = ["input_refl_index", "orig_exp_id", "file_list_mapping", "is_odd_experiment"]
+      keysCreatedByMerge = ["input_refl_index", "original_id", "file_list_mapping", "is_odd_experiment"]
       for key in keysCreatedByMerge:
         if key not in self.params.input.persistent_refl_cols:
           self.params.input.persistent_refl_cols.append(key)
-
+    if "correlation_after_post" not in self.params.input.persistent_refl_cols:
+      self.params.input.persistent_refl_cols.append("correlation_after_post")
+    if "correlation" not in self.params.input.persistent_refl_cols:
+      self.params.input.persistent_refl_cols.append("correlation")
 
 if __name__ == '__main__':
   script = Script()

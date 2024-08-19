@@ -9,6 +9,34 @@ from scitbx.array_family import flex
 from libtbx import adopt_init_args
 from libtbx import easy_run
 
+def dist2(xyz1, xyz2):
+  d2=0
+  for i in range(3):
+    d2 += (xyz2[i]-xyz1[i])**2
+  return d2
+
+def get_internal_coordinate_value(atom1, atom2, atom3=None, atom4=None):
+  import math
+  from cctbx import geometry_restraints
+  if not atom3:
+    d2 = dist2(atom1.xyz, atom2.xyz)
+    return math.sqrt(d2)
+  elif not atom4:
+    sites = [atom1.xyz, atom2.xyz, atom3.xyz]
+    ang = geometry_restraints.angle(
+      sites=sites,
+      angle_ideal=109,
+      weight=1,
+      )
+    return ang.angle_model
+  sites = [atom1.xyz, atom2.xyz, atom3.xyz, atom4.xyz]
+  dih = geometry_restraints.dihedral(
+      sites=sites,
+      angle_ideal=0,
+      weight=1.,
+      periodicity=1)
+  return dih.angle_model
+
 def loop_over_file(filename):
   f=open(filename, 'r')
   lines = f.read()
@@ -20,6 +48,7 @@ def process_qm_log_file(log_filename=None,
                         generator=None,
                         error_lines=None,
                         log=None,
+                        verbose=False,
                         ):
   if log_filename is not None: generator=loop_over_file(log_filename)
   error_line = None
@@ -27,13 +56,13 @@ def process_qm_log_file(log_filename=None,
   for i, line in enumerate(generator):
     if line.find('GEOMETRY OPTIMIZATION CYCLE')>-1:
       cycle = int(line.split()[4])
-      if cycle==1: print('  QM minimisation started', file=log)
+      if verbose and cycle==1: print('  QM minimisation started', file=log)
     # if line.find('Max(Improp)')>-1:
     #   conv = process_orca_convergence(last_ten)
       # if cycle%10==0:
         # print('  Opt. cycle %s %s %s %0.1fmin' % (cycle, conv, i, (time.time()-t0)/60))
-    # if line.find('OPTIMIZATION RUN DONE')>-1:
-    #   status = True
+    if line.find('FINAL HEAT OF FORMATION =')>-1:
+      status = True
     if line.find('ORCA TERMINATED NORMALLY')>-1:
       status = True
     if line.find('* JOB ENDED NORMALLY *')>-1:
@@ -49,6 +78,25 @@ def process_qm_log_file(log_filename=None,
   if not status:
     raise Sorry('QM does not seem to have converged. Check %s' % log_filename)
   return status
+
+def run_command(command):
+    """
+    execute <command> in a subprocess and check error code
+    taken from ASE
+    """
+    from subprocess import Popen, PIPE
+    if command == '':
+        raise RuntimeError('no command for run_command :(')
+    proc = Popen([command], shell=True, stderr=PIPE)
+    proc.wait()
+    exitcode = proc.returncode
+    if exitcode != 0:
+        error='%s exited with error code %i in %s' % (
+                       command,exitcode,self.calc_dir)
+        stdout,stderr = proc.communicate()
+        print('shell output: ',stdout,stderr)
+        raise RuntimeError(error)
+    return 0
 
 def run_qm_cmd(cmd,
                log_filename,
@@ -126,8 +174,10 @@ class base_manager():
       self.solvent_model,
       )
     residues = []
-    for atom in self.atoms:
-      outl += '  %s\n' % atom.quote()
+    for i, atom in enumerate(self.atoms):
+      ann=''
+      if self.ligand_atoms_array: ann=self.ligand_atoms_array[i]
+      outl += '  %s %s\n' % (atom.quote(), ann)
       if atom.parent().id_str() not in residues:
         residues.append(atom.parent().id_str())
     outl += '  residues\n'
@@ -159,22 +209,17 @@ class base_manager():
     assert len(selection_array)==len(self.atoms)
     self.ligand_atoms_array = selection_array
 
-  # def set_frozen_atoms(self, selection_array):
-  #   """Summary
+  def get_energy(self, *args, **kwds): return 0, 'dirac'
 
-  #   Args:
-  #       selection_array (TYPE): Description
-  #   """
-  #   assert len(selection_array)==len(self.atoms)
-  #   self.freeze_a_ray = selection_array
+  def read_energy(self, *args, **kwds): return 0, 'dirac'
 
-  def get_opt(self,
-              cleanup=False,
-              file_read=False,
-              coordinate_filename_ext='.xyz',
-              log_filename_ext='.log',
-              redirect_output=True,
-              log=None):
+  def read_charge(self, *args, **kwds): return 99
+
+  def get_strain(self, *args, **kwds): return 0, 'dirac'
+
+  def get_bound(self, *args, **kwds): return 0, 'dirac'
+
+  def get_opt(self, *args, **kwds):
     import random
     rc = []
     for atom in self.atoms:
@@ -190,8 +235,20 @@ class base_manager():
       rc=tmp
     return flex.vec3_double(rc), flex.vec3_double(rc_buffer)
 
+  def get_gradients(self):
+    assert 0
+
   def get_timings(self, energy=False):
     return '-'
+
+  def get_lines(self, filename=None):
+    if filename is None:
+      filename = self.get_log_filename()
+    assert os.path.exists(filename), 'filename not found %s' % filename
+    f=open(filename, 'r')
+    lines=f.read()
+    del f
+    return lines
 
 class base_qm_manager(base_manager):
 
@@ -200,9 +257,11 @@ class base_qm_manager(base_manager):
     f.write(outl)
     del f
 
-  def check_file_read_safe(self, optimise_ligand=True, optimise_h=True):
+  def check_file_read_safe(self, optimise_ligand=True, optimise_h=True, constrain_torsions=False):
     outl = self.get_input_lines(optimise_ligand=optimise_ligand,
-                                optimise_h=optimise_h)
+                                optimise_h=optimise_h,
+                                constrain_torsions=constrain_torsions,
+                                )
     filename = self.get_input_filename()
     lines=''
     if os.path.exists(filename):
@@ -221,43 +280,63 @@ class base_qm_manager(base_manager):
         for i, (line1, line2) in enumerate(zip(outl.splitlines(),lines.splitlines())):
           if line1!=line2: print(' ! %s "%s" <> "%s"' % (i+1, line1, line2))
         print('='*80)
+        f, ext = os.path.splitext(filename)
+        f=open('old%s' % ext, 'w')
+        f.write(lines)
+        del f
+        f=open('new%s' % ext, 'w')
+        f.write(outl)
+        del f
         raise Sorry('something has changed making the QM input files different')
     return outl==lines
 
-  def opt_setup(self, optimise_ligand=True, optimise_h=True):
+  def opt_setup(self, optimise_ligand=True, optimise_h=True, constrain_torsions=False):
     outl = self.get_input_lines(optimise_ligand=optimise_ligand,
-                                optimise_h=optimise_h)
+                                optimise_h=optimise_h,
+                                constrain_torsions=constrain_torsions,
+                                )
     self.write_input(outl)
 
   def get_opt(self,
               optimise_h=True,
+              constrain_torsions=False,
               cleanup=False,
               file_read=True,
               check_file_read_safe=True,
               coordinate_filename_ext='.xyz',
               log_filename_ext='.log',
               redirect_output=True,
-              log=None):
+              log=None,
+              verbose=False):
     if self.program_goal in ['opt', 'strain']:
       optimise_ligand=True
     # elif self.program_goal in ['energy']:
     #   optimise_ligand=False
+    constrain_torsions = self.exclude_torsions_from_optimisation
 
     coordinates = None
     rc=True
     if check_file_read_safe:
+      if verbose: print('check_file_read_safe',check_file_read_safe)
       rc = self.check_file_read_safe(optimise_ligand=optimise_ligand,
-                                     optimise_h=optimise_h)
+                                     optimise_h=optimise_h,
+                                     constrain_torsions=constrain_torsions,
+                                     )
+      if verbose: print('rc',rc)
     if file_read and rc:
       filename = self.get_coordinate_filename()
       if os.path.exists(filename):
         lf = self.get_log_filename()
         if os.path.exists(lf):
           process_qm_log_file(lf, log=log)
-        print('  Reading coordinates from %s\n' % filename, file=log)
+        if verbose: print('  Reading coordinates from %s\n' % filename)
         coordinates = self.read_xyz_output()
     if coordinates is None:
-      self.opt_setup(optimise_ligand=optimise_ligand, optimise_h=optimise_h)
+      if verbose: print('no coordinates')
+      self.opt_setup(optimise_ligand=optimise_ligand,
+                     optimise_h=optimise_h,
+                     constrain_torsions=constrain_torsions,
+                     )
       self.run_cmd(redirect_output=redirect_output, log=log)
       coordinates = self.read_xyz_output()
     coordinates_buffer = coordinates
@@ -272,6 +351,7 @@ class base_qm_manager(base_manager):
 
   def get_energy(self,
                  optimise_h=True,
+                 constrain_torsions=False,
                  cleanup=False,
                  file_read=True,
                  redirect_output=False,
@@ -282,23 +362,27 @@ class base_qm_manager(base_manager):
     self.preamble += '_energy'
     optimise_ligand=False
     if file_read and self.check_file_read_safe(optimise_ligand=optimise_ligand,
-                                               optimise_h=optimise_h):
+                                               optimise_h=optimise_h,
+                                               constrain_torsions=constrain_torsions,
+                                               ):
       filename = self.get_log_filename()
       if os.path.exists(filename):
         if os.path.exists(filename):
           process_qm_log_file(filename, log=log)
-        print('  Reading energy from %s\n' % filename, file=log)
-        energy = self.read_energy()
+        # print('  Reading energy from %s\n' % filename, file=log)
+        energy, units = self.read_energy()
     if energy is None:
       outl = self.get_input_lines(optimise_ligand=optimise_ligand,
-                                  optimise_h=optimise_h)
+                                  optimise_h=optimise_h,
+                                  constrain_torsions=constrain_torsions,
+                                  )
       self.write_input(outl)
       self.run_cmd(redirect_output=redirect_output)
-      energy = self.read_energy()
+      energy, units = self.read_energy()
     if cleanup: self.cleanup(level=cleanup)
-    print('  Current energy = %0.5f %s' % (self.energy, self.units), file=log)
+    # print('  Current energy = %0.5f %s' % (self.energy, self.units), file=log)
     self.preamble = old_preamble
-    return energy
+    return energy, units
 
   def get_strain(self,
                  cleanup=False,
@@ -306,23 +390,81 @@ class base_qm_manager(base_manager):
                  redirect_output=False,
                  log=StringIO(),
                  **kwds):
+    #
+    # Get the strain energy of a ligand. Only works? when this is applied to
+    # the ligand.
+    #
     old_preamble = self.preamble
+    #
+    # get energy with just the H opt
+    #
     start_energy, junk = self.get_energy(optimise_h=True,
                                          redirect_output=redirect_output,
                                          cleanup=cleanup,
                                          log=log)
     self.preamble = old_preamble+'_strain'
-    final_energy, junk = self.get_opt(redirect_output=redirect_output,
-                                      cleanup=cleanup,
-                                      log=log)
-    final_energy, junk = self.read_energy()
+    #
+    # optimise all atoms positions and get energy
+    #
+    final_energy, units = self.get_opt(redirect_output=redirect_output,
+                                       cleanup=cleanup,
+                                       log=log)
+    final_energy, units = self.read_energy()
     self.strain = start_energy-final_energy
-    print('  Strain energy = %0.5f %s' % (self.strain, self.units), file=log)
+    self.units = units
+    # print('  Strain energy = %0.5f %s' % (self.strain, self.units), file=log)
     self.preamble = old_preamble
     return self.strain, self.units
 
+  def get_something_energy( self,
+                            preamble,
+                            cleanup=False,
+                            file_read=True,
+                            redirect_output=False,
+                            log=StringIO(),
+                            verbose=False,
+                            **kwds
+                            ):
+    if verbose:
+      print('get %s' % preamble)
+      print(self)
+    old_preamble = self.preamble
+    self.preamble += '_%s' % preamble
+    energy, units = self.get_energy(optimise_h=True,
+                                    redirect_output=redirect_output,
+                                    cleanup=cleanup,
+                                    log=log)
+    self.preamble = old_preamble
+    return energy, units
+
+  def get_bound(self, **kwds):
+    return self.get_something_energy('bound', **kwds)
+
+  def get_pocket(self, **kwds):
+    return self.get_something_energy('pocket', **kwds)
+
+  def get_gradients(self):
+    assert 0
+
   def get_timings(self, energy=None):
-    if not self.times: return '-'
+    return '-'
+    if not self.times:
+      filename = self.get_log_filename()
+      if os.path.exists(filename):
+        f=open(filename, 'r')
+        lines=f.read()
+        del f
+        for line in lines.splitlines():
+          #TOTAL JOB TIME:          1622.77 SECONDS
+          if line.find('TOTAL JOB TIME:')>-1:
+            print(line)
+            # print(energy)
+            # if energy is None:
+            #   rc=self.read_energy()
+            #   print(rc)
+            return '  Timings : %0.2fs' % float(line.split()[3])
+      # assert 0
+      return '-'
     f='  Timings : %0.2fs (%ss)' % (
       self.times[-1],
       self.times.format_mean(format='%.2f'))
@@ -330,3 +472,84 @@ class base_qm_manager(base_manager):
       f+=' Energy : %0.6f' % energy
     return f
 
+  def _is_atom_for_opt(self, i, atom, optimise_ligand=True, optimise_h=True):
+    ligand_atom = self.ligand_atoms_array[i]
+    if optimise_ligand:
+      if ligand_atom:
+        opt=1
+      else:
+        opt=0
+    else:
+      opt=0
+    if optimise_h and atom.element_is_hydrogen():
+      opt=1
+    return opt
+
+  def guess_bonds(self):
+    bonds = []
+    for i, atom1 in enumerate(self.atoms):
+      bonds.append([])
+      for j, atom2 in enumerate(self.atoms):
+        if i==j: continue
+        d2 = dist2(atom1.xyz, atom2.xyz)
+        d2_limit=2.5
+        if atom1.element_is_hydrogen() and atom2.element_is_hydrogen():
+          continue
+        elif atom1.element_is_hydrogen() or atom2.element_is_hydrogen():
+          d2_limit=1.3
+        elif atom1.element in ['P'] or atom2.element in ['P']:
+          d2_limit=4
+        if d2<d2_limit:
+          bonds[i].append(j)
+    # for i, atom1 in enumerate(self.atoms):
+    #   print(i, atom1.quote())
+    #   for j in bonds[i]:
+    #     print('  - %s' % self.atoms[j].quote())
+    return bonds
+
+  def get_torsion(self, i):
+    if not hasattr(self, 'bonds'):
+      self.bonds = self.guess_bonds()
+    if self.atoms[i].parent().resname in ['HOH']: return None
+    rc = [i]
+    next = i
+    j=0
+    while len(rc)<4:
+      next_i=self.bonds[i][j]
+      if next_i not in rc:
+        rc.append(next_i)
+        i=next_i
+        j=0
+      else:
+        j+=1
+    return rc
+
+def main():
+  # test different run methods
+  from mmtbx.geometry_restraints import mopac_manager
+  dat = ''' AM1 XYZ GEO-OK
+ HOH.dat
+
+ O -23.081267 1 18.356610 1 -21.628018 1
+ H -22.165708 1 18.441448 1 -21.593653 1
+ H -23.452909 1 18.384220 1 -20.699162 1
+
+'''
+  f=open('HOH.dat', 'w')
+  f.write(dat)
+  del f
+  cmd = '%s HOH.dat' % mopac_manager.get_exe()
+  print(cmd)
+  for i, func in enumerate([os.system, run_command, run_qm_cmd]):
+    print(func)
+    if i==2:
+      func(cmd, 'HOH.out', redirect_output=False)
+    else:
+      func(cmd)
+    f=open('HOH.out', 'r')
+    lines=f.read()
+    del f
+    print(lines[-150:])
+
+if __name__ == '__main__':
+  main()

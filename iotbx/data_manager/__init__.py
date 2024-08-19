@@ -10,6 +10,7 @@ import re
 import sys
 
 from collections import OrderedDict
+from copy import copy
 from six.moves import range
 
 import iotbx.phil
@@ -105,7 +106,8 @@ def load_datatype_modules(datatypes=None):
   return modules
 
 # =============================================================================
-def DataManager(datatypes=None, phil=None, custom_options=None, logger=None):
+def DataManager(datatypes=None, phil=None, custom_options=None,
+                custom_master_phil_str=None, logger=None):
   '''
   Function for dynamically creating a DataManager instance that supports a
   specific set of datatypes.
@@ -139,7 +141,7 @@ def DataManager(datatypes=None, phil=None, custom_options=None, logger=None):
   # check inheritance and add datatypes if necessary
   class_datatypes = set()
   parent_classes = []
-  for manager_class in manager_classes:
+  for manager_class in copy(manager_classes):
     if hasattr(manager_class, 'datatype'):
       class_datatypes.add(manager_class.datatype)
     # get full inheritance order and check
@@ -155,6 +157,10 @@ def DataManager(datatypes=None, phil=None, custom_options=None, logger=None):
 
   # add mixin classes if necessary
   mixin_classes = []
+  if 'model' in datatypes or 'miller_array' in datatypes:
+    importlib.import_module('.common', package='iotbx.data_manager')
+    mixin_classes.append(
+      getattr(sys.modules['iotbx.data_manager.common'], 'scattering_table_mixins'))
   if 'real_map' in datatypes and 'map_coefficients' in datatypes:
     importlib.import_module('.common', package='iotbx.data_manager')
     mixin_classes.append(
@@ -175,12 +181,14 @@ def DataManager(datatypes=None, phil=None, custom_options=None, logger=None):
     datatypes=datatypes,
     phil=phil,
     custom_options=custom_options,
+    custom_master_phil_str=custom_master_phil_str,
     logger=logger)
 
 # =============================================================================
 class DataManagerBase(object):
 
-  def __init__(self, datatypes=None, phil=None, custom_options=None, logger=None):
+  def __init__(self, datatypes=None, phil=None, custom_options=None,
+               custom_master_phil_str=None, logger=None):
     '''
     Base DataManager class
     '''
@@ -209,7 +217,10 @@ options are {options}.\
     self.load_custom_phil_extract = 'load_%s_phil_extract'
 
     # dynamically construct master PHIL string
-    self.master_phil_str = 'data_manager {\n'
+    self.master_phil_str = '''\
+data_manager
+  .style = noauto
+{'''
     for datatype in self.datatypes:
 
       # check if a datatype has a custom PHIL str
@@ -239,6 +250,16 @@ options are {options}.\
 
     self.master_phil = iotbx.phil.parse(self.master_phil_str, process_includes=True)
 
+    # Add custom PHIL settings
+    if custom_master_phil_str is not None:
+      custom_master_phil = iotbx.phil.parse(custom_master_phil_str, process_includes=True)
+      new_master_phil, unused_phil = self.master_phil.fetch(
+        sources=[custom_master_phil], track_unused_definitions=True)
+      if len(unused_phil) > 0:
+        raise Sorry('There are unrecognized PHIL in your custom DataManager PHIL.')
+      self.master_phil_str = new_master_phil.as_str(expert_level=3, attributes_level=3)
+      self.master_phil = iotbx.phil.parse(self.master_phil_str, process_includes=True)
+
     self._storage = '_%ss'
     self._default = '_default_%s'
     self._current_storage = None
@@ -263,6 +284,9 @@ options are {options}.\
 
     # set program
     self._program = None
+
+    if self.supports('model') and self.supports('miller_array'):
+      self._fmodel_phil_scope = None
 
     # logger (currently used for models)
     self.logger = logger
@@ -351,6 +375,8 @@ options are {options}.\
       phil_extract.data_manager, 'default_output_filename', None)
     self._overwrite = getattr(
       phil_extract.data_manager, 'overwrite', False)
+    if self.supports('model') and self.supports('miller_array'):
+      self.set_fmodel_params(phil_extract)
 
   # ---------------------------------------------------------------------------
   def supports(self, datatype):
@@ -418,7 +444,9 @@ options are {options}.\
     '''
     self._set_datatype(datatype)
     if filename not in self._get_current_storage().keys():
-      raise Sorry('"%s" is not a known %s type.' % (filename, datatype))
+      processed = getattr(self, 'process_%s_file' % datatype)(filename)
+      if filename != processed:
+        raise Sorry('"%s" is not a known %s type.' % (filename, datatype))
     else:
       setattr(self, self._current_default, filename)
 
@@ -431,17 +459,14 @@ options are {options}.\
       else:
         return self._get(datatype, filename=default_filename)
     elif filename not in self._get_current_storage().keys():
-      ok = True
-      try:
-        # try to load file if not already available
-        # use type-specific function call instead of _process_file because
-        # process_model_file is unique
-        # change to _process_file after any_file is updated
-        getattr(self, 'process_%s_file' % datatype)(filename)
+      # try to load file if not already available
+      # use type-specific function call instead of _process_file because
+      # process_model_file is unique
+      # change to _process_file after any_file is updated
+      processed = getattr(self, 'process_%s_file' % datatype)(filename)
+      if processed == filename:
         return self._get_current_storage()[filename]
-      except Sorry:
-        ok = False
-      if not ok:
+      else:
         raise Sorry('"%s" is not a known %s type.' % (filename, datatype))
     else:
       return self._get_current_storage()[filename]
@@ -497,6 +522,7 @@ options are {options}.\
         raise Sorry('%s is not a recognized %s file' % (filename, datatype))
       else:
         self._add(datatype, filename, a.file_object)
+    return filename
 
   def _update_default_output_filename(self, filename):
     '''

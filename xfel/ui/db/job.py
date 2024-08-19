@@ -1,10 +1,10 @@
 from __future__ import absolute_import, division, print_function
 from xfel.ui import settings_dir
-from xfel.ui.db import db_proxy, get_run_path
+from xfel.ui.db import db_proxy, get_run_path, write_xtc_locator, get_image_mode
 import os, shutil, copy
 
-known_job_statuses = ["DONE", "ERR", "PEND", "RUN", "SUSP", "PSUSP", "SSUSP", "UNKWN", "EXIT", "DONE", "ZOMBI", "DELETED", "SUBMIT_FAIL", "SUBMITTED", "HOLD"]
-finished_job_statuses = ["DONE", "EXIT", "DELETED", "UNKWN", "ERR", "SUBMIT_FAIL"]
+known_job_statuses = ["DONE", "ERR", "PEND", "RUN", "SUSP", "PSUSP", "SSUSP", "UNKWN", "EXIT", "DONE", "ZOMBI", "DELETED", "SUBMIT_FAIL", "SUBMITTED", "HOLD", "TIMEOUT"]
+finished_job_statuses = ["DONE", "EXIT", "DELETED", "UNKWN", "ERR", "SUBMIT_FAIL", "TIMEOUT"]
 
 class JobFactory(object):
   @staticmethod
@@ -54,7 +54,7 @@ class Job(db_proxy):
           if self.dataset_id is not None:
             self._dataset_version = self.app.get_job_dataset_version(self.id)
         elif getattr(self, name_id) is not None:
-          setattr(self, _name, getattr(self.app, "get_" + name)(**{name_id:self.trial_id}))
+          setattr(self, _name, getattr(self.app, "get_" + name)(**{name_id:getattr(self, name_id)}))
       return getattr(self, _name)
     elif name == "scope":
       return task_scope[task_types.index(self.type)]
@@ -103,6 +103,84 @@ class Job(db_proxy):
       s += "_task%03d"%self.task.id
     return s
 
+class AveragingJob(Job):
+  def get_identifier_string(self):
+    # Override this function because rungroups are not used for averaging
+    if self.app.params.facility.name == 'lcls':
+      s = "%s_%s_r%04d"% \
+        (self.app.params.facility.lcls.experiment, self.app.params.experiment_tag, int(self.run.run))
+    else:
+      s = "%s_%s"% \
+        (self.app.params.experiment_tag, self.run.run)
+    return s
+
+  def submit(self, previous_job=None):
+    from xfel.command_line.cxi_mpi_submit import Script as submit_script
+    params = copy.deepcopy(self.app.params)
+    params.dispatcher = 'dxtbx.image_average'
+    configs_dir = os.path.join(settings_dir, "cfgs")
+    if not os.path.exists(configs_dir):
+      os.makedirs(configs_dir)
+    identifier_string = self.get_identifier_string()
+
+    # Make an argument list that can be submitted to cxi_mpi_submit.
+    # dxtbx.image_average does not use phil files.
+    extra_args = "-a <output_dir>/avg.cbf -m <output_dir>/max.cbf -s <output_dir>/std.cbf"
+    if self.skip_images > 0:
+      extra_args += f' --skip-images={self.skip_images}'
+    if self.num_images > 0:
+      extra_args += f' --num-images={self.num_images}'
+    self.args = [
+      f'input.run_num = {self.run.run}',
+      'input.dispatcher = dxtbx.image_average',
+      'output.output_dir = {0}'.format(os.path.join(params.output_folder, 'averages')),
+      'output.split_logs = False',
+      'output.add_output_dir_option = False',
+      f'mp.extra_args = {extra_args}',
+      f'mp.method = {params.mp.method}',
+    ]
+    for opt in params.mp.extra_options:
+      self.args.append(f'mp.extra_options = {opt}')
+
+    if params.mp.method != 'local' or (params.mp.method == 'local' and params.facility.name == 'lcls'):
+      mp_args = [
+        f'mp.use_mpi = {params.mp.use_mpi}',
+        f'mp.mpi_command = {params.mp.mpi_command}',
+        f'mp.mpi_option = "--mpi=True"',
+        f'mp.nnodes = {params.mp.nnodes}',
+        f'mp.nproc = {params.mp.nproc}',
+        f'mp.nproc_per_node = {params.mp.nproc_per_node}',
+        f'mp.queue = {params.mp.queue}',
+        f'mp.env_script = {params.mp.env_script[0]}',
+        f'mp.wall_time = {params.mp.wall_time}',
+        f'mp.htcondor.executable_path = {params.mp.htcondor.executable_path}',
+      ]
+      for arg in mp_args:
+        self.args.append(arg)
+    if params.mp.shifter.shifter_image is not None:
+      shifter_args = [
+        f'mp.shifter.nersc_shifter_image = {params.mp.shifter.shifter_image}',
+        f'mp.shifter.sbatch_script_template = {params.mp.shifter.sbatch_script_template}',
+        f'mp.shifter.srun_script_template = {params.mp.shifter.srun_script_template}',
+        f'mp.shifter.nersc_partition = {params.mp.shifter.partition}',
+        f'mp.shifter.nersc_jobname = {params.mp.shifter.jobname}',
+        f'mp.shifter.nersc_project = {params.mp.shifter.project}',
+        f'mp.shifter.nersc_constraint = {params.mp.shifter.constraint}',
+        f'mp.shifter.nersc_reservation = {params.mp.shifter.reservation}',
+        f'mp.shifter.staging = {params.mp.shifter.staging}',
+      ]
+      for arg in shifter_args:
+        self.args.append(arg)
+
+    if params.facility.name == 'lcls':
+      locator_path = os.path.join(configs_dir, identifier_string + ".loc")
+      self.args.append(f'input.locator = {locator_path}')
+      write_xtc_locator(locator_path, params, self.run, self.rungroup)
+    else:
+      self.args.append(self.run.path)
+    result = submit_script().run(self.args)
+    return result
+
 class IndexingJob(Job):
   def get_output_files(self):
     run_path = str(get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run))
@@ -147,14 +225,7 @@ class IndexingJob(Job):
       trial_params = phil_scope.fetch(parse(phil_str)).extract()
 
       image_format = self.rungroup.format
-      mode = "other"
-      if self.app.params.facility.name == 'lcls':
-        if "rayonix" in self.rungroup.detector_address.lower():
-          mode = "rayonix"
-        elif "cspad" in self.rungroup.detector_address.lower():
-          mode = "cspad"
-        elif "jungfrau" in self.rungroup.detector_address.lower():
-          mode = "jungfrau"
+      mode = get_image_mode(self.rungroup)
 
       if hasattr(trial_params, 'format'):
         trial_params.format.file_format = image_format
@@ -275,35 +346,13 @@ class IndexingJob(Job):
 
         if self.app.params.facility.name == 'lcls':
           locator_path = os.path.join(configs_dir, identifier_string + ".loc")
-          locator = open(locator_path, 'w')
-          locator.write("experiment=%s\n"%self.app.params.facility.lcls.experiment) # LCLS specific parameter
-          locator.write("run=%s\n"%self.run.run)
-          locator.write("detector_address=%s\n"%self.rungroup.detector_address)
-          if self.rungroup.wavelength_offset:
-            locator.write("wavelength_offset=%s\n"%self.rungroup.wavelength_offset)
-          if self.rungroup.spectrum_eV_per_pixel:
-            locator.write("spectrum_eV_per_pixel=%s\n"%self.rungroup.spectrum_eV_per_pixel)
-          if self.rungroup.spectrum_eV_offset:
-            locator.write("spectrum_eV_offset=%s\n"%self.rungroup.spectrum_eV_offset)
-          if self.app.params.facility.lcls.use_ffb:
-            locator.write("use_ffb=True\n")
-
+          write_xtc_locator(locator_path, self.app.params, self.run, self.rungroup)
           if mode == 'rayonix':
             from xfel.cxi.cspad_ana import rayonix_tbx
             pixel_size = rayonix_tbx.get_rayonix_pixel_size(self.rungroup.binning)
             extra_scope = parse("geometry { detector { panel { origin = (%f, %f, %f) } } }"%(-self.rungroup.beamx * pixel_size,
                                                                                               self.rungroup.beamy * pixel_size,
                                                                                              -self.rungroup.detz_parameter))
-            locator.write("rayonix.bin_size=%s\n"%self.rungroup.binning)
-          elif mode == 'cspad':
-            locator.write("cspad.detz_offset=%s\n"%self.rungroup.detz_parameter)
-          elif mode == 'jungfrau':
-            locator.write("jungfrau.detz_offset=%s\n"%self.rungroup.detz_parameter)
-
-          if self.rungroup.extra_format_str:
-            locator.write(self.rungroup.extra_format_str)
-
-          locator.close()
           d['locator'] = locator_path
         else:
           d['locator'] = None
@@ -611,14 +660,14 @@ class EnsembleRefinementJob(Job):
     reintegration.integration.lookup.mask={}
     mp.local.include_mp_in_command=False
     """.format(self.app.params.mp.queue if len(self.app.params.mp.queue) > 0 else None,
-               1,#self.app.params.mp.nproc,
+               self.app.params.mp.nnodes_tder or self.app.params.mp.nnodes,
                self.app.params.mp.nproc_per_node,
                self.app.params.mp.method,
                '\n'.join(['mp.env_script={}'.format(p) for p in self.app.params.mp.env_script if p]),
                '\n'.join(['mp.phenix_script={}'.format(p) for p in self.app.params.mp.phenix_script if p]),
                self.app.params.mp.wall_time,
                self.app.params.mp.mpi_command,
-               "\n".join(["extra_options={}".format(opt) for opt in self.app.params.mp.extra_options]),
+               "\n".join(["mp.extra_options={}".format(opt) for opt in self.app.params.mp.extra_options]),
                self.app.params.mp.shifter.submit_command,
                self.app.params.mp.shifter.shifter_image,
                self.app.params.mp.shifter.sbatch_script_template,
@@ -636,7 +685,8 @@ class EnsembleRefinementJob(Job):
                target_phil_path,
                path,
                self.rungroup.untrusted_pixel_mask_path,
-               ).split()
+               ).split('\n')
+    arguments = [arg.strip() for arg in arguments]
 
     try:
       commands = Script(arguments).run()
@@ -803,7 +853,7 @@ class MergingJob(Job):
       params = copy.deepcopy(params)
       params.nnodes = params.nnodes_merge
 
-    return do_submit(command, submit_path, output_path, params, identifier_string)
+    return do_submit(command, submit_path, output_path, params, log_name="log.out", err_name="err.out", job_name=identifier_string)
 
 class PhenixJob(Job):
   def get_global_path(self):
@@ -870,18 +920,19 @@ class PhenixJob(Job):
        params.shifter.srun_script_template = os.path.join( \
          libtbx.env.find_in_repositories("xfel/ui/db/cfgs"), "phenix_srun.sh")
 
-    return do_submit(command, submit_path, output_path, params, identifier_string)
+    return do_submit(command, submit_path, output_path, params, log_name="log.out", err_name="err.out", job_name=identifier_string)
 
 # Support classes and functions for job submission
 
 class _job(object):
   """Used to represent a job that may not have been submitted into the cluster or database yet"""
-  def __init__(self, trial, rungroup, run, task=None, dataset=None):
+  def __init__(self, trial, rungroup, run, task=None, dataset=None, dataset_version=None):
     self.trial = trial
     self.rungroup = rungroup
     self.run = run
     self.task = task
     self.dataset = dataset
+    self.dataset_version = dataset_version
 
   def __str__(self):
     s = "Job: Trial %d, rg %d, run %s"%(self.trial.trial, self.rungroup.id, self.run.run)
@@ -889,12 +940,14 @@ class _job(object):
       s += ", task %d %s"%(self.task.id, self.task.type)
     if self.dataset:
       s += ", dataset %d %s"%(self.dataset.id, self.dataset.name)
+    if self.dataset_version:
+      s += ", dataset_version %d %d"%(self.dataset_version.id, self.dataset_version.version)
     return s
 
   @staticmethod
   def job_hash(job):
     ret = []
-    check = ['trial', 'rungroup', 'run', 'task', 'dataset']
+    check = ['trial', 'rungroup', 'run', 'task', 'dataset', 'dataset_version']
     for subitem_name in check:
       subitem = getattr(job, subitem_name)
       if subitem is None:
@@ -904,13 +957,19 @@ class _job(object):
     return tuple(ret)
 
   def __eq__(self, other):
-    return job_hash(self) == job_hash(other)
+    return _job.job_hash(self) == _job.job_hash(other)
 
 def submit_all_jobs(app):
   submitted_jobs = {_job.job_hash(j):j for j in app.get_all_jobs()}
   if app.params.mp.method == 'local': # only run one job at a time
     for job in submitted_jobs.values():
       if job.status in ['RUN', 'UNKWN', 'SUBMITTED']: return
+
+  if app.params.mp.max_queued is not None:
+    running_jobs = sum([1 for job in submitted_jobs.values() if job.status in ['RUN', 'SUBMITTED', 'PEND']])
+    if running_jobs >= app.params.mp.max_queued:
+      print("Waiting for space in the queue to submit next job")
+      return
 
   runs = app.get_all_runs()
   trials = app.get_all_trials(only_active = True)
@@ -943,6 +1002,12 @@ def submit_all_jobs(app):
 
     if app.params.mp.method == 'local': # only run one job at a time
       return
+
+    if app.params.mp.max_queued is not None:
+      running_jobs += 1
+      if running_jobs >= app.params.mp.max_queued:
+        print("Waiting for space in the queue to submit next job")
+        return
 
   datasets = app.get_all_datasets()
   for dataset_idx, dataset in enumerate(datasets):
@@ -997,10 +1062,13 @@ def submit_all_jobs(app):
             print ("Task %s waiting on job %d (%s) for trial %d, rungroup %d, run %s, task %d" % \
               (next_task.type, submitted_job.id, submitted_job.status, trial.trial, rungroup.id, run.run, next_task.id))
             break
-          if submitted_job.status not in ["DONE", "EXIT"]:
-            print ("Task %s cannot start due to unexpected status for job %d (%s) for trial %d, rungroup %d, run %s, task %d" % \
-              (next_task.type, submitted_job.id, submitted_job.status, trial.trial, rungroup.id, run.run, next_task.id))
+          if submitted_job.status not in ["DONE"]:
+            if submitted_job.status != "EXIT":
+              print ("Task %s cannot start due to unexpected status for job %d (%s) for trial %d, rungroup %d, run %s, task %d" % \
+                (next_task.type, submitted_job.id, submitted_job.status, trial.trial, rungroup.id, run.run, next_task.id))
             break
+          if submitted_job.status in ("SUBMIT_FAIL", "DELETED", "UNKWN") and job.task and job.task.type == "ensemble_refinement":
+            break # XXX need a better way to indicate that a job has failed and shouldn't go through the pipeline due to no data
           submit_next_task = True
           previous_job = submitted_job
           continue
@@ -1026,6 +1094,11 @@ def submit_all_jobs(app):
 
         if app.params.mp.method == 'local': # only run one job at a time
           return
+        if app.params.mp.max_queued is not None:
+          running_jobs += 1
+          if running_jobs >= app.params.mp.max_queued:
+            print("Waiting for space in the queue to submit next job")
+            return
         break # job submitted so don't look for more in this run for this dataset
 
     versions = dataset.versions
@@ -1039,9 +1112,9 @@ def submit_all_jobs(app):
       prev_task = tasks[task_idx-1]
       if prev_task.scope == 'global':
         # Submit a job for this task for any versions where it has not been
-        prev_j = _job(None, None, None, prev_task, dataset)
-        test_j = _job(None, None, None, task, dataset)
         for version in versions:
+          prev_j = _job(None, None, None, prev_task, dataset, version)
+          test_j = _job(None, None, None, task, dataset, version)
           prev_job = this_job = None
           for j in version.jobs:
             if prev_j == j:
@@ -1069,6 +1142,11 @@ def submit_all_jobs(app):
 
             if app.params.mp.method == 'local': # only run one job at a time
               return
+            if app.params.mp.max_queued is not None:
+              running_jobs += 1
+              if running_jobs >= app.params.mp.max_queued:
+                print("Waiting for space in the queue to submit next job")
+                return
 
       key = dataset_idx, task_idx
       if key not in global_tasks: continue # no jobs ready yet
@@ -1077,7 +1155,7 @@ def submit_all_jobs(app):
       if latest_version is None:
         next_version = 0
       else:
-        latest_version_local_jobs = [j.id for j in latest_version.jobs if j.task.scope == 'local']
+        latest_version_local_jobs = [j.id for j in latest_version.jobs if j.task and j.task.scope == 'local']
         new_jobs = [j for j in global_tasks[key] if j.id not in latest_version_local_jobs]
         if new_jobs:
           next_version = latest_version.version + 1
@@ -1103,3 +1181,8 @@ def submit_all_jobs(app):
 
         if app.params.mp.method == 'local': # only run one job at a time
           return
+        if app.params.mp.max_queued is not None:
+          running_jobs += 1
+          if running_jobs >= app.params.mp.max_queued:
+            print("Waiting for space in the queue to submit next job")
+            return

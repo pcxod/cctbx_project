@@ -192,7 +192,10 @@ class detached_process_server(detached_base):
         elif hasattr(e, "reset_module"):
           e.reset_module()
         traceback_str = "\n".join(traceback.format_tb(sys.exc_info()[2]))
-        self.callback_error(e, traceback_str)
+        try:
+          self.callback_error(e, traceback_str)
+        except Exception as ee:
+          self.callback_error(str(e), traceback_str)
     else :
       #time.sleep(1)
       self.callback_final(return_value)
@@ -260,14 +263,20 @@ class detached_process_server(detached_base):
     if data.accumulate :
       self._accumulated_callbacks.append(data)
       self.wait_for_lock_to_vanish()
-      touch_file(self.info_lock)
-      easy_pickle.dump(self.info_file, self._accumulated_callbacks)
-      os.remove(self.info_lock)
+      try:
+        touch_file(self.info_lock)
+        easy_pickle.dump(self.info_file, self._accumulated_callbacks)
+        os.remove(self.info_lock)
+      except Exception as e:
+        pass # failed, can happen if user deletes directory
     else :
       self.wait_for_lock_to_vanish()
-      touch_file(self.state_lock)
-      easy_pickle.dump(self.state_file, data)
-      os.remove(self.state_lock)
+      try:
+        touch_file(self.state_lock)
+        easy_pickle.dump(self.state_file, data)
+        os.remove(self.state_lock)
+      except Exception as e:
+        pass # failed, can happen if user deletes directory
 
   def cleanup(self):
     self._stdout.flush()
@@ -333,12 +342,12 @@ class detached_process_client(detached_base):
       self.callback_abort()
     elif os.path.exists(self.result_file):
       max_retries = 5
+      error_text = None
       for retry in range(max_retries):
         try:
           result = easy_pickle.load(self.result_file)
         except Exception:
-          print("Error trying to load result file '%s' on attempt %d." %
-            (self.result_file, retry+1))
+          pass
         else:
           time.sleep(1)
           self.check_stdout()

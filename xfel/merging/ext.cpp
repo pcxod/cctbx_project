@@ -1,3 +1,4 @@
+#include <memory>
 #include <cctbx/boost_python/flex_fwd.h>
 #include <boost/python/module.hpp>
 #include <boost/python/class.hpp>
@@ -107,7 +108,8 @@ namespace sx_merging {
     dials::af::reflection_table::key_type key;
     const std::map<std::string, size_t> chunk_lookup;
     const std::vector<dials::af::reflection_table> tables;
-    dials::af::shared<std::string> expt_ids;
+    dials::af::shared<int> expt_ids;
+    std::shared_ptr<dials::af::reflection_table::experiment_map_type> expt_map;
 
     experiment_id_splitter_visitor(dials::af::reflection_table &src_,
                                    dials::af::reflection_table::key_type key_,
@@ -115,7 +117,8 @@ namespace sx_merging {
                                    const std::vector<dials::af::reflection_table> &tables_)
 
         : src(src_), key(key_), chunk_lookup(chunk_lookup_), tables(tables_) {
-          expt_ids = src.get<std::string>("exp_id");
+          expt_ids = src.get<int>("id");
+          expt_map = src.experiment_identifiers();
         }
 
     template <typename U>
@@ -128,8 +131,11 @@ namespace sx_merging {
         all_columns.push_back(col);
       }
 
+      typedef dials::af::reflection_table::experiment_map_type::const_iterator const_iterator;
       for (size_t i = 0; i < src.size(); ++i) {
-        std::string experiment_id = expt_ids[i];
+        const_iterator found = expt_map->find(expt_ids[i]);
+        DIALS_ASSERT(found != expt_map->end());
+        std::string experiment_id = found->second;
         std::map<std::string, size_t>::const_iterator it = chunk_lookup.find(experiment_id);
         DIALS_ASSERT(it != chunk_lookup.end());
         size_t table_idx = it->second;
@@ -333,25 +339,19 @@ namespace sx_merging {
             int ik = i_row + (n_lattices * k);
             int jk = j_col + (n_lattices * kk);
 
-            /*
-             * Note: As of dials commit 1cd5afe42, the wij matrix is still
-             * populated even if n_obs < n_obs_min. We will match that behavior
-             * here.
-             * */
-            if (weights_ == "count") {
-              wij_row.push_back(ik);
-              wij_col.push_back(jk);
-              wij_data.push_back(n_obs);
-              if (i_row != j_col) {
-                wij_row.push_back(jk);
-                wij_col.push_back(ik);
-                wij_data.push_back(n_obs);
-              }
-            }
-
             if (n_obs==-1 || corr_coeff == -1. || n_obs < n_obs_min_)
               continue;
             else {
+              if (weights_ == "count") {
+                wij_row.push_back(ik);
+                wij_col.push_back(jk);
+                wij_data.push_back(n_obs);
+                if (i_row != j_col) {
+                  wij_row.push_back(jk);
+                  wij_col.push_back(ik);
+                  wij_data.push_back(n_obs);
+                }
+              }
               rij_row.push_back(ik);
               rij_col.push_back(jk);
               rij_data.push_back(corr_coeff);

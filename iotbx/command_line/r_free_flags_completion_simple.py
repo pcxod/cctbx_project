@@ -14,15 +14,15 @@ def usage():
   Example: %s your.mtz 2.0
 """ % (libtbx.env.dispatcher_name, libtbx.env.dispatcher_name))
 
-def run(args):
+def run(args, output_file_name = None, log = sys.stdout):
   if (len(args) == 0 or "--help" in args or "-h" in args):
     usage()
   refl_file_name = None
   refl_file = None
   high_res = None
   for arg in args:
-    if (op.isfile(arg)):
-      refl_file_name = arg
+    if (op.isfile(str(arg))):
+      refl_file_name = str(arg)
       refl_file = iotbx.reflection_file_reader.any_reflection_file(
         file_name=refl_file_name)
       if (refl_file.file_type() is None):
@@ -48,41 +48,48 @@ def run(args):
     test_flag_value=None,
     disable_suitability_test=False,
     parameter_scope="r_free_flags")
-  print("Summary of existing R-free-flags:")
+  print("Summary of existing R-free-flags:", file = log)
   r_free_flags.show_comprehensive_summary(prefix="  ")
-  print()
-  print("Test flag value:", test_flag_value)
-  print()
+  print(file = log)
+  print("Test flag value:", test_flag_value, file = log)
+  print(file = log)
   assert r_free_flags.unit_cell() is not None
   assert r_free_flags.space_group_info() is not None
   assert r_free_flags.data().size() != 0
   r_free_flags = r_free_flags.array(data=r_free_flags.data()==test_flag_value)
   fraction_free = r_free_flags.data().count(True) / r_free_flags.data().size()
-  print("Fraction free: %.2f %%" % (fraction_free*100))
+  print("Fraction free: %.2f %%" % (fraction_free*100),file = log)
   assert fraction_free > 0
-  print()
+  print(file = log)
   missing_set = r_free_flags.complete_set(d_min=high_res).lone_set(
     r_free_flags.map_to_asu())
-  print("Number of missing R-free-flags:", missing_set.indices().size())
-  print()
-  missing_flags = missing_set.generate_r_free_flags(
-    fraction=fraction_free,
-    max_free=None,
-    use_lattice_symmetry=True)
-  extended_r_free_flags = r_free_flags.concatenate(other=missing_flags)
-  print("Summary of extended R-free-flags:")
-  extended_r_free_flags.show_comprehensive_summary(prefix="  ")
-  print()
+  print("Number of missing R-free-flags:", missing_set.indices().size(),
+     file = log)
+  print(file = log)
+  if missing_set.indices().size() == 0:
+    print("No missing r_free flags...skipping missing set generation\n",
+      file = log)
+    extended_r_free_flags = r_free_flags
+  else: # usual
+    missing_flags = missing_set.generate_r_free_flags(
+      fraction=fraction_free,
+      max_free=None,
+      use_lattice_symmetry=True)
+    extended_r_free_flags = r_free_flags.concatenate(other=missing_flags)
+    print("Summary of extended R-free-flags:",file = log)
+    extended_r_free_flags.show_comprehensive_summary(prefix="  ")
+    print(file = log)
   mtz_dataset = extended_r_free_flags.as_mtz_dataset(
     column_root_label="Extended-R-free-flags")
-  output_file_name = op.basename(refl_file_name)
-  i = output_file_name.rfind(".")
-  if (i >= 0):
-    output_file_name = output_file_name[:i] + "_" + output_file_name[i+1:]
-  output_file_name += "_extended_r_free_flags.mtz"
-  print("Writing file: %s" % show_string(output_file_name))
+  if not output_file_name:
+    output_file_name = op.basename(refl_file_name)
+    i = output_file_name.rfind(".")
+    if (i >= 0):
+      output_file_name = output_file_name[:i] + "_" + output_file_name[i+1:]
+    output_file_name += "_extended_r_free_flags.mtz"
+  print("Writing file: %s" % show_string(output_file_name),file = log)
   mtz_dataset.mtz_object().write(file_name=output_file_name)
-  print()
+  print(file = log)
   print("""\
 Miscellaneous remarks:
 
@@ -102,7 +109,7 @@ Miscellaneous remarks:
 
   - phenix.reflection_file_converter can be used to combine reflection
     data from another file with the extended R-free-flags.
-""" % show_string(output_file_name))
+""" % show_string(output_file_name),file = log)
 
 if (__name__ == "__main__"):
   run(args=sys.argv[1:])

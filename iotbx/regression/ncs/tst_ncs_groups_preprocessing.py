@@ -36,7 +36,6 @@ class TestNcsGroupPreprocessing(unittest.TestCase):
     if not os.path.isdir(self.tempdir):
       os.mkdir(self.tempdir)
     os.chdir(self.tempdir)
-    # self.pdb_obj = pdb.hierarchy.input(pdb_string=test_pdb_ncs_spec)
     self.pdb_inp = pdb.input(source_info=None, lines=test_pdb_ncs_spec)
     self.ph = self.pdb_inp.construct_hierarchy()
     self.pdb_inp = pdb.input(source_info=None, lines=test_pdb_ncs_spec)
@@ -407,7 +406,7 @@ TER
 '''
 
 
-test_ncs_spec = '''\
+test_ncs_spec = r'''\
 
 Summary of NCS information
 Fri Jun 13 13:18:12 2014

@@ -270,6 +270,7 @@ class ncs_aware_refinement(object):
             use_bounds     = 2,
             lower_bound    = lower,
             upper_bound    = upper,
+            max_iterations = 100,
             initial_values = x).run()
           b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
           model.set_b_iso(values = b_isos)
@@ -288,9 +289,10 @@ class ncs_aware_refinement(object):
                 break
               rw = rw*2
               flipped = True
-          if(log is not None):
-            print("r_work: %6.4f rms_B_bonded: %4.2f restraints_weight: %6.4f"%(
-              fmodel.r_work(), rms_b, rw), file=log)
+            if(log is not None):
+              print(
+                "r_work: %6.4f rms_B_bonded: %4.2f restraints_weight: %6.4f"%(
+                fmodel.r_work(), rms_b, rw), file=log)
           if(rms_b_prev is None): break
       else:
         for it in range(1,2):
@@ -303,6 +305,7 @@ class ncs_aware_refinement(object):
             use_bounds     = 2,
             lower_bound    = lower,
             upper_bound    = upper,
+            max_iterations = 100,
             initial_values = x).run()
           b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
           model.set_b_iso(values = b_isos)

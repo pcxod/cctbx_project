@@ -9,10 +9,10 @@ namespace detail {
 
   struct cmp_atom_labels_functor
   {
-    const small_str<19>* labels;
+    std::vector<std::string> const& labels;
 
     cmp_atom_labels_functor(
-      const small_str<19>* labels_)
+      std::vector<std::string> const& labels_)
     :
       labels(labels_)
     {}
@@ -22,7 +22,7 @@ namespace detail {
       unsigned i,
       unsigned j) const
     {
-      return (std::memcmp(labels[i].elems, labels[j].elems, 19U) < 0);
+      return (labels[i] < labels[j]);
     }
   };
 
@@ -39,7 +39,7 @@ namespace detail {
     af::shared<af::shared<atom> >& duplicate_atom_labels,
     hierarchy::model const& model,
     unsigned model_atoms_size,
-    const small_str<19>* model_atom_labels)
+    std::vector<std::string> const& model_atom_labels)
   {
     if (model_atoms_size == 0) return 0;
     boost::scoped_array<unsigned> indices(new unsigned[model_atoms_size]);
@@ -55,9 +55,7 @@ namespace detail {
     unsigned j_start = 0;
     for(unsigned j=1;j<model_atoms_size+1U;j++) {
       if (j != model_atoms_size) {
-        if (std::memcmp(
-              model_atom_labels[indices[j_start]].elems,
-              model_atom_labels[indices[j      ]].elems, 19U) == 0) continue;
+        if (model_atom_labels[indices[j_start]] == model_atom_labels[indices[j]]) continue;
       }
       if (j_start+1U == j) {
         j_start++;
@@ -125,8 +123,7 @@ namespace detail {
       model_ids[model.data->id]++;
       std::map<std::string, unsigned> model_chain_ids;
       unsigned model_atoms_size = model.atoms_size();
-      boost::scoped_array<small_str<19> > model_atom_labels(
-        new small_str<19>[model_atoms_size]);
+      std::vector<std::string > model_atom_labels;
       unsigned i_model_atom = 0;
       unsigned n_ch = model.chains_size();
       n_chains += n_ch;
@@ -135,7 +132,7 @@ namespace detail {
         if (chain.residue_groups_size() == 0) n_empty_chains += 1;
         model_chain_ids[chain.data->id]++;
         chain_ids[chain.data->id]++;
-        std::set<char> chain_altlocs;
+        std::set<std::string> chain_altlocs;
         boost::optional<residue_group> chain_alt_conf_proper;
         boost::optional<residue_group> chain_alt_conf_improper;
         bool suppress_chain_break = true;
@@ -150,19 +147,19 @@ namespace detail {
           suppress_chain_break = false;
           bool have_main_conf = false;
           bool have_blank_altloc = false;
-          std::set<char> rg_altlocs;
-          std::set<str3> rg_resnames;
-          std::map<char, std::vector<str3> > altloc_resnames;
+          std::set<std::string> rg_altlocs;
+          std::set<std::string> rg_resnames;
+          std::map<std::string, std::vector<std::string> > altloc_resnames;
           unsigned n_ag = rg.atom_groups_size();
           for(unsigned i_ag=0;i_ag<n_ag;i_ag++) {
             atom_group const& ag = rg.atom_groups()[i_ag];
             if (ag.atoms_size() == 0) n_empty_atom_groups++;
-            char altloc = ag.data->altloc.elems[0];
-            if (altloc == '\0') {
+            std::string altloc = ag.data->altloc;
+            if (altloc == "") {
               have_main_conf = true;
             }
             else {
-              if (altloc == blank_altloc_char) {
+              if (altloc == blank_altloc_string) {
                 have_blank_altloc = true;
               }
               rg_altlocs.insert(altloc);
@@ -173,20 +170,20 @@ namespace detail {
             for(unsigned i_at=0;i_at<n_ats;i_at++) {
               hierarchy::atom const& atom = ag.atoms()[i_at];
               if (atom.uij_is_defined()) n_anisou++;
-              model_atom_labels[i_model_atom++] =
-                atom.pdb_label_columns_segid_small_str();
+              model_atom_labels.push_back(atom.pdb_label_columns_segid_small_str());
+              i_model_atom++;
               element_charge_types[atom.pdb_element_charge_columns()]++;
             }
           }
           {
-            typedef std::set<str3>::const_iterator it;
+            typedef std::set<std::string>::const_iterator it;
             it i_end = rg_resnames.end();
             for(it i=rg_resnames.begin();i!=i_end;i++) {
-              resnames[std::string((*i).elems)]++;
+              resnames[std::string((*i).c_str())]++;
             }
           }
           {
-            typedef std::map<char, std::vector<str3> >::const_iterator it;
+            typedef std::map<std::string, std::vector<std::string> >::const_iterator it;
             it i_end = altloc_resnames.end();
             for(it i=altloc_resnames.begin();i!=i_end;i++) {
               if (i->second.size() != 1U) {
@@ -194,6 +191,13 @@ namespace detail {
                   .push_back(rg);
               }
             }
+            // This should do the same as above, C++11 way.
+            // for (auto i: altloc_resnames) {
+            //   if (i->second.size() != 1U) {
+            //     residue_groups_with_multiple_resnames_using_same_altloc
+            //       .push_back(rg);
+            //   }
+            // }
           }
           if (have_blank_altloc) {
             n_alt_conf_improper++;
@@ -229,10 +233,10 @@ namespace detail {
           prev_rg = boost::optional<residue_group>(rg);
         }
         {
-          typedef std::set<char>::const_iterator it;
+          typedef std::set<std::string>::const_iterator it;
           it i_end = chain_altlocs.end();
           for(it i=chain_altlocs.begin();i!=i_end;i++) {
-            alt_conf_ids[std::string(&*i, 1U)]++;
+            alt_conf_ids[*i]++;
             n_alt_conf++;
           }
         }
@@ -264,7 +268,7 @@ namespace detail {
         duplicate_atom_labels,
         model,
         model_atoms_size,
-        model_atom_labels.get());
+        model_atom_labels);
     }
     {
       typedef std::map<std::string, unsigned>::const_iterator it;

@@ -49,6 +49,7 @@ standard_file_extensions = {
   'txt'  : ["txt", "log", "html", "geo"],
   'mtz'  : ["mtz"],
   'aln'  : ["aln", "ali", "clustal"],
+  'a3m'  : ["a3m"],
   'hhr'  : ["hhr"],
   'ncs'  : ["ncs","ncs_spec"],
   'img'  : ["img", "osc", "mccd", "cbf", "nxs", "h5", "hdf5"],
@@ -73,6 +74,7 @@ standard_file_descriptions = {
   'txt'  : "Text",
   'mtz'  : "Reflections (MTZ)",
   'aln'  : "Sequence alignment",
+  'a3m'  : "MSA (a3m)",
   'hhr'  : "HHpred alignment",
   'ncs'  : "NCS information file",
   'img'  : "Detector image",
@@ -83,15 +85,24 @@ standard_file_descriptions = {
 }
 
 supported_file_types = ["pdb","hkl","cif","pkl","ncs","seq","phil",
-  "aln", "txt", "xplor_map", "ccp4_map"]
+  "aln", "a3m", "txt", "xplor_map", "ccp4_map"]
 
 binary_types = ["hkl","ccp4_map","img","pkl"]
-ascii_types = ["hkl","xplor_map","pdb","cif","phil","hhr", "ncs", "aln",
+ascii_types = ["hkl","xplor_map","pdb","cif","phil","hhr", "ncs", "aln", "a3m",
    "seq", "xml", "txt"]
+
+# Try files with these extensions only with their associated file types
+extensions_absolutely_defining_type = ['ccp4','mrc']
 
 def get_wildcard_string(format):
   assert (format in standard_file_extensions), format
   wildcards = [ "*.%s" % ext for ext in standard_file_extensions[format] ]
+  # Add wildcard without breaking other features by having cif in two places
+  if format == 'pdb':
+    cif_format = "*.%s" % "cif"
+    if not cif_format in wildcards:
+      wildcards.append(cif_format)
+
   wildcard_str = "%s file (%s)|%s" % (standard_file_descriptions[format],
     ", ".join(wildcards), ";".join(wildcards))
   return wildcard_str
@@ -177,6 +188,8 @@ def sort_by_file_type(file_names, sort_order=None):
 def any_file(file_name,
               get_processed_file=False,
               valid_types=supported_file_types,
+              extensions_absolutely_defining_type=
+                  extensions_absolutely_defining_type,
               allow_directories=False,
               force_type=None,
               input_class=None,
@@ -196,12 +209,25 @@ def any_file(file_name,
     with force_type)
   :param raise_sorry_if_not_expected_format: raise a Sorry exception if the
     file extension does not match the parsed file type
+  :param extensions_absolutely_defining_type: if the file has one of these
+    extensions, only try the associated file type
   :returns: any_file_input object, or an instance of the input_class param
   """
   file_name_raw = file_name
   file_name = strip_shelx_format_extension(file_name)
   if (file_name != file_name_raw) and (force_type is None):
     force_type = "hkl"
+  # See if extension is in extensions_absolutely_defining_type
+  _, ext = os.path.splitext(file_name_raw)
+  ext = ext[1:]  # remove . in .ccp4
+  if (force_type is None) and extensions_absolutely_defining_type and (
+      ext in extensions_absolutely_defining_type):
+    for ft in supported_file_types:
+      if ext in standard_file_extensions[ft]:
+        force_type = ft
+        break
+    assert force_type is not None
+
   if not os.path.exists(file_name):
     raise Sorry("Couldn't find the file %s" % file_name)
   elif os.path.isdir(file_name):
@@ -376,20 +402,34 @@ class any_file_input(object):
       self._file_object = cif_file
       self._file_type = "hkl"
     else:
-      from iotbx.pdb.mmcif import cif_input
-      from iotbx.pdb.hierarchy import input_hierarchy_pair
-      try:
-        cif_in = cif_input(file_name=self.file_name)
-        self._file_object = input_hierarchy_pair(cif_in, cif_in.hierarchy)
-        self._file_type = "pdb"
-      except Exception as e:
-        if (str(e).startswith("Space group is incompatible") or
-            str(e).startswith("The space group") ):
-          raise
-        else:
-          self._file_object = iotbx.cif.reader(file_path=self.file_name,
-            strict=False)
-          self._file_type = "cif"
+      # Try to read as simple cif model file.  If it fails, use the
+      #  input_hierarchy_pair reader as previously (totally unknown
+      #  function or reason for this reader. See:
+      #    modules/cctbx_project/iotbx/pdb/hierarchy.py
+      try :
+        pdb_inp = iotbx.pdb.hierarchy.input(self.file_name)
+        if len(pdb_inp.input.atoms()) > 0:
+          self._file_object = pdb_inp
+          self._file_type = "pdb"
+      except Exception as e :
+        pass
+      if not self._file_object:
+        from iotbx.pdb.mmcif import cif_input
+        from iotbx.pdb.hierarchy import input_hierarchy_pair
+        try:
+          cif_in = cif_input(file_name=self.file_name)
+          pdb_inp = input_hierarchy_pair(cif_in, cif_in.hierarchy)
+          self._file_object  = pdb_inp
+          self._file_type = "pdb"
+        except Exception as e:
+          if (str(e).startswith("Space group is incompatible") or
+              str(e).startswith("The space group") ):
+            raise
+          else:
+            pdb_inp = iotbx.cif.reader(file_path=self.file_name,
+              strict=False)
+            self._file_type = "cif"
+            self._file_object = pdb_inp
 
   def _try_as_phil(self):
     from iotbx.phil import parse as parse_phil
@@ -435,6 +475,12 @@ class any_file_input(object):
     assert (not hh_object.query in ["", None])
     self._file_object = hh_object
     self._file_type = "hhr"
+
+  def _try_as_a3m(self):
+    from iotbx.bioinformatics import any_a3m_file
+    a3m_object = any_a3m_file(self.file_name)
+    self._file_object = a3m_object
+    self._file_type = "a3m"
 
   def _try_as_aln(self):
     from iotbx.bioinformatics import any_alignment_file

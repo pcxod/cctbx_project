@@ -47,6 +47,7 @@ tst_list = [
   "$D/eltbx/tests/tst_attenuation_coefficient.py",
   "$D/maptbx/boost_python/tst_maptbx.py",
   "$D/maptbx/tst_bcr.py",
+  "$D/maptbx/tst_loft.py",
   "$D/dmtbx/boost_python/tst_dmtbx.py",
   "$D/translation_search/boost_python/tst_translation_search.py",
   "$D/geometry_restraints/tst_ext.py",
@@ -155,6 +156,17 @@ tst_list = [
    "$D/regression/tst_prepare_map_for_docking.py",
    "$D/regression/tst_wavelength_units.py",
   ]
+
+try:
+  import torch # test import
+except ImportError:
+  pass
+else:
+  tst_list.extend([
+    "$D/dispersion/tests/tst_kramers_kronig_helper.py",
+    "$D/dispersion/tests/tst_kramers_kronig_optimize.py",
+    "$D/dispersion/tests/tst_kramers_kronig.py",
+    ])
 
 tst_list_expected_unstable = [
   "$D/regression/tst_fcalc_fft_stability.py",
