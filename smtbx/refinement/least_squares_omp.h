@@ -159,7 +159,9 @@ struct accumulate_reflection_chunk_omp {
             FloatType observable = twp.process(
               refl_i, *(f_calc_threads[thread]), gradient);
             // Fc correction
-            FloatType fc_k = fc_crs[thread]->compute(h, observable, compute_grad);
+            FloatType fc_k = fc_crs[thread]->compute(
+              reflections.has_wavelengths() ? reflections.wavelength(i_h) : 0,
+              h, observable, compute_grad);
             if (fc_k != 1) {
               observable *= fc_k;
               f_calc[refl_i] *= std::sqrt(fc_k);

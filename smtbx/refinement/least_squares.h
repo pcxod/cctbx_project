@@ -483,7 +483,9 @@ namespace smtbx { namespace refinement { namespace least_squares {
               FloatType observable = twp.process(
                 i_h, f_calc_function, gradients);
               // Fc correction
-              FloatType fc_k = fc_cr->compute(h, observable, compute_grad);
+              FloatType fc_k = fc_cr->compute(
+                reflections.has_wavelengths() ? reflections.wavelength(i_h) : 0,
+                h, observable, compute_grad);
               if (fc_k != 1) {
                 observable *= fc_k;
                 f_calc[i_h] *= std::sqrt(fc_k);

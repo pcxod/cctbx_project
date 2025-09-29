@@ -98,7 +98,7 @@ namespace least_squares {
     complex_t calc_one_h(miller::index<> const& h) const {
       f_calc_function.compute(h, boost::none, 0, false);
       complex_t fc = f_calc_function.get_f_calc();
-      FloatType fc_k = fc_cr.compute(h, f_calc_function.get_observable(), false);
+      FloatType fc_k = fc_cr.compute(0, h, f_calc_function.get_observable(), false);
       if (fc_k != 1) {
         fc *= std::sqrt(fc_k);
       }
