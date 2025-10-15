@@ -11,8 +11,8 @@ from cctbx import crystal
 from mmtbx.refinement import adp_refinement
 from cctbx import adp_restraints
 from libtbx import group_args
-from mmtbx.ncs import tncs
 from libtbx.str_utils import format_value
+import scitbx.minimizers
 
 import boost_adaptbx.boost.python as bp
 cctbx_maptbx_ext = bp.import_ext("cctbx_maptbx_ext")
@@ -75,7 +75,11 @@ def get_plain_pair_sym_table(crystal_symmetry, sites_frac, plain_pairs_radius=5)
   return pair_asu_table.extract_pair_sym_table()
 
 class tg(object):
-  def __init__(self, fmodel, x, restraints_weight):
+  def __init__(self, fmodel, x, restraints_weight, bound_flags,
+               lower_bound, upper_bound):
+    self.bound_flags = bound_flags
+    self.lower_bound = lower_bound
+    self.upper_bound = upper_bound
     self.restraints_weight = restraints_weight
     self.fmodel = fmodel
     self.plain_pair_sym_table = None
@@ -153,14 +157,16 @@ class tg(object):
 
 class ncs_aware_refinement(object):
   def __init__(self, map_model_manager, d_min, atom_radius, nproc=1,
-               log = None, individual = True, restraints_weight = 1):
-    self.mmm         = map_model_manager
-    self.nproc       = nproc
-    self.d_min       = d_min
-    self.atom_radius = atom_radius
-    self.log         = log
-    self.individual  = individual
+               log = None, individual = True, restraints_weight = 1,
+               group_mode = None):
+    self.mmm               = map_model_manager
+    self.nproc             = nproc
+    self.d_min             = d_min
+    self.atom_radius       = atom_radius
+    self.log               = log
+    self.individual        = individual
     self.restraints_weight = restraints_weight
+    self.group_mode        = group_mode
     #
     ncs_groups = self.mmm.model().get_ncs_groups()
     if(ncs_groups is None or len(ncs_groups)==0):
@@ -220,33 +226,43 @@ class ncs_aware_refinement(object):
     ph_box = model.get_hierarchy()
     ph_box.atoms().reset_i_seq()
     group_adp_sel = []
-    for rg in ph_box.residue_groups():
-      group_adp_sel.append(rg.atoms().extract_i_seq())
-    #
-    b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
-    if(flex.max(b_isos)<1.e-2):
-      b_isos = flex.random_double(model.size())*10
+    if(self.group_mode=="one_per_residue"):
+      for rg in ph_box.residue_groups():
+        group_adp_sel.append(rg.atoms().extract_i_seq())
+    elif(self.group_mode=="one_per_chain"):
+      for chain in ph_box.chains():
+        group_adp_sel.append(chain.atoms().extract_i_seq())
+    elif(self.group_mode=="two_per_residue"):
+      group_adp_sel = \
+        mmtbx.refinement.utils.two_group_selections_per_residue(model)
+    else:
+      assert self.group_mode is None
+    if self.group_mode is not None:
+      #
+      b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
+      if(flex.max(b_isos)<1.e-2):
+        b_isos = flex.random_double(model.size())*10
+        model.set_b_iso(values = b_isos)
+        fmodel.xray_structure.set_b_iso(values = b_isos)
+        fmodel.update_xray_structure(xray_structure = fmodel.xray_structure,
+          update_f_calc = True)
+      #
+      number_of_macro_cycles = 5
+      if(self.individual): number_of_macro_cycles = 1
+      group_b_manager = mmtbx.refinement.group.manager(
+        fmodel                   = fmodel,
+        selections               = group_adp_sel,
+        convergence_test         = False,
+        max_number_of_iterations = 50,
+        number_of_macro_cycles   = number_of_macro_cycles,
+        run_finite_differences_test = False,
+        use_restraints           = True,
+        refine_adp               = True,
+        log                      = log)
+      fmodel.update_all_scales(update_f_part1=False, apply_back_trace=True,
+        remove_outliers=False)
+      b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
       model.set_b_iso(values = b_isos)
-      fmodel.xray_structure.set_b_iso(values = b_isos)
-      fmodel.update_xray_structure(xray_structure = fmodel.xray_structure,
-        update_f_calc = True)
-    #
-    number_of_macro_cycles = 3
-    if(self.individual): number_of_macro_cycles = 1
-    group_b_manager = mmtbx.refinement.group.manager(
-      fmodel                   = fmodel,
-      selections               = group_adp_sel,
-      convergence_test         = False,
-      max_number_of_iterations = 50,
-      number_of_macro_cycles   = number_of_macro_cycles,
-      run_finite_differences_test = False,
-      use_restraints           = True,
-      refine_adp               = True,
-      log                      = log)
-    fmodel.update_all_scales(update_f_part1=False, apply_back_trace=True,
-      remove_outliers=False)
-    b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
-    model.set_b_iso(values = b_isos)
     #
     if(self.individual):
       if(log is not None):
@@ -261,17 +277,17 @@ class ncs_aware_refinement(object):
           lower = flex.double(x.size(), 0)
           upper = flex.double(x.size(), flex.max(x)*2)
           calculator = tg(
-            fmodel = fmodel, x = x, restraints_weight = rw)
+            fmodel            = fmodel,
+            x                 = x,
+            restraints_weight = rw,
+            bound_flags       = flex.int(x.size(), 2),
+            lower_bound       = lower,
+            upper_bound       = upper)
           rw_prev = rw
           b_isos_prev = b_isos
           rms_b_prev = model.rms_b_iso_or_b_equiv()
-          m = tncs.minimizer(
-            potential      = calculator,
-            use_bounds     = 2,
-            lower_bound    = lower,
-            upper_bound    = upper,
-            max_iterations = 100,
-            initial_values = x).run()
+          m = scitbx.minimizers.lbfgs(
+            mode='lbfgsb', max_iterations=100, calculator=calculator)
           b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
           model.set_b_iso(values = b_isos)
           if(rms_b_prev is not None):
@@ -297,16 +313,19 @@ class ncs_aware_refinement(object):
       else:
         for it in range(1,2):
           x = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
+          ma = min(999,flex.max(x)*2)
+          if ma<1: ma = 100
           lower = flex.double(x.size(), 0)
-          upper = flex.double(x.size(), flex.max(x)*2)
-          calculator = tg(fmodel = fmodel, x = x, restraints_weight = None)
-          m = tncs.minimizer(
-            potential      = calculator,
-            use_bounds     = 2,
-            lower_bound    = lower,
-            upper_bound    = upper,
-            max_iterations = 100,
-            initial_values = x).run()
+          upper = flex.double(x.size(), ma )
+          calculator = tg(
+            fmodel            = fmodel,
+            x                 = x,
+            restraints_weight = None,
+            bound_flags       = flex.int(x.size(), 2),
+            lower_bound       = lower,
+            upper_bound       = upper)
+          m = scitbx.minimizers.lbfgs(
+            mode='lbfgsb', max_iterations=100, calculator=calculator)
           b_isos = fmodel.xray_structure.extract_u_iso_or_u_equiv()*adptbx.u_as_b(1.)
           model.set_b_iso(values = b_isos)
           if(log is not None):

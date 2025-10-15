@@ -1,3 +1,4 @@
+"""Tools for map analysis and manipulation"""
 from __future__ import absolute_import, division, print_function
 import cctbx.sgtbx
 
@@ -51,6 +52,12 @@ class _():
 
 def smooth_map(map, crystal_symmetry, rad_smooth, method = "exp",
      non_negative = True):
+  """Smooth a map with radius rad_smooth, using one of these
+   methods:  "exp" (Gaussian smoothing), "box_average" (local box average),
+   "top_hat" (Top-hat smoothing, spherical average done in reciprocal
+   space)
+  """
+
   from cctbx import miller
   assert method in ["exp", "box_average", "top_hat"]
   map_smooth = None
@@ -1497,14 +1504,29 @@ Fourier image of specified resolution, etc.
                  d_min,
                  radius_max,
                  radius_step,
-                 mxp=5, epsc=0.001, kpres=0 # BCR params
+                 mxp,
+                 epsc,
+                 epsp  = 0.000,
+                 edist = 1.0E-13,
+                 kpres = 1,
+                 kprot = 112,
                  ):
     b_iso = 0 # Must always be 0! All image vals below are for b_iso=0 !!!
     from cctbx.maptbx.bcr import bcr
     im = self.image(
       d_min=d_min, b_iso=0, radius_max=radius_max, radius_step=radius_step)
-    bpeak, cpeak, rpeak, _,_,_ = bcr.get_BCR(
-      dens=im.image_values, dist=im.radii, mxp=mxp, epsc=epsc, kpres=kpres)
+    bpeak, cpeak, rpeak, _,_,_,_ = bcr.get_BCR(
+      dens  = im.image_values,
+      dist  = im.radii,
+      dmax  = radius_max,
+      mxp   = mxp,
+      epsc  = epsc,
+      epsp  = epsp,
+      edist = edist,
+      kpres = kpres,
+      kprot = kprot,
+      )
+    #
     bcr_approx_values = flex.double()
     # FILTER
     bpeak_, cpeak_, rpeak_ = [],[],[]
@@ -1658,8 +1680,7 @@ def sharpen2(map, xray_structure, resolution, file_name_prefix):
   #
   fc = fo.structure_factors_from_scatterers(
     xray_structure = xray_structure).f_calc()
-  d_fsc_model = fc.d_min_from_fsc(
-        other = fo, bin_width = 100, fsc_cutoff = 0.).d_min
+  d_fsc_model = fc.d_min_from_fsc(other = fo, fsc_cutoff = 0.).d_min
   print("d_fsc_model:", d_fsc_model)
   #resolution = min(resolution, d_fsc_model)
   #resolution = d_fsc_model
@@ -1795,8 +1816,7 @@ def loc_res(map_model_manager,
     if(method == "d99"):
       d_min = d99(f_map=fo).result.d99
     elif(method == "fsc"):
-      d_min = fc.d_min_from_fsc(other = fo, bin_width = 100,
-        fsc_cutoff = fsc_cutoff).d_min
+      d_min = fc.d_min_from_fsc(other = fo, fsc_cutoff = fsc_cutoff).d_min
     elif(method == "rscc"):
       d_min, cc = cc_complex_complex(
         f_1        = fo.data(),
@@ -2206,32 +2226,71 @@ def is_periodic(map_data,
     else:
         return None # Really do not know
 
-def map_values_along_line_connecting_two_points(map_data, points_cart, step,
-      unit_cell, interpolation):
+def map_values_along_line_connecting_two_points(map_data, points_cart,
+      unit_cell, interpolation, step=None, n_steps=None):
   """
   Calculate interpolated map values along the line connecting two points in
   space.
   """
   assert interpolation in ["eight_point", "tricubic"]
+  assert [step, n_steps].count(None)==1
   points_frac = unit_cell.fractionalize(points_cart)
   dist = unit_cell.distance(points_frac[0], points_frac[1])
-  assert step<dist, "step cannot be greater than the distance between two points"
   #
-  alp = 0
+  def get_points(start, end, step=None, n_steps=None):
+    assert [step, n_steps].count(None)==1
+    dx = end[0] - start[0]
+    dy = end[1] - start[1]
+    dz = end[2] - start[2]
+    direction = (dx, dy, dz)
+    length = math.sqrt(direction[0]**2 + direction[1]**2 + direction[2]**2)
+    direction_unit = (direction[0] / length, direction[1] / length, direction[2] / length)
+    if n_steps is None:
+      n_steps = int(max(abs(dx), abs(dy), abs(dz), length) / step)
+    if step is None:
+      step = length/n_steps
+    points = []
+    for i in range(n_steps + 1):
+      point = (
+        start[0] + i * step * direction_unit[0],
+        start[1] + i * step * direction_unit[1],
+        start[2] + i * step * direction_unit[2])
+      points.append(point)
+    # check end point
+    end_ = points[-1]
+    d = math.sqrt(
+      (end_[0] - start[0])**2 +
+      (end_[1] - start[1])**2 +
+      (end_[2] - start[2])**2)
+    if d<length: points.append(end)
+    #
+    return points
+  #
+  points = get_points(start=points_cart[0], end=points_cart[1], step=step,
+    n_steps=n_steps)
+
   dist = flex.double()
   vals = flex.double()
-  while alp <= 1.0+1.e-6:
-    x1,y1,z1 = points_cart[0]
-    x2,y2,z2 = points_cart[1]
-    xp = x1+alp*(x2-x1)
-    yp = y1+alp*(y2-y1)
-    zp = z1+alp*(z2-z1)
-    dist.append(alp)
+  mv_max = None
+  point_max = None
+  for p in points:
+    xp = p[0]
+    yp = p[1]
+    zp = p[2]
+    rp = unit_cell.fractionalize([xp,yp,zp])
+    d = unit_cell.distance(points_frac[0], rp)
+    dist.append(d)
     pf = unit_cell.fractionalize([xp,yp,zp])
     if(interpolation=="eight_point"):
       mv = map_data.eight_point_interpolation(pf)
     else:
       mv = map_data.tricubic_interpolation(pf)
+    if mv_max is None:
+      mv_max = mv
+      point_max = p[:]
+    else:
+      if mv > mv_max:
+        mv_max = mv
+        point_max = p[:]
     vals.append(mv)
-    alp += step
-  return group_args(dist = dist, vals = vals)
+  return group_args(dist = dist, vals = vals, point_max = point_max)

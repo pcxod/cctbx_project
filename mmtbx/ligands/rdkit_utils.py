@@ -18,6 +18,10 @@ Functions:
   match_mol_indices: Match atom indices of different mols
 """
 
+def get_prop_safe(rd_obj, prop):
+  if prop not in rd_obj.GetPropNames(): return False
+  return rd_obj.GetProp(prop)
+
 def get_cc_cartesian_coordinates(cc_cif, label='pdbx_model_Cartn_x_ideal', ignore_question_mark=False):
   rc = []
   for i, (code, monomer) in enumerate(cc_cif.items()):
@@ -36,7 +40,7 @@ def get_cc_cartesian_coordinates(cc_cif, label='pdbx_model_Cartn_x_ideal', ignor
                )
       rc.append(xyz)
       if not ignore_question_mark and '?' in xyz[-1]: return None
-  print(rc)
+  # print(rc)
   return rc
 
 def read_chemical_component_filename(filename):
@@ -72,13 +76,11 @@ def read_chemical_component_filename(filename):
     # if atom is None: continue
     conformer = Chem.Conformer(atom.n_rows())
     for j, tmp in enumerate(atom.iterrows()):
-      #print(tmp)
       new = Chem.Atom(tmp.get('_chem_comp_atom.type_symbol').capitalize())
       new.SetFormalCharge(int(tmp.get('_chem_comp_atom.charge')))
       for prop in ['atom_id', 'type_symbol']:
         new.SetProp(prop, tmp.get('_chem_comp_atom.%s' % prop, '?'))
       rdatom = rwmol.AddAtom(new)
-      print(xyzs[j])
       if xyzs[j][0] in ['?']:
         pass
       else:
@@ -94,7 +96,6 @@ def read_chemical_component_filename(filename):
         atom2 = lookup.get(atom2)
         order = tmp.get('_chem_comp_bond.value_order')
         order = bond_order_ccd[order]
-        #print('---')
         rwmol.AddBond(atom1, atom2, order)
   rwmol.AddConformer(conformer)
   # Chem.SanitizeMol(rwmol)
@@ -113,6 +114,18 @@ def read_chemical_component_filename(filename):
 #  print(dir(molecule.GetPropNames()))
 #  print(molecule.GetPropsAsDict())
   # print(dir(rwmol))
+  return molecule
+
+def get_molecule_from_resname(resname):
+  import os
+  from mmtbx.chemical_components import get_cif_filename
+  filename = get_cif_filename(resname)
+  if not os.path.exists(filename): return None
+  try:
+    molecule = read_chemical_component_filename(filename)
+  except Exception as e:
+    print(e)
+    return None
   return molecule
 
 def mol_from_chemical_component(code):
@@ -314,6 +327,52 @@ def match_mol_indices(mol_list):
   smarts_mol = Chem.MolFromSmarts(mcs_SMARTS.smartsString)
   match_list = [x.GetSubstructMatch(smarts_mol) for x in mol_list]
   return list(zip(*match_list))
+
+def is_amino_acid(molecule):
+  atom_names = ['N', 'CA', 'C', 'O']
+  bond_names = [['CA', 'N'],
+                ['C', 'O'],
+                ['C', 'CA'],
+               ]
+  acount=0
+  for atom in molecule.GetAtoms():
+    if get_prop_safe(atom, 'atom_id') in atom_names:
+      acount+=1
+  bcount=0
+  for bond in molecule.GetBonds():
+    names = [get_prop_safe(bond.GetBeginAtom(), 'atom_id'),
+             get_prop_safe(bond.GetEndAtom(), 'atom_id'),
+            ]
+    names.sort()
+    if names in bond_names:
+      bcount+=1
+  if acount==4 and bcount==3:
+    return True
+  return False
+
+def is_nucleic_acid(molecule):
+  atom_names = ['P', "'O5'", 'OP1', 'OP2',
+                "O3'", "C3'"]
+  bond_names = [["O5'", 'P'],
+                ['OP1', 'P'],
+                ['OP2', 'P'],
+                ["C3'", "O3'"],
+               ]
+  acount=0
+  for atom in molecule.GetAtoms():
+    if get_prop_safe(atom, 'atom_id') in atom_names:
+      acount+=1
+  bcount=0
+  for bond in molecule.GetBonds():
+    names = [get_prop_safe(bond.GetBeginAtom(), 'atom_id'),
+             get_prop_safe(bond.GetEndAtom(), 'atom_id'),
+            ]
+    names.sort()
+    if names in bond_names:
+      bcount+=1
+  if acount==5 and bcount==4:
+    return True
+  return False
 
 if __name__ == '__main__':
   import sys

@@ -768,12 +768,37 @@ class amber_library_module(SourceModule):
                'https://github.com/phenix-project/amber_library.git',
                ]
 
+class aimnet2calc_module(SourceModule):
+  module = 'aimnet2calc'
+  anonymous = ['git',
+               'git@github.com:zubatyuk/aimnet2calc.git',
+               'https://github.com/zubatyuk/aimnet2calc.git',
+               ]
+
 class qrefine_module(SourceModule):
   module = 'qrefine'
   anonymous = ['git',
                'git@github.com:qrefine/qrefine.git',
                'https://github.com/qrefine/qrefine.git',
                ]
+
+class pydiscamb_module(SourceModule):
+  module = 'pyDiSCaMB'
+  anonymous = ['git',
+               'git@github.com:viljarjf/pyDiSCaMB.git',
+               'https://github.com/viljarjf/pyDiSCaMB.git',
+               ]
+
+class molstar_adaptbx(SourceModule):
+  module = 'molstar_adaptbx'
+  anonymous = ['git',
+               'https://github.com/phenix-project/molstar_adaptbx.git']
+
+class molstar_module(SourceModule):
+  module = 'molstar'
+  anonymous = ['git',
+               '-b v4.11.0',
+               'https://github.com/molstar/molstar.git']
 
 class mon_lib_module(SourceModule):
   module = 'mon_lib'
@@ -798,9 +823,9 @@ class boost_module(SourceModule):
 class cbflib_module(SourceModule):
   module = 'cbflib'
   anonymous = ['git',
-               'git@github.com:yayahjb/cbflib.git',
-               'https://github.com/yayahjb/cbflib.git',
-               'https://github.com/yayahjb/cbflib/archive/main.zip']
+               'git@github.com:dials/cbflib.git',
+               'https://github.com/dials/cbflib.git',
+               'https://github.com/dials/cbflib/archive/main.zip']
 
 class ccp4io_adaptbx(SourceModule):
   module = 'ccp4io_adaptbx'
@@ -931,6 +956,12 @@ class phenix_pathwalker_module(SourceModule):
   module = 'phenix_pathwalker'
   anonymous = ['git', 'git@github.com:phenix-project/phenix_pathwalker.git']
 
+class alphafold_module(SourceModule):
+  module = 'alphafold'
+  anonymous = ['git',
+               'git@github.com:google-deepmind/alphafold.git',
+               'https://github.com/google-deepmind/alphafold.git']
+
 # Phaser repositories
 class phaser_module(SourceModule):
   module = 'phaser'
@@ -1002,7 +1033,6 @@ class iota_module(SourceModule):
 class msgpack_module(SourceModule):
   module = 'msgpack'
   anonymous = ['curl', [
-    "https://gitcdn.link/repo/dials/dependencies/dials-1.13/msgpack-3.1.1.tar.gz",
     "https://github.com/dials/dependencies/raw/dials-1.13/msgpack-3.1.1.tar.gz",
   ]]
 
@@ -1590,6 +1620,11 @@ class Builder(object):
         command=['git', 'branch', '--set-upstream-to=origin/dials-2.2', 'dials-2.2'],
         workdir=workdir))
 
+    # pick a specific commit for cbflib
+    if module == 'cbflib':
+      self.add_step(self.shell(command=['git', 'checkout', 'a9f39aff00580bb24d6dacb9ffa1bd2df1dedc31'],
+                               workdir=['modules', 'cbflib']))
+
   def _check_for_Windows_prerequisites(self):
     if self.isPlatformWindows():
       # platform specific checks cannot run on buildbot master so add to build steps to run on slaves
@@ -1981,6 +2016,8 @@ class CCIBuilder(Builder):
     'clipper',
     'eigen',
     'reduce',
+    'ksdssp',
+    'ncdist',
   ]
   CODEBASES_EXTRA = []
   # Copy these sources from cci.lbl.gov
@@ -2002,6 +2039,7 @@ class CCIBuilder(Builder):
     'smtbx',
     'gltbx',
     'wxtbx',
+    'ksdssp',
   ]
   LIBTBX_EXTRA = []
 
@@ -2022,7 +2060,7 @@ class MOLPROBITYBuilder(Builder):
   ]
   CODEBASES_EXTRA = [
     'molprobity',
-    #'chem_data', #chem_data removed from molprobity builder until accessible outside cci, -CJW
+    'chem_data',
     'reduce',
     'probe'
   ]
@@ -2136,7 +2174,16 @@ class PhaserTNGBuilder(PhaserBuilder):
 
   def get_libtbx_configure(self):
     configlst = super(PhaserTNGBuilder, self).get_libtbx_configure()
-    configlst.append('--enable_cxx11')
+    if '--enable_cxx11' in configlst:
+      configlst.remove('--enable_cxx11')
+    set_std = ['cxxstd' in conf for conf in configlst]
+    if set_std.count(True) == 0:
+      if platform.mac_ver()[-1] == 'arm64':
+        configlst.append('--cxxstd=c++14')
+      else:
+        configlst.append('--cxxstd=c++11')
+    if not self.isPlatformMacOSX():
+      configlst.append("--enable_openmp_if_possible=True")
     return configlst
 
   def get_codebases(self):
@@ -2261,9 +2308,8 @@ class DIALSBuilder(CCIBuilder):
 
   def get_libtbx_configure(self):
     configlst = super(DIALSBuilder, self).get_libtbx_configure()
-    if self.python != "27":
-      # Do not enable C++11 for Python 2.7 builds, cf. https://github.com/cctbx/cctbx_project/pull/497
-      configlst.append('--enable_cxx11')
+    if '--enable_cxx11' in configlst: configlst.remove('--enable_cxx11')
+    configlst.append('--cxxstd=c++14')
     return configlst
 
 class LABELITBuilder(CCIBuilder):
@@ -2339,6 +2385,8 @@ class XFELBuilder(CCIBuilder):
     configlst = super(XFELBuilder, self).get_libtbx_configure()
     if '--enable_cxx11' in configlst: configlst.remove('--enable_cxx11')
     configlst.append('--cxxstd=c++14')
+    if not self.isPlatformMacOSX():
+      configlst.append("--enable_openmp_if_possible=True")
     return configlst
 
   def add_tests(self):
@@ -2368,8 +2416,8 @@ class PhenixBuilder(CCIBuilder):
     'elbow',
     'amber_adaptbx',
     'amber_library',
-    'ksdssp',
     'pulchra',
+    'qrefine',
     'solve_resolve',
     'reel',
     'gui_resources',
@@ -2395,6 +2443,7 @@ class PhenixBuilder(CCIBuilder):
     'phenix_examples',
     'phenix_pathwalker',
     'Colabs',
+    'qrefine',
     'solve_resolve',
     'reel',
     'phaser',
@@ -2419,7 +2468,10 @@ class PhenixBuilder(CCIBuilder):
     super(PhenixBuilder, self)._add_git(module, parameters, destination)
     if module == 'boost':
       workdir = ['modules', module]
-      self.add_step(self.shell(command=['git', 'checkout', '1.74'], workdir=workdir))
+      if self.category == 'phenix_discamb':
+        self.add_step(self.shell(command=['git', 'checkout', '1.86'], workdir=workdir))
+      else:
+        self.add_step(self.shell(command=['git', 'checkout', '1.74'], workdir=workdir))
     elif (module == 'dials' or module == 'dxtbx' or module == 'xia2') and self.python3:
       workdir = ['modules', module]
       if module == 'dxtbx':
@@ -2565,6 +2617,37 @@ in your path. """)
         run_dials_tests=False
     if run_dials_tests:
       self.add_test_parallel('dials', flunkOnFailure=False, warnOnFailure=True)
+
+class PhenixDiscambBuilder(PhenixBuilder):
+  CODEBASES_EXTRA = PhenixBuilder.CODEBASES_EXTRA + ['pyDiSCaMB']
+
+  def get_libtbx_configure(self):
+    configlst = super(PhenixDiscambBuilder, self).get_libtbx_configure()
+    # switch to C++14 for new environments
+    if '--cxxstd=c++14' not in configlst:
+      configlst.append('--cxxstd=c++14')
+    return configlst
+
+  def add_make(self):
+    super(PhenixDiscambBuilder, self).add_make()
+    # install pyDiSCaMB
+    python = os.path.normpath(os.path.join(os.getcwd(), 'build', self.python_base))
+    self.add_step(self.shell(
+      command=[python, '-m', 'pip', 'install', '.'],
+        workdir=['modules', 'pyDiSCaMB'],
+        description='pip installing pyDiSCaMB',
+      ))
+
+class PhenixMolstarBuilder(PhenixBuilder):
+  CODEBASES_EXTRA = PhenixBuilder.CODEBASES_EXTRA + ['molstar','molstar_adaptbx']
+  def add_make(self):
+    super(PhenixMolstarBuilder, self).add_make()
+    python = os.path.normpath(os.path.join(os.getcwd(), 'build', self.python_base))
+    self.add_step(self.shell(
+      command=[python, "install_molstar.py"],
+        workdir=['modules', 'molstar_adaptbx',"command_line"],
+        description='molstar adaptbx install script',
+      ))
 
 class PhenixExternalRegression(PhenixBuilder):
   EXTERNAL_CODEBASES = [
@@ -2747,7 +2830,7 @@ class QRBuilder(PhenixBuilder):
     # XXX Do not get JPype1 as it fails. This makes QR work only with
     # XXX fast_interaction=True (=False won't work)
     #
-    pip_installs = ['ase', 'pymongo']
+    pip_installs = ['ase==3.22.1',]
     instructions = []
     # versioning
     cmd = [os.path.join('..', self.python_base),
@@ -2836,7 +2919,10 @@ def set_builder_defaults(options):
       # restore default for CentOS 7
       if sys.platform.startswith('linux') and '.el7.' in platform.platform():
         options.no_boost_src = False
-  if options.builder == 'phenix_voyager' or options.builder == 'phenix' \
+  if options.builder == 'phenix' \
+    or options.builder == 'phenix_discamb' \
+    or options.builder == 'phenix_molstar' \
+    or options.builder == 'phenix_voyager' \
     or options.builder == 'molprobity':
     # Apple Silicon uses Boost 1.78 in environment, Python 3.9
     if platform.mac_ver()[-1] == 'arm64':
@@ -2848,6 +2934,8 @@ def set_builder_defaults(options):
         options.no_boost_src = False
     if options.use_conda is None:
       options.use_conda = ''
+    if options.builder == 'phenix_discamb':
+      options.python = '39'
 
   return options
 
@@ -2856,6 +2944,8 @@ def run(root=None):
     'cctbxlite': CCTBXLiteBuilder,
     'cctbx': CCTBXBuilder,
     'phenix': PhenixBuilder,
+    'phenix_discamb': PhenixDiscambBuilder,
+    'phenix_molstar': PhenixMolstarBuilder,
     'phenix_voyager': PhenixBuilder,
     'phenix_release': PhenixReleaseBuilder,
     'xfellegacy': XFELLegacyBuilder,
@@ -2972,7 +3062,7 @@ def run(root=None):
   python_args = parser.add_mutually_exclusive_group(required=False)
   python_args.add_argument('--python',
                     default='37', type=str, nargs='?', const='37',
-                    choices=['27', '37', '38', '39', '310'],
+                    choices=['27', '37', '38', '39', '310', '311', '312', '313'],
                     help="""When set, a specific Python version of the
 conda environment will be used. This only affects environments selected with
 the --builder flag. For non-conda dependencies, any Python 3 implies

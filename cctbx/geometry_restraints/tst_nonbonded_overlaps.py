@@ -636,6 +636,10 @@ class test_nonbonded_overlaps(unittest.TestCase):
     '''
     Test that working correctly when atom is removed
     '''
+    if 0:
+      f=open('raw_records3.pdb', 'w')
+      f.write(raw_records3)
+      del f
     outstring = '{0} , expected {1:.2f}, actual {2:.2f}'
     params = mmtbx.model.manager.get_default_pdb_interpretation_params()
     params.pdb_interpretation.allow_polymer_cross_special_position=True
@@ -677,11 +681,13 @@ class test_nonbonded_overlaps(unittest.TestCase):
     Test overlaps when adding and moving scatterers
     Test water scatterers with and without labels
     '''
+    params = mmtbx.model.manager.get_default_pdb_interpretation_params()
+    params.pdb_interpretation.allow_polymer_cross_special_position=True
     pdb_inp = iotbx.pdb.input(lines=raw_records3.split('\n'), source_info=None)
     model = mmtbx.model.manager(
       model_input = pdb_inp,
       log         = null_out())
-    model.process(make_restraints=True)
+    model.process(pdb_interpretation_params=params, make_restraints=True)
     outstring = '{0} , expected {1:.2f}, actual {2:.2f}'
     geometry = model.get_restraints_manager().geometry
     xrs = model.get_xray_structure()

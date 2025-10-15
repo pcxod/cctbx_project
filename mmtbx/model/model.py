@@ -36,7 +36,7 @@ import mmtbx.monomer_library.server
 from mmtbx.geometry_restraints.torsion_restraints.utils import check_for_internal_chain_ter_records
 import mmtbx.tls.tools as tls_tools
 from mmtbx import ias
-
+from collections import defaultdict
 
 from mmtbx.ncs.ncs_utils import apply_transforms
 from mmtbx.command_line import find_tls_groups
@@ -80,6 +80,9 @@ import sys
 import math
 
 from mmtbx.monomer_library import pdb_interpretation
+
+from cctbx import geometry_restraints
+from cctbx.geometry_restraints.linking_class import linking_class
 
 time_model_show = 0.0
 
@@ -479,15 +482,16 @@ class manager(object):
       result.append(dbest)
     return result
 
+  def get_scattering_table(self):
+    return self.get_xray_structure().get_scattering_table()
+
   def get_xray_structure(self):
     if(self._xray_structure is None):
       cs = self.crystal_symmetry()
-      assert cs is not None
-      assert cs.unit_cell() is not None
-      assert cs.space_group() is not None
+      if cs is None or cs.unit_cell() is None or cs.space_group() is None:
+        return None
       self._xray_structure = self.get_hierarchy().extract_xray_structure(
         crystal_symmetry = cs)
-      cs = self.crystal_symmetry()
     return self._xray_structure
 
   def set_sites_cart(self, sites_cart, selection=None):
@@ -680,7 +684,10 @@ class manager(object):
   #  params.pdb_interpretation.nonbonded_weight = value
   #  self.set_pdb_interpretation_params(params = params)
 
-  def check_consistency(self):
+  def check_consistency(self, stop_on_errors = True, print_errors = True,
+        absolute_angle_tolerance = None,
+        absolute_length_tolerance = None,
+        shift_tol = None):
     """
     Primarilly for debugging
     """
@@ -895,7 +902,7 @@ class manager(object):
       Set the unit_cell_crystal_symmetry (original crystal symmetry)
 
       Only used to reset original crystal symmetry of model
-      Requires that there is no shift_cart for this model in
+      Requires that there is no shift_cart for this model
     '''
     assert crystal_symmetry is not None
 
@@ -906,18 +913,43 @@ class manager(object):
 
     self._unit_cell_crystal_symmetry = crystal_symmetry
 
-  def set_crystal_symmetry(self, crystal_symmetry):
+  def set_crystal_symmetry(self, crystal_symmetry,
+     unit_cell_crystal_symmetry = None):
     '''
-      Set the crystal_symmetry, keeping sites_cart the same
+      Set the crystal_symmetry, keeping sites_cart the same.
 
-      NOTE: Normally instead use
-        shift_model_and_set_crystal_symmetry(shift_cart=shift_cart) and
-      shift_model_back() to shift the coordinates of the model.
+      Optionally set unit_cell_crystal_symmetry as well.
+      Setting unit_cell_crystal_symmetry requires that shift_cart is None.
+
+      Uses:
+       1. You can set crystal_symmetry (the working symmetry) for the
+       model, keeping unit_cell_crystal_symmetry (the original symmetry before
+       any boxing) the same.  This is what is used in boxing a model and map.
+
+       2. You can set both crystal_symmetry and unit_cell_crystal_symmetry.
+       This is what you would use if you are creating a new model.
+
+      NOTE 1: If you set crystal_symmetry but not unit_cell_crystal_symmetry,
+      the current value of unit_cell_crystal_symmetry will remain. Be sure
+      that is what you intend.
+
+      NOTE 2: When a model is written out, the symmetry written is normally
+      the unit_cell_crystal_symmetry, so be sure this is set appropriately.
+
+      NOTE 3: If your goal is to shift the coordinates of a model, normally
+      instead use shift_model_and_set_crystal_symmetry(shift_cart=shift_cart)
+      along with shift_model_back().
+
+      NOTE 4: If this model is part of a map_model_manager, normally
+      use that manager to make changes in symmetry, because otherwise your
+      maps and this model will be out of sync.
 
       Uses set_crystal_symmetry_and_sites_cart because sites_cart have to
       be replaced in either case.
     '''
     self.set_crystal_symmetry_and_sites_cart(crystal_symmetry,None)
+    if unit_cell_crystal_symmetry:
+      self.set_unit_cell_crystal_symmetry(unit_cell_crystal_symmetry)
 
   def set_crystal_symmetry_and_sites_cart(self, crystal_symmetry, sites_cart):
 
@@ -1024,6 +1056,10 @@ class manager(object):
       return None
 
   def shifted(self, eps=1.e-3):
+    ''' Return True if this model has been shifted from its original
+     location (e.g., by boxing a map and this model).
+    '''
+
     r = self.shift_cart()
     if(r is None): return False
     if(flex.max(flex.abs(flex.double(r)))<=eps): return False
@@ -1073,7 +1109,7 @@ class manager(object):
     return self.refinement_flags
 
   def get_number_of_atoms(self):
-    return self.get_hierarchy().atoms().size()
+    return self.get_hierarchy().atoms_size()
 
   def size(self):
     return self.get_number_of_atoms()
@@ -1090,10 +1126,17 @@ class manager(object):
     return self._site_symmetry_table
 
   def altlocs_present(self):
-    conformer_indices = \
-      self.get_hierarchy().get_conformer_indices().conformer_indices
-    if(len(list(set(list(conformer_indices))))>1):
-      result = True
+    return self.get_hierarchy().altlocs_present()
+
+  def altlocs_present_only_hd(self):
+    """ True when model has H/D exchangeable sites and does not have
+    other alternative conformations. False otherwise.
+    """
+    noh_selection = self.selection("not (element H or element D)")
+    hierarchy_no_hd = self.get_hierarchy().select(noh_selection)
+    altlocs = hierarchy_no_hd.altlocs_present()
+    hd = self.get_hierarchy().exchangeable_hd_selections()
+    if not altlocs and len(hd)>0: return True
     return False
 
   def aa_residues_with_bound_sidechains(self):
@@ -1551,12 +1594,30 @@ class manager(object):
         crystal_symmetry=self.crystal_symmetry())
 
   def _figure_out_cs_to_output(self, do_not_shift_back, output_cs):
+    """Decide what crystal_symmetry to output.
+
+     This is non-trivial and a little confusing because the model may
+     have a unit_cell_crystal_symmetry (the original crystal_symmetry before
+     any boxing), and it may have a crystal_symmetry (the working
+     crystal_symmetry for the model that matches the coordinates.)
+
+     The basic rule is:  write out the unit_cell_crystal_symmetry.
+
+     However, if output_cs False, return None.
+     Also, if do_not_shift_back is True, return self.crystal_symmetry()
+
+     In a special case (unit_cell_crystal_symmetry = None), the model has
+     not had unit_cell_crystal_symmetry set, so write out crystal_symmetry
+     instead. (Note: this used to be chosen by self._shift_cart == None)
+
+    """
+
     if not output_cs:
       return None
     if do_not_shift_back:
       return self._crystal_symmetry
     else:
-      if self._shift_cart is not None:
+      if (self.unit_cell_crystal_symmetry() is not None):
         return self.unit_cell_crystal_symmetry()
       else:
         return self.crystal_symmetry()
@@ -1700,7 +1761,7 @@ class manager(object):
 
   def as_pdb_or_mmcif_string(self,
        target_format = None,
-       segid_as_auth_segid = True,
+       segid_as_auth_segid = False,
        remark_section = None,
        **kw):
     '''
@@ -1710,7 +1771,7 @@ class manager(object):
 
      Method to allow shifting from general writing as pdb to
      writing as mmcif, with the change in two places (here and model.py)
-     Use default of segid_as_auth_segid=True here (different than
+     Use default of segid_as_auth_segid=False here (same as in
        as_mmcif_string())
      :param target_format: desired output format, pdb or mmcif
      :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
@@ -1732,7 +1793,7 @@ class manager(object):
   def pdb_or_mmcif_string_info(self,
       target_filename = None,
       target_format = None,
-      segid_as_auth_segid = True,
+      segid_as_auth_segid = False,
       write_file = False,
       data_manager = None,
       overwrite = True,
@@ -1746,7 +1807,7 @@ class manager(object):
 
     #  If you need a pdb string, normally use as_pdb_or_mmcif_string
     #   instead of this general function
-    #  Note default of segid_as_auth_segid = True, different from
+    #  Note default of segid_as_auth_segid = False, same as in
     #     as_mmcif_string()
 
     if target_format in ['None',None]:  # set the default format here
@@ -1764,7 +1825,8 @@ class manager(object):
           segid_as_auth_segid = segid_as_auth_segid,**kw)
         is_mmcif = True
     else:
-      pdb_str = self.model_as_mmcif(segid_as_auth_segid = segid_as_auth_segid,**kw)
+      pdb_str = self.model_as_mmcif(
+          segid_as_auth_segid = segid_as_auth_segid,**kw)
       is_mmcif = True
     if target_filename:
       import os
@@ -2036,7 +2098,7 @@ class manager(object):
     # Reason: contents of model and _model_input can get out of sync any time.
     self._model_input = None
     self._processed_pdb_file = None
-    # Order of calling this matetrs!
+    # Order of calling this matters!
     self.link_records_in_pdb_format = link_record_output(acp)
 
   def has_atoms_in_special_positions(self, selection, log=None):
@@ -2062,8 +2124,13 @@ class manager(object):
     return self._has_hd
 
   def _update_has_hd(self):
-    sctr_keys = self.get_xray_structure().scattering_type_registry().type_count_dict()
-    self._has_hd = "H" in sctr_keys or "D" in sctr_keys
+    if self.get_xray_structure() is not None:
+      sctr_keys = self.get_xray_structure(
+        ).scattering_type_registry().type_count_dict()
+      self._has_hd = "H" in sctr_keys or "D" in sctr_keys
+    else:
+      sel = self.selection(string="element H or element D")
+      self._has_hd = sel.count(True)>0
     if not self._has_hd:
       self.unset_riding_h_manager()
     if self._has_hd:
@@ -2141,11 +2208,18 @@ class manager(object):
     if hasattr(params, 'amber') and params.amber.use_amber:
       from amber_adaptbx.manager import digester
       geometry = digester(geometry, params, log=self.log)
-    elif quantum_interface.is_quantum_interface_active(params):
-      geometry = quantum_interface.digester(self,
-                                            geometry,
-                                            params,
-                                            log=self.log)
+    elif rc:=quantum_interface.is_quantum_interface_active(params):
+      if rc[1]=='qm_restraints':
+        geometry = quantum_interface.digester(self,
+                                              geometry,
+                                              params,
+                                              log=self.log)
+      elif rc[1]=='qm_gradients':
+        from mmtbx.geometry_restraints import qm_manager
+        geometry = qm_manager.digester( self,
+                                        geometry,
+                                        params,
+                                        log=self.log)
     elif hasattr(params, "schrodinger") and params.schrodinger.use_schrodinger:
       from phenix_schrodinger import schrodinger_manager
       geometry = schrodinger_manager(self._pdb_hierarchy,
@@ -2409,6 +2483,82 @@ class manager(object):
     ion_radii = e.lib_atom[type_energy].ion_radius
     return ion_radii
 
+  def restrain_selection_to_self_or_neighbors(self, selection_string,
+        radius=3.5):
+    """
+    Anchor selected by selection_string atoms to others via H bond or else.
+    """
+    assert type(selection_string) == str
+    selection = self.selection(string = selection_string)
+    grm = self.get_restraints_manager().geometry
+    h_to_restrain = self.get_hierarchy().select(selection)
+    atoms = self.get_hierarchy().atoms()
+    elements = atoms.extract_element()
+    pairs = self.pairs_within(radius=radius, as_dict=True)
+    origin_ids = linking_class()
+    get_class = iotbx.pdb.common_residue_names_get_class
+    #
+    def _find_pair(i_seq, clash_dist=2.0):
+      dist_min = 1.e9
+      best_interaction = None
+      try: interactions = pairs[i_seq]
+      except KeyError: pass
+      for interaction in interactions:
+        j, symmat, d = interaction
+        if symmat.as_xyz() != "x,y,z": continue
+        if selection[j]: continue
+        e = elements[j].strip().upper()
+        if e in ["C","H","D"]: continue
+        if d < dist_min and d > clash_dist:
+          dist_min = d
+          best_interaction = interaction[:]
+      return best_interaction
+    #
+    def _bonded(l2, s1): return any((a in s1) ^ (b in s1) for a, b in l2)
+    #
+    bond_proxies,_=grm.get_all_bond_proxies(sites_cart = self.get_sites_cart())
+    bond_pairs = [[p.i_seqs[0], p.i_seqs[1]] for p in bond_proxies]
+    proxies = []
+    rcp_selection = []
+    for ag in h_to_restrain.atom_groups():
+      class_name = get_class(name = ag.resname)
+      if class_name in ["common_water", "common_element"]:
+        if _bonded(l2=bond_pairs, s1=set(ag.atoms().extract_i_seq())):
+          continue
+        for atom in ag.atoms():
+          if atom.element_is_hydrogen(): continue
+          interaction = _find_pair(atom.i_seq)
+          if interaction is not None:
+            i,j, dist = atom.i_seq, interaction[0], interaction[-1]
+            assert i != j
+            # print(f'restraining {i}, {j}')
+            proxy = geometry_restraints.bond_simple_proxy(
+              i_seqs         = (i,j),
+              distance_ideal = dist,
+              weight         = 1./(0.5**2),
+              origin_id      = origin_ids.get_origin_id('solvent network'))
+            proxies.append(proxy)
+          else:
+            # collecting iseqs for reference coordinate proxies
+            rcp_selection.append(atom.i_seq)
+      elif class_name == "common_small_molecule":
+        pass # not hanled yet, different logic to anchor..
+    grm.add_new_bond_restraints_in_place(proxies, self.get_sites_cart())
+    # add rcp:
+    if len(rcp_selection) > 0:
+      from mmtbx.geometry_restraints import reference
+      # remove duplicates and sort
+      rcp_selection = sorted(list(set(rcp_selection)))
+      # print(f'rcp_selection, {rcp_selection}')
+      grm.append_reference_coordinate_restraints_in_place(
+        reference.add_coordinate_restraints(
+          sites_cart = self.get_sites_cart().select(flex.size_t(rcp_selection)),
+          selection  = rcp_selection,
+          sigma      = 0.5,
+          limit      = 1.0,
+          top_out_potential=False))
+
+
   def get_vdw_radii(self, vdw_radius_default = 1.0):
     """
     Return van-der-Waals radii for known atom names.
@@ -2536,6 +2686,7 @@ class manager(object):
       self._xray_structure.set_inelastic_form_factors(
           photon=iff_wavelength,
           table=set_inelastic_form_factors)
+    self._xray_structure.scattering_type_registry_params.table = scattering_table
     return self.xray_scattering_dict, self.neutron_scattering_dict
 
   def get_searched_tls_selections(self, nproc, log):
@@ -3229,7 +3380,10 @@ class manager(object):
     self.idealize_h_minimization(
         correct_special_position_tolerance=correct_special_position_tolerance)
 
-  def pairs_within(self, radius):
+  def pairs_within(self, radius, as_dict=False):
+    """
+    Find pairs of atoms within radius.
+    """
     cs = self.crystal_symmetry()
     asu_mappings = crystal.symmetry.asu_mappings(cs, buffer_thickness = radius)
     special_position_settings = crystal.special_position_settings(
@@ -3242,7 +3396,19 @@ class manager(object):
     pair_asu_table = crystal.pair_asu_table(asu_mappings = asu_mappings)
     pair_asu_table.add_all_pairs(distance_cutoff = radius)
     pst = pair_asu_table.extract_pair_sym_table()
-    return [i.i_seqs() for i in pst.iterator()]
+    pairs = []
+    sites_frac = self.get_sites_frac()
+    uc = self.crystal_symmetry().unit_cell()
+    for p in pst.full_connectivity().iterator():
+      i, j, m = p.i_seq, p.j_seq, p.rt_mx_ji
+      dist = uc.distance(sites_frac[i], m*sites_frac[j])
+      pairs.append([i, j, m, dist])
+    if as_dict:
+      result = defaultdict(list)
+      for first, second, third, fourth in pairs:
+        result[first].append([second, third, fourth])
+      pairs = result
+    return pairs
 
   def reprocess_pdb_hierarchy_inefficient(self):
     # XXX very inefficient
@@ -3309,7 +3475,7 @@ class manager(object):
 
   def rms_b_iso_or_b_equiv(self, exclude_hd=True):
     result = None
-    pairs = self.pairs_within(radius=1.6)
+    pairs = [[i[0],i[1]] for i in self.pairs_within(radius=1.6)]
     atoms = self.get_hierarchy().atoms()
     values = flex.double()
     for pair in pairs:
@@ -3580,7 +3746,9 @@ class manager(object):
 
     if new_riding_h_manager is not None:
       new.riding_h_manager = new_riding_h_manager
-    new.get_xray_structure().scattering_type_registry()
+    new_xrs = new.get_xray_structure()
+    if new_xrs is not None:
+      new_xrs.scattering_type_registry()
     new.set_refinement_flags(new_refinement_flags)
     new.scattering_dict_info = sdi
     new._update_has_hd()
@@ -3662,18 +3830,19 @@ class manager(object):
     out.flush()
     time_model_show += timer.elapsed()
 
-  def remove_alternative_conformations(self, always_keep_one_conformer):
+  def remove_alternative_conformations(self, always_keep_one_conformer, altloc_to_keep=None):
     # XXX This is not working correctly when something was deleted.
     # Need to figure out a way to update everything so GRM
     # construction will not fail.
     self.geometry_restraints = None
+    n_old_atoms = self.get_number_of_atoms()
     self._pdb_hierarchy.remove_alt_confs(
-        always_keep_one_conformer=always_keep_one_conformer)
+        always_keep_one_conformer=always_keep_one_conformer,
+        altloc_to_keep=altloc_to_keep)
     self._pdb_hierarchy.sort_atoms_in_place()
     self._pdb_hierarchy.atoms_reset_serial()
     self.update_xrs()
     self._atom_selection_cache = None
-    n_old_atoms = self.get_number_of_atoms()
     n_new_atoms = self.get_number_of_atoms()
     return n_old_atoms - n_new_atoms
 

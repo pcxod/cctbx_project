@@ -1,3 +1,9 @@
+"""
+Classes representing hierarchy objects and tools for manipulation.
+Note: contains boosted C++ code; view source code for methods
+and documentation.
+"""
+
 from __future__ import absolute_import, division, print_function
 import boost_adaptbx.boost.python as bp
 ext = bp.import_ext("iotbx_pdb_hierarchy_ext")
@@ -48,6 +54,7 @@ def _show_residue_group(rg, out, prefix):
       show_atom(atoms[-1])
 
 class overall_counts(object):
+  """Count the number of residues, chains, atoms and other attributes of a hierarchy"""
 
   def __init__(self):
     self._errors = None
@@ -60,6 +67,7 @@ class overall_counts(object):
         flag_warnings=True,
         residue_groups_max_show=10,
         duplicate_atom_labels_max_show=10):
+    """Summarize information about this hierarchy"""
     if (out is None): out = sys.stdout
     self._errors = []
     self._warnings = []
@@ -201,6 +209,7 @@ class overall_counts(object):
         prefix="",
         residue_groups_max_show=10,
         duplicate_atom_labels_max_show=10):
+    """Return summary as string"""
     out = StringIO()
     self.show(
       out=out,
@@ -210,10 +219,12 @@ class overall_counts(object):
     return out.getvalue()
 
   def errors(self):
+    """Return errors in overall_counts"""
     if (self._errors is None): self.show(out=null_out())
     return self._errors
 
   def get_n_residues_of_classes(self, classes):
+    """Get residues in each class (common_amino_acid,common_rna_dna) """
     result = 0
     for resname, count in self.resnames.items():
       if common_residue_names_get_class(resname) in classes:
@@ -221,13 +232,16 @@ class overall_counts(object):
     return result
 
   def warnings(self):
+    """Get warnings in overall_counts"""
     if (self._warnings is None): self.show(out=null_out())
     return self._warnings
 
   def errors_and_warnings(self):
+    """Get errors and warnings in overall_counts"""
     return self.errors() + self.warnings()
 
   def show_improper_alt_conf(self, out=None, prefix=""):
+    """Identify improper alt_conformations in overall_counts"""
     if (self.n_alt_conf_improper == 0): return
     if (out is None): out = sys.stdout
     for residue_group,label in [(self.alt_conf_proper, "proper"),
@@ -240,6 +254,7 @@ class overall_counts(object):
             replace_floats_with=".*."), file=out)
 
   def raise_improper_alt_conf_if_necessary(self):
+    """Stop if improper alt_conformations present"""
     sio = StringIO()
     self.show_improper_alt_conf(out=sio)
     msg = sio.getvalue()
@@ -248,6 +263,7 @@ class overall_counts(object):
   def show_chains_with_mix_of_proper_and_improper_alt_conf(self,
         out=None,
         prefix=""):
+    """Show chains with mix of proper and improper alt_conformations """
     if (out is None): out = sys.stdout
     n = self.n_chains_with_mix_of_proper_and_improper_alt_conf
     print(prefix+"chains with mix of proper and improper alt. conf.:", n, file=out)
@@ -255,6 +271,7 @@ class overall_counts(object):
     self.show_improper_alt_conf(out=out, prefix=prefix)
 
   def raise_chains_with_mix_of_proper_and_improper_alt_conf_if_necessary(self):
+    """Stop if chains with mix of proper and improper alt_conformations """
     if (self.n_chains_with_mix_of_proper_and_improper_alt_conf == 0):
       return
     sio = StringIO()
@@ -265,6 +282,7 @@ class overall_counts(object):
         out=None,
         prefix="",
         max_show=10):
+    """Show consecutive residue groups with same resid"""
     cons = self.consecutive_residue_groups_with_same_resid
     if (len(cons) == 0): return
     if (out is None): out = sys.stdout
@@ -292,6 +310,7 @@ class overall_counts(object):
         out=None,
         prefix="",
         max_show=10):
+    """Show residue groups with multiple resnames using same altloc"""
     rgs = self.residue_groups_with_multiple_resnames_using_same_altloc
     if (len(rgs) == 0): return
     print(prefix+"residue groups with multiple resnames using" \
@@ -308,6 +327,7 @@ class overall_counts(object):
   def \
     raise_residue_groups_with_multiple_resnames_using_same_altloc_if_necessary(
         self, max_show=10):
+    """Stop if residue groups with multiple resnames using same altloc"""
     sio = StringIO()
     self.show_residue_groups_with_multiple_resnames_using_same_altloc(
       out=sio, max_show=max_show)
@@ -315,6 +335,7 @@ class overall_counts(object):
     if (len(msg) != 0): raise Sorry(msg.rstrip())
 
   def show_duplicate_atom_labels(self, out=None, prefix="", max_show=10):
+    """Show duplicate atom labels"""
     dup = self.duplicate_atom_labels
     if (len(dup) == 0): return
     if (out is None): out = sys.stdout
@@ -338,6 +359,7 @@ class overall_counts(object):
         plural_s(len(dup)-max_show), file=out)
 
   def raise_duplicate_atom_labels_if_necessary(self, max_show=10):
+    """Stop if duplicate atom labels"""
     sio = StringIO()
     self.show_duplicate_atom_labels(out=sio, max_show=max_show)
     msg = sio.getvalue()
@@ -452,25 +474,32 @@ class _():
             yield ag
 
   def only_model(self):
+    """Return the only model in the hierarchy. Must be only 1"""
     assert self.models_size() == 1
     return self.models()[0]
 
   def only_chain(self):
+    """Return the only chain in hierarchy. Must be only 1"""
     return self.only_model().only_chain()
 
   def only_residue_group(self):
+    """Return the only residue in hierarchy. Must be only 1"""
     return self.only_chain().only_residue_group()
 
   def only_conformer(self):
+    """Return the only conformer in hierarchy. Must be only 1"""
     return self.only_chain().only_conformer()
 
   def only_atom_group(self):
+    """Return the only atom_group in hierarchy. Must be only 1"""
     return self.only_residue_group().only_atom_group()
 
   def only_residue(self):
+    """Return the only residue in hierarchy. Must be only 1"""
     return self.only_conformer().only_residue()
 
   def only_atom(self):
+    """Return the only atom in hierarchy. Must be only 1"""
     return self.only_atom_group().only_atom()
 
   def overall_counts(self,
@@ -492,6 +521,7 @@ class _():
     return result
 
   def occupancy_counts(self):
+    """Return group_args object with information about occupancies"""
     eps = 1.e-6
     occ = self.atoms().extract_occ()
     mean = flex.mean(occ)
@@ -527,6 +557,7 @@ class _():
       alt_loc_dist             = alt_loc_dist)
 
   def composition(self):
+    """Return group_args object with information about composition"""
     asc = self.atom_selection_cache()
     def rc(sel_str, as_atoms=False):
       sel = asc.selection(sel_str)
@@ -679,21 +710,22 @@ class _():
         a hierarchy (or string from it).  Convert the hierarchy and the
         cmd_text, run the method, convert the results back:
 
-     # Convert the hierarchy to forward compatible
+     Convert the hierarchy to forward compatible:
      ph_fc = ph.as_forward_compatible_hierarchy()
 
-     # Convert any commands. Can be done one word at a time also
+     Convert any commands. Can be done one word at a time also:
      cmd_text_fc = ph_fc.convert_multi_word_text_to_forward_compatible(cmd_text)
 
-     # Run the method with converted hierarchy and commands
+     Run the method with converted hierarchy and commands:
      result = do_something(ph = ph_fc, command_text = cmd_text_fc)
 
-     # Convert back any resulting hierarchy
+     Convert back any resulting hierarchy:
      new_ph = result.ph.forward_compatible_hierarchy_as_standard(
               conversion_info = ph_fc.conversion_info())
 
-     # Convert back any words in the results that referred to converted
-     #  items. Keys are chain_id and resname
+     Convert back any words in the results that referred to converted
+     items. Keys are chain_id and resname:
+
      new_result_items = []
      for result_item,key in zip(results.text_words, results.text_keys):
        new_result_item = ph_fc.conversion_info().\
@@ -751,7 +783,7 @@ class _():
 
   def as_pdb_or_mmcif_string(self,
        target_format = None,
-       segid_as_auth_segid = True,
+       segid_as_auth_segid = False,
        remark_section = None,
        **kw):
     '''
@@ -761,7 +793,7 @@ class _():
 
      Method to allow shifting from general writing as pdb to
      writing as mmcif, with the change in two places (here and model.py)
-     Use default of segid_as_auth_segid=True here (different than
+     Use default of segid_as_auth_segid=False here (same as in
        as_mmcif_string())
      :param target_format: desired output format, pdb or mmcif
      :param segid_as_auth_segid: use the segid in hierarchy as the auth_segid
@@ -785,7 +817,7 @@ class _():
        target_format = None,
        data_manager = None,
        overwrite = True,
-       segid_as_auth_segid = True,
+       segid_as_auth_segid = False,
        remark_section = None,
        **kw):
     '''
@@ -795,7 +827,7 @@ class _():
 
      Method to allow shifting from general writing as pdb to
      writing as mmcif, with the change in two places (here and model.py)
-     Use default of segid_as_auth_segid=True here (different than
+     Use default of segid_as_auth_segid=False here (same as in
        as_mmcif_string())
      :param target_format: desired output format, pdb or mmcif
      :param target_filename: desired output file name, to be modified to
@@ -825,7 +857,7 @@ class _():
        target_format = None, target_filename = None,
        data_manager = None,
        overwrite = True,
-       segid_as_auth_segid = True,
+       segid_as_auth_segid = False,
        write_file = False,
        remark_section = None,
        **kw):
@@ -835,7 +867,7 @@ class _():
 
      Method to allow shifting from general writing as pdb to
      writing as mmcif, with the change in two places (here and model.py)
-     Use default of segid_as_auth_segid=True here (different than
+     Use default of segid_as_auth_segid=False here (same as in
        as_mmcif_string())
      :param target_format: desired output format, pdb or mmcif
      :param target_filename: desired output file name, to be modified to
@@ -907,6 +939,7 @@ class _():
         cstringio=None,
         return_cstringio=Auto):
     """
+    Deprecated.  Use instead as_pdb_or_mmcif_string.
     Generate complete PDB-format string representation.  External crystal
     symmetry is strongly recommended if this is being output to a file.
 
@@ -951,6 +984,7 @@ class _():
     return cstringio.getvalue()
 
   def as_list_of_residue_names(self):
+    """Return list of residue names in this model (all chains)"""
     sequence=[]
     for model in self.models():
       for chain in model.chains():
@@ -987,6 +1021,8 @@ class _():
     return mm
 
   def as_dict_of_chain_id_resseq_as_int_residue_names(self):
+    """Return dictionary keyed by chain ID. Values are
+      dictionaries of residue names in chain keyed by resseq_as_int values"""
     dd =  {}
     m = self.only_model()
     for c in m.chains():
@@ -1051,6 +1087,8 @@ class _():
       return seq_fasta_lines
 
   def generate_crystal_symmetry(self, crystal_symmetry):
+    """Generate crystal symmetry with box around atoms, use information
+    from supplied crystal_symmetry if available"""
     cryst1_substitution_buffer_layer = None
     if (crystal_symmetry is None):
       crystal_symmetry = crystal.symmetry()
@@ -1146,6 +1184,7 @@ class _():
 
   def apply_rotation_translation(self, rot_matrices, trans_vectors):
     """
+    Apply rotation-translation to coordinates in the hierarchy
     LIMITATION: ANISOU records in resulting hierarchy will be invalid!!!
     """
     roots=[]
@@ -1167,6 +1206,8 @@ class _():
 
   def remove_residue_groups_with_atoms_on_special_positions_selective(self,
         crystal_symmetry):
+    """Remove residue groups that contain atoms on special positions.  Return
+       list of removed groups"""
     self.reset_i_seq_if_necessary()
     special_position_settings = crystal.special_position_settings(
       crystal_symmetry = crystal_symmetry)
@@ -1197,6 +1238,8 @@ class _():
     return removed
 
   def shift_to_origin(self, crystal_symmetry):
+    """ Find and apply shift of coordinates to put center inside (0,1) in
+     each direction"""
     uc = crystal_symmetry.unit_cell()
     sites_frac = uc.fractionalize(self.atoms().extract_xyz())
     l = abs(min(sites_frac.min()))
@@ -1218,7 +1261,7 @@ class _():
     self.atoms().set_xyz(uc.orthogonalize(sites_frac+shift_best))
 
   def expand_to_p1(self, crystal_symmetry, exclude_self=False):
-    # ANISOU will be invalid
+    """ Expand model to P1.  ANISOU will be invalid"""
     import string
     import scitbx.matrix
     r = root()
@@ -1274,6 +1317,7 @@ class _():
         siguij=True,
         link_records=None,
         ):
+    """Deprecated.  Use instead write_pdb_or_mmcif_file"""
     if link_records:
       if (open_append): mode = "a"
       else:             mode = "w"
@@ -1303,19 +1347,23 @@ class _():
       )
 
   def get_label_alt_id_iseq(self, iseq):
+    """Return the altloc value for the atom with index iseq """
     assert self.atoms_size() > iseq
     return self.get_label_alt_id_atom(self.atoms()[iseq])
 
   def get_label_alt_id_atom(self, atom):
+    """Return the altloc value for this atom"""
     alt_id = atom.parent().altloc
     if alt_id == '': alt_id = '.'
     return alt_id
 
   def get_auth_asym_id_iseq(self, iseq):
+    """Return auth_asym_id of atom with index iseq"""
     assert self.atoms_size() > iseq, "%d, %d" % (self.atoms_size(), iseq)
     return self.get_auth_asym_id(self.atoms()[iseq].parent().parent().parent())
 
   def get_auth_asym_id(self, chain, segid_as_auth_segid = False):
+    """Return auth_asym_id of this chain"""
     auth_asym_id = chain.id
     if (not segid_as_auth_segid) and \
        len(chain.atoms()[0].segid.strip()) > len(auth_asym_id):
@@ -1328,10 +1376,12 @@ class _():
     return auth_asym_id
 
   def get_label_asym_id_iseq(self, iseq):
+    """Return the label_asym_id for atom with index iseq"""
     assert self.atoms_size() > iseq
     return self.get_label_asym_id(self.atoms()[iseq].parent().parent())
 
   def get_label_asym_id(self, residue_group):
+    """Return the label_asym_id for this residue group"""
     if not hasattr(self, '_lai_lookup'):
       self._lai_lookup = {}
       # fill self._lai_lookup for the whole hierarchy
@@ -1373,10 +1423,12 @@ class _():
     # return self.number_label_asym_id, self.label_asym_ids[self.number_label_asym_id]
 
   def get_auth_seq_id_iseq(self, iseq):
+    """Return auth_seq_id for atom with index iseq"""
     assert self.atoms_size() > iseq
     return self.get_auth_seq_id(self.atoms()[iseq].parent().parent())
 
   def get_auth_seq_id(self, rg):
+    """Return auth_seq_id for this residue group"""
     resseq_strip = rg.resseq.strip()
     if len(resseq_strip) == 4:
       return str(hy36decode(4, rg.resseq.strip()))
@@ -1384,10 +1436,12 @@ class _():
       return resseq_strip
 
   def get_label_seq_id_iseq(self, iseq):
+    """Return label_seq_id for atom with index iseq"""
     assert self.atoms_size() > iseq, "%d, %d" % (self.atoms_size(), iseq)
     return self.get_label_seq_id(self.atoms()[iseq].parent())
 
   def get_label_seq_id(self, atom_group):
+    """Return label_seq_id for this atom_group"""
     if not hasattr(self, '_label_seq_id_dict'):
       # make it
       prev_ac_key = ''
@@ -1459,7 +1513,7 @@ class _():
       '_atom_site.label_entity_id',
       '_atom_site.label_seq_id',
       #'_atom_site.auth_comp_id',
-      #'_atom_site.auth_atom_id',
+      '_atom_site.auth_atom_id',
       '_atom_site.pdbx_PDB_model_num',
      ]
     if segid_as_auth_segid:
@@ -1493,6 +1547,7 @@ class _():
     atom_site_group_PDB = atom_site_loop['_atom_site.group_PDB']
     atom_site_id = atom_site_loop['_atom_site.id']
     atom_site_label_atom_id = atom_site_loop['_atom_site.label_atom_id']
+    atom_site_auth_atom_id = atom_site_loop['_atom_site.auth_atom_id']
     atom_site_label_alt_id = atom_site_loop['_atom_site.label_alt_id']
     atom_site_label_comp_id = atom_site_loop['_atom_site.label_comp_id']
     atom_site_auth_asym_id = atom_site_loop['_atom_site.auth_asym_id']
@@ -1513,7 +1568,6 @@ class _():
     atom_site_label_entity_id = atom_site_loop['_atom_site.label_entity_id']
     atom_site_label_seq_id = atom_site_loop['_atom_site.label_seq_id']
     #atom_site_loop['_atom_site.auth_comp_id'].append(comp_id)
-    #atom_site_loop['_atom_site.auth_atom_id'].append(atom.name.strip())
     atom_site_pdbx_PDB_model_num = atom_site_loop['_atom_site.pdbx_PDB_model_num']
     if segid_as_auth_segid:
       atom_site_auth_segid = atom_site_loop['_atom_site.auth_segid']
@@ -1583,6 +1637,12 @@ class _():
               else:
                 atom_charge = atom_charge.strip()
               if atom_charge == "": atom_charge = "?"
+              # put the '-' in front
+              if len(atom_charge) == 2:
+                if atom_charge[-1] == '-':
+                  atom_charge = atom_charge[1] + atom_charge[0]
+                else:
+                  atom_charge = atom_charge[0]
               fp, fdp = atom.fp, atom.fdp
               if fp == 0 and fdp == 0:
                 fp = '.'
@@ -1593,6 +1653,7 @@ class _():
               atom_site_group_PDB.append(group_pdb)
               atom_site_id.append(str(hy36decode(width=5, s=atom.serial)))
               atom_site_label_atom_id.append(atom.name.strip())
+              atom_site_auth_atom_id.append(atom.name.strip())
               if atom.name.strip() not in chem_comp_atom_ids:
                 chem_comp_atom_ids.append(atom.name.strip())
               atom_site_label_alt_id.append(self.get_label_alt_id_atom(atom))
@@ -1616,7 +1677,6 @@ class _():
               atom_site_label_entity_id.append(entity_id)
               atom_site_label_seq_id.append(self.get_label_seq_id(atom_group))
               #atom_site_loop['_atom_site.auth_comp_id'].append(comp_id)
-              #atom_site_loop['_atom_site.auth_atom_id'].append(atom.name.strip())
               atom_site_pdbx_PDB_model_num.append(model_id.strip())
               if segid_as_auth_segid:
                 atom_site_auth_segid.append(atom.segid)
@@ -1662,7 +1722,17 @@ class _():
     #
     return h_cif_block
 
+  def remove_segid(self):
+    """Remove all segid information"""
+    for model in self.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          for atom_group in residue_group.atom_groups():
+            for atom in atom_group.atoms():
+              atom.set_segid('    ')
+
   def remove_hetero(self):
+    """Remove all hetero atoms"""
     for model in self.models():
       for chain in model.chains():
         for residue_group in chain.residue_groups():
@@ -1696,6 +1766,7 @@ class _():
                 need_fixing = True
 
   def contains_hetero(self):
+    """Return True if hierarchy contains hetero atoms"""
     for model in self.models():
       for chain in model.chains():
         for residue_group in chain.residue_groups():
@@ -1706,6 +1777,7 @@ class _():
     return False
 
   def contains_break_records(self):
+    """Return True if hierarchy contains break records"""
     for model in self.models():
       for chain in model.chains():
         is_first_in_chain = True
@@ -1752,6 +1824,7 @@ class _():
                        data_block_name=None,
                        segid_as_auth_segid=False,
                        output_break_records=False):
+    """Return mmCIF string representation of this hierarchy"""
     cif_object = iotbx.cif.model.cif()
     if data_block_name is None:
       data_block_name = "phenix"
@@ -1769,6 +1842,8 @@ class _():
                        data_block_name=None,
                        segid_as_auth_segid=False,
                        output_break_records=False):
+    """Write mmCIF file representing this hierarchy. Normally
+       use instead write_pdb_or_mmcif_file"""
     cif_object = iotbx.cif.model.cif()
     if data_block_name is None:
       data_block_name = "phenix"
@@ -1866,6 +1941,7 @@ class _():
     atoms.reset_i_seq()
 
   def remove_ter_or_break(self):
+    """Remove TER and BREAK by setting residue_group.link_to_previous=True"""
     import iotbx.pdb.hierarchy
     new_ph = iotbx.pdb.hierarchy.root()
     # Sort by chain ID first
@@ -1908,7 +1984,7 @@ class _():
 
   def remove_incomplete_main_chain_protein(self,
        required_atom_names=['CA','N','C','O']):
-    # Remove each residue_group that does not contain CA N C O of protein
+    """Remove each residue_group that does not contain CA N C O of protein"""
     hierarchy = self
     for model in hierarchy.models():
       for chain in model.chains():
@@ -1928,6 +2004,7 @@ class _():
           model.remove_chain(chain=chain)
 
   def altlocs_present(self, skip_blank = True):
+    """Return True if any altlocs (alternative conformations) are present"""
     hierarchy = self
     altlocs_present = []
     for model in hierarchy.models():
@@ -1942,6 +2019,8 @@ class _():
 
   def remove_alt_confs(self, always_keep_one_conformer, altloc_to_keep = None,
                              keep_occupancy = False):
+    """Remove all alternative conformations.  Required parameter is
+     always_keep_one_conformer (recommended: True)"""
     hierarchy = self
     for model in hierarchy.models():
       for chain in model.chains():
@@ -2000,18 +2079,71 @@ class _():
       new_occ = flex.double(atoms.size(), 1.0)
       atoms.set_occ(new_occ)
 
+  def average_alt_confs(self, pinch_limit=1.):
+    """Average coordinates from alternative conformations"""
+    def average(xyz1, xyz2):
+      a=[]
+      for i in range(3):
+        a.append((xyz1[i]+xyz2[i])/2)
+      return tuple(a)
+    def dist2(xyz1, xyz2):
+      d2 = 0
+      for i in range(3):
+        d2 += (xyz1[i]-xyz2[i])**2
+      return d2
+
+    pinch_limit*=pinch_limit
+
+    hierarchy = self
+    asel=flex.size_t()
+    for model in hierarchy.models():
+      for chain in model.chains():
+        for residue_group in chain.residue_groups():
+          atom_groups = residue_group.atom_groups()
+          assert (len(atom_groups) > 0)
+          if (len(atom_groups) == 1): continue
+
+          done=[]
+          for atom in residue_group.atoms():
+            if atom.element_is_hydrogen(): continue
+            if atom.name in done: continue
+            done.append(atom.name)
+            atoms=[]
+            for atom_group in atom_groups:
+              atom_alt_conf = atom_group.get_atom(atom.name.strip())
+              if atom_alt_conf is None: continue
+              atoms.append(atom_group.get_atom(atom.name.strip()))
+            inputs = []
+            for atom in atoms:
+              inputs.append(atom.xyz)
+            if len(inputs)==1: continue
+            elif len(inputs)>2:
+              raise Sorry('more than two alt confs not supported')
+            d2=dist2(*inputs)
+            # print('d2',d2,atom.quote())
+            if d2<pinch_limit:
+              ave = average(*inputs)
+              for atom in atoms:
+                atom.xyz=ave
+                asel.append(atom.i_seq)
+    return asel
+
   def rename_chain_id(self, old_id, new_id):
+    """Replace old_id chain ID with new_id"""
     for model in self.models():
       for chain in model.chains():
         if(chain.id == old_id):
           chain.id = new_id
 
   def remove_atoms(self, fraction):
+    """Return hierarchy with random fraction of atoms removed"""
     assert fraction>0 and fraction<1.
-    sel_keep = flex.random_bool(self.atoms_size(), 1-fraction)
+    n_atoms_to_keep = int(self.atoms_size() * (1-fraction))
+    sel_keep = flex.random_selection(self.atoms_size(), n_atoms_to_keep)
     return self.select(sel_keep)
 
   def set_atomic_charge(self, iselection, charge):
+    """Set atomic charge for indices marked with iselection"""
     assert isinstance(charge, int)
     if(iselection is None):
       raise Sorry("Specify an atom selection to apply a charge to.")
@@ -2031,6 +2163,7 @@ class _():
       atom.set_charge(charge)
 
   def truncate_to_poly(self, atom_names_set=set()):
+    """Truncate all residues to atom names in atom_names_set (protein only)"""
     pdb_atoms = self.atoms()
     pdb_atoms.reset_i_seq()
     aa_resnames = one_letter_given_three_letter
@@ -2049,14 +2182,17 @@ class _():
                   ag.remove_atom(atom=atom)
 
   def truncate_to_poly_gly(self):
+    """Truncate all residues to gly (protein only)"""
     self.truncate_to_poly(
         atom_names_set=set([" N  ", " CA ", " C  ", " O  "]))
 
   def truncate_to_poly_ala(self):
+    """Truncate all residues to ala (protein only)"""
     self.truncate_to_poly(
         atom_names_set=set([" N  ", " CA ", " C  ", " O  ", " CB "]))
 
   def convert_semet_to_met(self):
+    """Convert all SeMet to MET"""
     for model in self.models():
       for chain in model.chains():
         for residue_group in chain.residue_groups():
@@ -2071,6 +2207,7 @@ class _():
                   atom.element = " S"
 
   def convert_met_to_semet(self):
+    """Convert all MET to SeMET"""
     for model in self.models():
       for chain in model.chains():
         for residue_group in chain.residue_groups():
@@ -2085,6 +2222,7 @@ class _():
                   atom.element = "SE"
 
   def transfer_chains_from_other(self, other):
+    """Transfer chains from other into this hierarchy"""
     i_model = 0
     other_models = other.models()
     for md,other_md in zip(self.models(), other_models):
@@ -2100,6 +2238,7 @@ class _():
         self.append_model(model=md)
 
   def atom_selection_cache(self, special_position_settings=None):
+    """Return the atom_selection cache"""
     from iotbx.pdb.atom_selection import cache
     return cache(root=self,
       special_position_settings=special_position_settings)
@@ -2113,6 +2252,7 @@ class _():
   def occupancy_groups_simple(self, common_residue_name_class_only=None,
                               always_group_adjacent=True,
                               ignore_hydrogens=True):
+    """Return a list occupancy groups for all chains."""
     if(ignore_hydrogens):
       sentinel = self.atoms().reset_tmp_for_occupancy_groups_simple()
     else:
@@ -2162,6 +2302,7 @@ class _():
           h_atoms.select(flex.size_t(g)).set_occ(flex.double([round_occs[i]]*len(g)))
 
   def chunk_selections(self, residues_per_chunk):
+    """Get a set of selections for residues_per_chunk at a time"""
     result = []
     if(residues_per_chunk<1): return result
     for model in self.models():
@@ -2211,6 +2352,7 @@ class _():
           residues[key] = ag
 
   def is_hierarchy_altloc_consistent(self, verbose=False):
+    """Return True if altlocs are consistent"""
     altlocs = {}
     for residue_group in self.residue_groups():
       if not residue_group.have_conformers(): continue
@@ -2230,6 +2372,7 @@ class _():
     return True
 
   def format_correction_for_H(self, verbose=False): # remove 1-JUL-2024
+    """Deprecated.  Format a correction for H atoms"""
     for atom in self.atoms():
       if atom.element_is_hydrogen():
         if len(atom.name.strip())<4:
@@ -2239,6 +2382,7 @@ class _():
             if verbose: print('corrected PDB format of %s' % atom.quote())
 
   def flip_symmetric_amino_acids(self):
+    """Swap atom names in symmetric or chiral amino acids"""
     import time
     from scitbx.math import dihedral_angle
     def chirality_delta(sites, volume_ideal, both_signs):
@@ -2367,6 +2511,8 @@ class _():
   def distance_based_simple_two_way_bond_sets(self,
         fallback_expected_bond_length=1.4,
         fallback_search_max_distance=2.5):
+    """Return result of
+       crystal.distance_based_connectivity.build_simple_two_way_bond_sets"""
     from cctbx.crystal import distance_based_connectivity
     atoms = self.atoms().deep_copy() # XXX potential bottleneck
     atoms.set_chemical_element_simple_if_necessary()
@@ -2381,6 +2527,7 @@ class _():
       fallback_search_max_distance=fallback_search_max_distance)
 
   def reset_i_seq_if_necessary(self):
+    """Reset the indices of all atoms if necessary"""
     atoms = self.atoms()
     i_seqs = atoms.extract_i_seq()
     if (i_seqs.all_eq(0)):
@@ -2562,10 +2709,12 @@ class _():
       for chain in model.chains():
         for residue_group in chain.residue_groups():
           for i_gr1, atom_group_1 in enumerate(residue_group.atom_groups()):
-            elements_group1 = atom_group_1.atoms().extract_element()
+            elements_group1 = [
+              e.strip() for e in atom_group_1.atoms().extract_element()]
             non_H_atoms_group1 = list(set(elements_group1) - set(['H','D']))
             for i_gr2, atom_group_2 in enumerate(residue_group.atom_groups()):
-              elements_group2 = atom_group_2.atoms().extract_element()
+              elements_group2 = [
+                e.strip() for e in atom_group_2.atoms().extract_element()]
               non_H_atoms_group2 = list(set(elements_group2) - set(['H','D']))
               if non_H_atoms_group1 and non_H_atoms_group2: continue
               if(atom_group_1.altloc != atom_group_2.altloc and i_gr2 > i_gr1):
@@ -2587,7 +2736,6 @@ class _():
     """
     atoms = self.atoms()
     # Get exchanged sites
-
     hd_group_selections = self.exchangeable_hd_selections()
     hd_site_d_iseqs, hd_site_h_iseqs = [], []
     for gsel in hd_group_selections:
@@ -2614,9 +2762,6 @@ class _():
               if(get_class(name = resname) == "common_water"):
                 if a.element.strip().upper() == 'O':
                   a.parent().resname = 'HOH'
-                if a.element_is_hydrogen():
-                  ag.remove_atom(a)
-                  continue
               # reset occ and altloc for H at exchanged sites
               if a.element.strip().upper() == 'H' and i in hd_site_h_iseqs:
                 a.occ = 1.0
@@ -2670,27 +2815,33 @@ class _():
           yield ag
 
   def only_chain(self):
+    """Return the only chain in model. Must be only 1"""
     assert self.chains_size() == 1
     return self.chains()[0]
 
   def only_residue_group(self):
+    """Return the only residue_group in model. Must be only 1"""
     return self.only_chain().only_residue_group()
 
   def only_conformer(self):
+    """Return the only conformer in model. Must be only 1"""
     return self.only_chain().only_conformer()
 
   def only_atom_group(self):
+    """Return the only atom_group in model. Must be only 1"""
     return self.only_residue_group().only_atom_group()
 
   def only_residue(self):
+    """Return the only residue in model. Must be only 1"""
     return self.only_conformer().only_residue()
 
   def only_atom(self):
+    """Return the only atom in model. Must be only 1"""
     return self.only_atom_group().only_atom()
 
   def is_ca_only(self):
     """
-    Determine if model consists only from CA atoms.
+    Determine if hierarchy consists only from CA atoms.
     Upgrade options:
       - implement threshold for cases where several residues are present in
         full;
@@ -2716,33 +2867,44 @@ class _():
   """
 
   def atom_groups(self):
+    """Return all atom_groups in the chain"""
     for rg in self.residue_groups():
       for ag in rg.atom_groups():
         yield ag
 
   def only_residue_group(self):
+    """Return the only residue_group in chain. Must be only 1"""
     assert self.residue_groups_size() == 1
     return self.residue_groups()[0]
 
   def only_conformer(self):
+    """Return the only conformer in chain. Must be only 1"""
     conformers = self.conformers()
     assert len(conformers) == 1
     return conformers[0]
 
   def only_atom_group(self):
+    """Return the only atom_group in chain. Must be only 1"""
     return self.only_residue_group().only_atom_group()
 
   def only_residue(self):
+    """Return the only residue in chain. Must be only 1"""
     return self.only_conformer().only_residue()
 
   def only_atom(self):
+    """Return the only atom in chain. Must be only 1"""
     return self.only_atom_group().only_atom()
 
   def residues(self):
+    """Return the residues in the unique conformer in this chain"""
     return self.only_conformer().residues()
 
   def occupancy_groups_simple(self, common_residue_name_class_only=None,
         always_group_adjacent=True):
+    """Return a list of constraint groups based on occupancies.
+    Each group has a list of conformers, each conformer has a list of
+    atom indices."""
+
     result = []
     residue_groups = self.residue_groups()
     n_rg = len(residue_groups)
@@ -2826,6 +2988,7 @@ class _():
     return (rn_seq, residue_classes)
 
   def as_new_hierarchy(self):
+    """Return a new hierarchy that copies this one chain"""
     new_h = iotbx.pdb.hierarchy.root()
     mm = iotbx.pdb.hierarchy.model()
     new_h.append_model(mm)
@@ -2833,6 +2996,7 @@ class _():
     return new_h
 
   def as_list_of_residue_names(self):
+    """Return list of residue names in this chain"""
     sequence=[]
     for rg in self.residue_groups():
       for atom_group in rg.atom_groups():
@@ -2841,6 +3005,7 @@ class _():
     return sequence
 
   def as_dict_of_resseq_residue_names(self, strip_resseq = True):
+    """Return dictionary of residue names in this chain keyed by resseq values"""
     dd = {}
     for rg in self.residue_groups():
       for atom_group in rg.atom_groups():
@@ -2853,6 +3018,7 @@ class _():
     return dd
 
   def as_dict_of_resseq_as_int_residue_names(self):
+    """Return dictionary of residue names in this chain keyed by resseq_as_int values"""
     dd = {}
     for rg in self.residue_groups():
       for atom_group in rg.atom_groups():
@@ -2865,7 +3031,8 @@ class _():
      ignore_all_unknown = None,
      as_string = False):
     """
-    Naively extract single-character protein or nucleic acid sequence, without
+    Naively extract single-character protein or nucleic acid sequence in
+    this chain, without
     accounting for residue numbering.
 
     :param substitute_unknown: character to use for unrecognized 3-letter codes
@@ -2997,6 +3164,8 @@ class _():
 
   def get_residue_ids(self, skip_insertions=False, pad=True, pad_at_start=True,
                       ignore_hetatm=False):
+    """Return list of residue names for all residues in conformer.  Pad with
+    None for residues in gaps."""
     resids = []
     last_resseq = 0
     last_icode = " "
@@ -3017,6 +3186,8 @@ class _():
   def get_residue_names_padded(
       self, skip_insertions=False, pad=True, pad_at_start=True,
       ignore_hetatm=False):
+    """Return list of residue names for all residues in conformer.  Pad with
+    None for residues in gaps."""
     resnames = []
     last_resseq = 0
     last_icode = " "
@@ -3034,6 +3205,12 @@ class _():
       resnames.append(residue_group.unique_resnames()[0])
     return resnames
 
+  def is_water(self):
+    """Return True if this is entirely water"""
+    for rg in self.residue_groups():
+      if common_residue_names_get_class(rg.atom_groups()[0].resname) != "common_water":
+        return False
+    return True
 
   def is_protein(self, min_content=0.8, ignore_water=True):
     """
@@ -3092,13 +3269,16 @@ bp.inject(ext.residue_group, __hash_eq_mixin)
 class _():
 
   def only_atom_group(self):
+    """Return the only atom_group in residue_group. Must be only 1"""
     assert self.atom_groups_size() == 1
     return self.atom_groups()[0]
 
   def only_atom(self):
+    """Return the only atom in residue_group. Must be only 1"""
     return self.only_atom_group().only_atom()
 
   def id_str(self):
+    """Return an ID string for this residue group like 'F 5934A'"""
     chain_id = ""
     chain = self.parent()
     if (chain is not None):
@@ -3110,11 +3290,13 @@ bp.inject(ext.atom_group, __hash_eq_mixin)
 class _():
 
   def only_atom(self):
+    """Return the only atom in atom_group. Must be only 1"""
     assert self.atoms_size() == 1
     return self.atoms()[0]
 
   # FIXME suppress_segid has no effect here
   def id_str(self, suppress_segid=None):
+    """Return ID string for this atom_group like 'AGLY F 2356' """
     chain_id = ""
     resid = ""
     rg = self.parent()
@@ -3188,6 +3370,9 @@ class _():
 
   def set_element_and_charge_from_scattering_type_if_necessary(self,
         scattering_type):
+    """Guess the element and charge for this atom_group
+    from the string representation of
+    scattering_type and set them"""
     from cctbx.eltbx.xray_scattering \
       import get_element_and_charge_symbols \
         as gec
@@ -3232,17 +3417,22 @@ class _():
   chain.residue_groups() instead.
   """
   def only_residue(self):
+    """Return the only residue in conformer. Must be only 1"""
     residues = self.residues()
     assert len(residues) == 1
     return residues[0]
 
   def only_atom(self):
+    """Return the only atom in conformer. Must be only 1"""
     return self.only_residue().only_atom()
 
   def get_residue_names_and_classes(self):
-    # XXX This function should probably be deprecated, since it has been
-    # duplicated in chain.get_residue_names_and_classes which should probably
-    # be preferred to this function
+    """
+    Extract the residue names and counts of each residue type (protein,
+    nucleic acid, etc) within the conformer
+     XXX This function should probably be deprecated, since it has been
+     duplicated in chain.get_residue_names_and_classes which should probably
+     be preferred to this function"""
     rn_seq = []
     residue_classes = dict_with_default_0()
     for residue in self.residues():
@@ -3257,8 +3447,8 @@ class _():
     return (rn_seq, residue_classes)
 
   def is_protein(self, min_content=0.8):
-    # XXX DEPRECATED
-    # Used only in mmtbx/validation and wxtbx. Easy to eliminate.
+    """XXX DEPRECATED.  Return True if this is protein.
+    Used only in mmtbx/validation and wxtbx. Easy to eliminate."""
     rn_seq, residue_classes = self.get_residue_names_and_classes()
     n_aa = residue_classes["common_amino_acid"] + residue_classes['modified_amino_acid']
     n_na = residue_classes["common_rna_dna"] + residue_classes['modified_rna_dna']
@@ -3268,8 +3458,8 @@ class _():
     return False
 
   def is_na(self, min_content=0.8):
-    # XXX DEPRECATED
-    # Used only in mmtbx/validation and wxtbx. Easy to eliminate.
+    """XXX DEPRECATED. Return True if this is nucleic acid.
+    Used only in mmtbx/validation and wxtbx. Easy to eliminate."""
     rn_seq, residue_classes = self.get_residue_names_and_classes()
     n_aa = residue_classes["common_amino_acid"] + residue_classes['modified_amino_acid']
     n_na = residue_classes["common_rna_dna"] + residue_classes['modified_rna_dna']
@@ -3279,9 +3469,10 @@ class _():
     return False
 
   def as_sequence(self, substitute_unknown='X'):
-    # XXX This function should probably be deprecated, since it has been
-    # duplicated in chain.as_sequence which should probably be preferred to
-    # this function
+    """Return list with 1-letter code representation of this conformer
+    This function should probably be deprecated, since it has been
+    duplicated in chain.as_sequence which should probably be preferred to
+    this function"""
     assert ((isinstance(substitute_unknown, str)) and
             (len(substitute_unknown) == 1))
     common_rna_dna_codes = {
@@ -3312,6 +3503,7 @@ class _():
     return seq
 
   def format_fasta(self, max_line_length=79):
+    """Represent conformer in fasta format. """
     seq = self.as_sequence()
     n = len(seq)
     if (n == 0): return None
@@ -3331,9 +3523,11 @@ class _():
 
   def as_padded_sequence(self, missing_char='X', skip_insertions=False,
       pad=True, substitute_unknown='X', pad_at_start=True):
-    # XXX This function should probably be deprecated, since it has been
-    # duplicated in chain.as_padded_sequence which should probably be preferred
-    # to this function
+    """Represent conformer as a padded sequence (include missing_char for
+    all residues in gaps in the sequence).
+    XXX This function should probably be deprecated, since it has been
+    duplicated in chain.as_padded_sequence which should probably be preferred
+    to this function"""
     seq = self.as_sequence()
     padded_seq = []
     last_resseq = 0
@@ -3353,6 +3547,8 @@ class _():
 
   def as_sec_str_sequence(self, helix_sele, sheet_sele, missing_char='X',
                            pad=True, pad_at_start=True):
+    """Return string representing secondary structure of each residue in
+     this conformer"""
     ss_seq = []
     last_resseq = 0
     for i, residue in enumerate(self.residues()):
@@ -3377,9 +3573,11 @@ class _():
     return "".join(ss_seq)
 
   def get_residue_ids(self, skip_insertions=False, pad=True, pad_at_start=True):
-    # XXX This function should probably be deprecated, since it has been
-    # duplicated in chain.get_residue_ids which should probably be preferred
-    # to this function
+    """Return list of resseq_as_int values representing all residues in
+    this conformer.
+    XXX This function should probably be deprecated, since it has been
+     duplicated in chain.get_residue_ids which should probably be preferred
+     to this function"""
     resids = []
     last_resseq = 0
     last_icode = " "
@@ -3397,9 +3595,11 @@ class _():
 
   def get_residue_names_padded(
       self, skip_insertions=False, pad=True, pad_at_start=True):
-    # XXX This function should probably be deprecated, since it has been
-    # duplicated in chain.get_residue_names_padded which should probably be
-    # preferred to this function
+    """Return list of residue names for all residues in conformer.  Pad with
+    None for residues in gaps.
+     XXX This function should probably be deprecated, since it has been
+     duplicated in chain.get_residue_names_padded which should probably be
+     preferred to this function"""
     resnames = []
     last_resseq = 0
     last_icode = " "
@@ -3444,15 +3644,19 @@ class _():
     return (result_root,)
 
   def standalone_copy(self):
+    """Return a stand-alone copy of this residue"""
     return residue(root=self.__getinitargs__()[0])
 
   def only_atom(self):
+    """Return the only atom in residue. Must be only 1"""
     assert self.atoms_size() == 1
     return self.atoms()[0]
 
   def residue_name_plus_atom_names_interpreter(self,
         translate_cns_dna_rna_residue_names=None,
         return_mon_lib_dna_name=False):
+    """Return an interpreter for this residue with standard values of
+     work_residue_name and atom_name_interpretation"""
     from iotbx.pdb import residue_name_plus_atom_names_interpreter
     return residue_name_plus_atom_names_interpreter(
       residue_name=self.resname,
@@ -3493,7 +3697,7 @@ class _():
 #     coordinated effort is needed.
 
 class input_hierarchy_pair(object):
-
+  """Class to map order of atoms in input model to atoms in a hierarchy"""
   def __init__(self,
                input,
                hierarchy=None,
@@ -3605,6 +3809,7 @@ class input(input_hierarchy_pair):
 # GUI app: Combine PDB files
 # CL app: iotbx.pdb.join_fragment_files
 def suffixes_for_chain_ids(suffixes=Auto):
+  """Return suitable suffixes for chain_ids. Deprecated"""
   if (suffixes is Auto):
     suffixes="123456789" \
              "ABCDEFGHIJKLMNOPQRSTUVWXYZ" \
@@ -3612,6 +3817,7 @@ def suffixes_for_chain_ids(suffixes=Auto):
   return suffixes
 
 def append_chain_id_suffixes(roots, suffixes=Auto):
+  """Append chain ID suffixes. Deprecated"""
   suffixes = suffixes_for_chain_ids(suffixes=suffixes)
   assert len(roots) <= len(suffixes)
   for root,suffix in zip(roots, suffixes):
@@ -3622,7 +3828,7 @@ def append_chain_id_suffixes(roots, suffixes=Auto):
 
 def join_roots(roots, chain_id_suffixes=Auto):
   """
-  Combine two root objects.
+  Combine two root objects. Deprecated
   """
   if (chain_id_suffixes is not None):
     append_chain_id_suffixes(roots=roots, suffixes=chain_id_suffixes)
@@ -3676,6 +3882,7 @@ def find_and_replace_chains(original_hierarchy, partial_hierarchy,
           i += 1
 
 def get_contiguous_ranges(hierarchy):
+  """Get continuous ranges within a hierarchy"""
   assert (len(hierarchy.models()) == 1)
   chain_clauses = []
   for chain in hierarchy.models()[0].chains():
@@ -3711,6 +3918,7 @@ def get_contiguous_ranges(hierarchy):
 
 # used for reporting build results in phenix
 def get_residue_and_fragment_count(pdb_file=None, pdb_hierarchy=None):
+  """Count residues and fragments in a hierarchy"""
   from libtbx import smart_open
   if (pdb_file is not None):
     raw_records = flex.std_string()

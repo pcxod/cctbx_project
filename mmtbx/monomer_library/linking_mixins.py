@@ -234,16 +234,20 @@ def possible_cyclic_peptide(atom1,
                             ):
   if verbose:
     print(atom1.quote(),atom2.quote())
-  if atom1.element_is_hydrogen() or atom2.element_is_hydrogen(): return False
-  chain1 = atom1.parent().parent().parent()
-  chain2 = atom2.parent().parent().parent()
-  if not chain1.id == chain2.id:
-    if verbose: print('chain id differs', chain1.id, chain2.id)
-    return False
+  names=[atom1.name, atom2.name]
+  names.sort()
+  if verbose: print('names',names)
+  if names!=[' C  ', ' N  ']: return False
   len_fl = 0
   len_fl += atoms_in_first_last_rgs.get(atom1.i_seq, -1)
   len_fl += atoms_in_first_last_rgs.get(atom2.i_seq, -1)
-  return len_fl == 1
+  if len_fl == 1:
+    chain1 = atom1.parent().parent().parent()
+    chain2 = atom2.parent().parent().parent()
+    if chain1.id == chain2.id:
+      return True
+    elif verbose: print('chain id differs', chain1.id, chain2.id)
+  return False
 
 def check_for_peptide_links(atom1,
                             atom2,
@@ -257,6 +261,9 @@ def check_for_peptide_links(atom1,
       other = atom_group2
     else:
       other = atom_group1
+    #
+    # only for AA to other
+    #
     if linking_utils.get_class(other.resname) not in ["other"]:
       return None
     # sulfur bridge
@@ -351,9 +358,7 @@ class linking_mixins(object):
     from cctbx import crystal
     from cctbx.array_family import flex
     #
-    def _nonbonded_pair_objects(max_bonded_cutoff=3.,
-                                i_seqs=None,
-                                ):
+    def _nonbonded_pair_objects(max_bonded_cutoff=3., i_seqs=None):
       if i_seqs is None:
         atoms = self.pdb_hierarchy.atoms()
         i_seqs = flex.size_t()
@@ -384,8 +389,6 @@ class linking_mixins(object):
         min_cubicle_edge=5,
         shell_asu_tables=[pair_asu_table])
       return nonbonded_proxies, sites_cart, pair_asu_table, asu_mappings, i_seqs
-    #
-
     #
     if(log is not None):
       print("""
@@ -428,10 +431,20 @@ class linking_mixins(object):
     atoms_in_first_last_rgs = {}
     for c in self.pdb_hierarchy.chains():
       for i in [0,-1]:
+        if not c.residue_groups(): continue
         rg = c.residue_groups()[i]
         abs_i = abs(i)
         for a in rg.atoms():
           atoms_in_first_last_rgs[a.i_seq] = abs_i
+    skip_if_longer = linking_setup.update_skip_if_longer(amino_acid_bond_cutoff,
+                                                        rna_dna_bond_cutoff=3.4,
+                                                        intra_residue_bond_cutoff=inter_residue_bond_cutoff,
+                                                        saccharide_bond_cutoff=carbohydrate_bond_cutoff,
+                                                        metal_coordination_cutoff=metal_coordination_cutoff,
+                                                        sulfur_bond_cutoff=2.5,
+                                                        other_bond_cutoff=2,
+                                                        )
+
     # main loop
     nonbonded_proxies, sites_cart, pair_asu_table, asu_mappings, nonbonded_i_seqs = \
         _nonbonded_pair_objects(max_bonded_cutoff=max_bonded_cutoff,
@@ -446,6 +459,7 @@ class linking_mixins(object):
       # include & exclude selection
       #
       origin_id = None
+      updated_skip_if_longer = None
       if ( include_selections and
            distance>=max_bonded_cutoff_standard
            ):
@@ -461,6 +475,15 @@ class linking_mixins(object):
             inter_residue_bond_cutoff=bond_cutoff
             saccharide_bond_cutoff=bond_cutoff
             link_residues=True
+            updated_skip_if_longer = linking_setup.update_skip_if_longer(
+                amino_acid_bond_cutoff,
+                rna_dna_bond_cutoff=3.4,
+                intra_residue_bond_cutoff=inter_residue_bond_cutoff,
+                saccharide_bond_cutoff=saccharide_bond_cutoff,
+                metal_coordination_cutoff=metal_coordination_cutoff,
+                sulfur_bond_cutoff=2.5,
+                other_bond_cutoff=2,
+                )
             break
         else:
           continue # exclude this nonbond from consideration
@@ -481,6 +504,8 @@ class linking_mixins(object):
       if bond_asu_table.contains(i_seq, j_seq, 1): continue
       atom1 = atoms[i_seq]
       atom2 = atoms[j_seq]
+      if atom1.element_is_hydrogen() or atom2.element_is_hydrogen():
+        continue
       if exclude_this_nonbonded:
         key = (selection_1,selection_2)
         if key not in exclude_out_lines:
@@ -547,13 +572,14 @@ Residue classes
       if (not link_small_molecules and
           (classes1.common_small_molecule or classes2.common_small_molecule)): continue
       # is_proxy_set between any of the atoms ????????
-      if classes1.common_amino_acid and classes2.common_amino_acid:
+      if linking_utils.allow_cis_trans(classes1, classes2):
         if not link_residues:
           continue
         # special amino acid linking
         #  - cyclic
         #  - beta, delta ???
         if possible_cyclic_peptide(atom1, atom2, atoms_in_first_last_rgs): # first & last peptide
+          if verbose: print('possible_cyclic_peptide')
           use_only_bond_cutoff = True
       if sym_op:
         if classes1.common_amino_acid and classes2.common_saccharide: continue
@@ -586,31 +612,13 @@ Residue classes
         if atom2.element.strip() in hydrogens:
           done[atom1.id_str()] = atom2.id_str()
       # bond length cutoff & some logic
-      aa_rc = linking_utils.is_atom_pair_linked(
-          atom1,
-          atom2,
-          classes1.important_only,
-          classes2.important_only,
-          distance=distance,
-          max_bonded_cutoff=max_bonded_cutoff,
-          amino_acid_bond_cutoff=amino_acid_bond_cutoff,
-          inter_residue_bond_cutoff=inter_residue_bond_cutoff,
-          second_row_buffer=second_row_buffer,
-          saccharide_bond_cutoff=carbohydrate_bond_cutoff,
-          metal_coordination_cutoff=metal_coordination_cutoff,
-          use_only_bond_cutoff=use_only_bond_cutoff,
-          link_metals=link_metals,
-          verbose=verbose,
-          )
       if not linking_utils.is_atom_pair_linked(
           atom1,
           atom2,
           classes1.important_only,
           classes2.important_only,
           distance=distance,
-          max_bonded_cutoff=max_bonded_cutoff,
-          amino_acid_bond_cutoff=amino_acid_bond_cutoff,
-          inter_residue_bond_cutoff=inter_residue_bond_cutoff,
+          skip_if_longer=updated_skip_if_longer if updated_skip_if_longer is not None else skip_if_longer,
           second_row_buffer=second_row_buffer,
           saccharide_bond_cutoff=carbohydrate_bond_cutoff,
           metal_coordination_cutoff=metal_coordination_cutoff,
@@ -651,9 +659,12 @@ Residue classes
       if not link_residues:
         if class_key in [
             ("common_amino_acid", "common_amino_acid"),
-            #("common_amino_acid", "other"),
+            ("common_amino_acid", "d_amino_acid"),
+            ("common_amino_acid", "uncommon_amino_acid"),
            ]:
           continue
+      else:
+        if len(key)>2: continue
       #else:
       #  atoms_must_be.setdefault(("common_amino_acid",
       #                            "common_amino_acid"),["C", "N"])
@@ -750,6 +761,7 @@ Residue classes
                                                                   atom2,
                                                                   classes1.important_only,
                                                                   classes2.important_only,
+                                                                  self.mon_lib_srv,
                                                                   )
         if link=='TRANS':
           key=link
@@ -774,7 +786,9 @@ Residue classes
         origin_id = origin_ids.get_origin_id('link_%s' % key,
                                              return_none_if_absent=True,
                                              )
-        if verbose: print('apply standard link', key, origin_id)
+        if verbose:
+          print('apply standard link', key, origin_id)
+          assert origin_id, 'origin_id for "link_%s" not found' % key
         if origin_id is None:
           # user defined links should not be applied here
           continue

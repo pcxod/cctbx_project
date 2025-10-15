@@ -18,6 +18,10 @@ jobs:
   - bash: echo "##vso[task.prependpath]$CONDA/bin"
     displayName: Add conda to PATH
 
+  # accept conda tos
+  - script: conda config --set plugins.auto_accept_tos yes
+    displayName: Accept conda TOS
+
   # create environment with earlier version of git
   # https://github.com/git-lfs/git-lfs/issues/5749
   - script: |
@@ -36,7 +40,7 @@ jobs:
       source $(CONDA)/etc/profile.d/conda.sh
       conda activate git
       cd $(Pipeline.Workspace)
-      python bootstrap.py hot update --builder=xfel --python=39 --no-boost-src
+      python bootstrap.py hot update --builder=xfel --python=311 --no-boost-src
       cd modules
       git clone https://github.com/nksauter/LS49.git
       git clone https://gitlab.com/cctbx/ls49_big_data.git

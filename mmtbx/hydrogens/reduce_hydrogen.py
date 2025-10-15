@@ -1,11 +1,13 @@
 from __future__ import absolute_import, division, print_function
 import six
-import os, sys, time
+import sys, time
+from libtbx.utils import Sorry
 import mmtbx.model
 import iotbx.pdb
 import boost_adaptbx.boost.python as bp
 from libtbx.utils import null_out
 from libtbx import group_args
+from scitbx import matrix
 from cctbx.array_family import flex
 from mmtbx.ligands.ready_set_utils import add_n_terminal_hydrogens_to_residue_group
 from cctbx.geometry_restraints.linking_class import linking_class
@@ -20,15 +22,9 @@ get_class = iotbx.pdb.common_residue_names_get_class
 def get_h_restraints(resname, strict=True):
   from mmtbx.monomer_library import cif_types
   from mmtbx.chemical_components import get_cif_dictionary
-  from mmtbx.chemical_components import get_cif_filename
-  from mmtbx.ligands.rdkit_utils import read_chemical_component_filename
-  filename = get_cif_filename(resname)
-  if not os.path.exists(filename): return None
-  try:
-    molecule = read_chemical_component_filename(filename)
-  except Exception as e:
-    print(e)
-    return None
+  from mmtbx.ligands.rdkit_utils import get_molecule_from_resname
+  molecule = get_molecule_from_resname(resname)
+  if molecule is None: return None
   cc_cif = get_cif_dictionary(resname)
   cc = cc_cif['_chem_comp'][0]
   hs = []
@@ -38,9 +34,9 @@ def get_h_restraints(resname, strict=True):
     three_letter_code=cc.three_letter_code,
     name=cc.name,
     group=cc.type,
-    # number_atoms_all=cc.number_atoms_all,
-    # number_atoms_nh=cc.number_atoms_nh,
-    desc_level="")
+    number_atoms_all=0, #cc.number_atoms_all,
+    number_atoms_nh=0, #cc.number_atoms_nh,
+    desc_level=".")
   comp_comp_id = cif_types.comp_comp_id(source_info=None, chem_comp=chem_comp)
   lookup = {}
   for i, a in enumerate(cc_cif.get('_chem_comp_atom',[])):
@@ -62,6 +58,8 @@ def get_h_restraints(resname, strict=True):
     if strict:
       if (b.atom_id_1 not in hs and
           b.atom_id_2 not in hs): continue
+    if ( b.atom_id_1 not in lookup or
+         b.atom_id_2 not in lookup): continue
     atom_idx1=lookup[b.atom_id_1]
     atom_idx2=lookup[b.atom_id_2]
     bl = rdMolTransforms.GetBondLength(conf, atom_idx1, atom_idx2)
@@ -74,9 +72,14 @@ def get_h_restraints(resname, strict=True):
 
   from mmtbx.ligands.rdkit_utils import enumerate_angles
   for angle in enumerate_angles(molecule):
-    if angle[0] in hsi or angle[2] in hsi:
+    if strict:
+      if angle[0] in hsi or angle[2] in hsi:
+        av = rdMolTransforms.GetAngleDeg(conf, angle[0], angle[1], angle[2])
+      else: continue
+    else:
       av = rdMolTransforms.GetAngleDeg(conf, angle[0], angle[1], angle[2])
-    else: continue
+    if ( angle[0] not in lookup or
+         angle[2] not in lookup): continue
     comp_comp_id.angle_list.append(cif_types.chem_comp_angle(
       atom_id_1=lookup[angle[0]],
       atom_id_2=lookup[angle[1]],
@@ -86,9 +89,14 @@ def get_h_restraints(resname, strict=True):
 
   from mmtbx.ligands.rdkit_utils import enumerate_torsions
   for i, angle in enumerate(enumerate_torsions(molecule)):
-    if angle[0] in hsi or angle[3] in hsi:
+    if strict:
+      if angle[0] in hsi or angle[3] in hsi:
+        av = rdMolTransforms.GetDihedralDeg(conf, angle[0], angle[1], angle[2], angle[3])
+      else: continue
+    else:
       av = rdMolTransforms.GetDihedralDeg(conf, angle[0], angle[1], angle[2], angle[3])
-    else: continue
+    if ( angle[0] not in lookup or
+         angle[3] not in lookup): continue
     comp_comp_id.tor_list.append(cif_types.chem_comp_tor(
       id='Var_%03d' % i,
       atom_id_1=lookup[angle[0]],
@@ -100,22 +108,52 @@ def get_h_restraints(resname, strict=True):
       period='1'))
   return comp_comp_id
 
+def bonds_in_restraints(atom):
+  from mmtbx.chemical_components import get_cif_dictionary
+  cc_cif = get_cif_dictionary(atom.parent().resname)
+  rc=[]
+  for b in cc_cif.get('_chem_comp_bond',[]):
+    if b.atom_id_1.strip()==atom.name.strip():
+      rc.append(b.atom_id_2)
+    if b.atom_id_2.strip()==atom.name.strip():
+      rc.append(b.atom_id_1)
+  return rc
+
 # ==============================================================================
 
-def mon_lib_query(residue, mon_lib_srv, construct_h_restraints=True):
+def mon_lib_query(residue, mon_lib_srv, construct_h_restraints=True, raise_sorry=True):
   # if get_class(residue.resname) in ['common_rna_dna']:
   #   md = get_h_restraints(residue.resname)
   #   return md
   # if print_time: print(residue.resname, get_class(residue.resname))
   if residue.resname == 'UNL':
-    return None
+    return None, None
   md, ani = mon_lib_srv.get_comp_comp_id_and_atom_name_interpretation(
     residue_name=residue.resname,
     atom_names=residue.atoms().extract_name())
+  cif_object=None
+  # if md is None:
+  #   md, ani = mon_lib_srv.get_comp_comp_id_and_atom_name_interpretation(
+  #     residue_name='%s_EL' % residue.resname,
+  #     atom_names=residue.atoms().extract_name(),
+  #     ad_hoc_single_atom_residues=True)
   if md is None:
-    md = get_h_restraints(residue.resname)
-    # md.show()
-  return md
+    md = get_h_restraints(residue.resname, strict=False)
+    if md is None:
+      if raise_sorry:
+        raise Sorry('Entity "%s" not found in CCD (or GeoStd). Please supply restraints.' % residue.resname)
+      else:
+        return None, None
+    from six.moves import cStringIO as StringIO
+    input_string='data_comp_list\n'
+    input_string+=str(md.chem_comp.as_cif_loop())
+    f=StringIO()
+    md.show(f=f)
+    # use strip in case 3-letter code has only 2 letters (e.g. DI)
+    input_string += '\ndata_comp_%s\n' % residue.resname.strip()
+    input_string += '\n%s' % f.getvalue()
+    cif_object = iotbx.cif.reader(input_string=input_string).model()
+  return md, cif_object
 
 # ==============================================================================
 
@@ -196,7 +234,8 @@ class place_hydrogens():
       self.time_remove_isolated    = None
       self.time_riding_manager     = None
       self.time_remove_H_nopara    = None
-      self.time_reset_idealize     = None
+      self.time_reset              = None
+      self.time_idealize           = None
       self.time_remove_H_on_links  = None
 
 # ------------------------------------------------------------------------------
@@ -271,7 +310,8 @@ class place_hydrogens():
       crystal_symmetry  = self.model.crystal_symmetry(),
       restraint_objects = ro,
       log               = null_out())
-    self.model.process(pdb_interpretation_params=p, make_restraints=True)
+    self.model.process(pdb_interpretation_params=p,
+                       make_restraints=True)
     #self.model.idealize_h_minimization()
     #STOP()
     self.time_make_grm = round(time.time()-t0, 2)
@@ -336,8 +376,10 @@ class place_hydrogens():
     t0 = time.time()
     self.model.reset_adp_for_hydrogens(scale = self.adp_scale)
     self.model.reset_occupancy_for_hydrogens_simple()
+    self.time_reset = round(time.time()-t0, 2)
+    t0 = time.time()
     self.model.idealize_h_riding()
-    self.time_reset_idealize = round(time.time()-t0, 2)
+    self.time_idealize = round(time.time()-t0, 2)
 
     # Remove H atoms that are involved in links (bonds, metal coordination, etc)
     # --------------------------------------------------------------------------
@@ -372,6 +414,14 @@ class place_hydrogens():
           pass
         for ag in rgs.atom_groups():
           #if ag.resname == 'AYA': return
+          # SAC in 5xdq, 5zcp. Never needs propeller.
+          if ag.resname == 'SAC': return
+          #for ag in rgs.atom_groups():
+          #  n=ag.get_atom('N') # assumes atom name "N"
+          #  if n: break
+          #if not n: continue
+          #bonds=bonds_in_restraints(n)
+          #if len(bonds)==3: continue
           if (get_class(name=ag.resname) in
               ['common_amino_acid', 'modified_amino_acid', 'd_amino_acid']):
             if ag.get_atom('H'):
@@ -419,14 +469,36 @@ class place_hydrogens():
             if(get_class(name=ag.resname) == "common_water"): continue
             actual = [a.name.strip().upper() for a in ag.atoms()]
             #
-            mlq = mon_lib_query(residue=ag, mon_lib_srv=mon_lib_srv)
+            mlq, cif_object = mon_lib_query(residue=ag, mon_lib_srv=mon_lib_srv, raise_sorry=False)
             if mlq is None:
               self.no_H_placed_mlq.append(ag.resname)
               continue
 
+            if cif_object:
+              ro = self.model.get_restraint_objects()
+              if ro is None: ro=[]
+              ro.append(('auto_%s' % ag.resname, cif_object))
+              self.model.set_restraint_objects(ro)
+
             expected_h = []
             #expected_ha = []
             atom_dict = mlq.atom_dict()
+            def _remove_atoms(atom_dict, names):
+              remove=[]
+              for k,v in atom_dict.items():
+                if k in names:
+                  remove.append(k)
+              if remove:
+                for r in remove:
+                  del atom_dict[r]
+              return atom_dict
+            #
+            # don't add polymer H atoms. Terminal H atoms added elsewhere
+            #
+            if mlq.test_for_peptide(atom_dict):
+              atom_dict = _remove_atoms(atom_dict, ['H2', 'HXT'])
+            elif mlq.test_for_rna_dna(atom_dict):
+              atom_dict = _remove_atoms(atom_dict, ["HO3'", 'HO3*'])
             for k, v in six.iteritems(atom_dict):
               if(v.type_symbol=="H"):
                 expected_h.append(k)
@@ -516,9 +588,10 @@ class place_hydrogens():
     sel_remove = flex.size_t()
 
     # Find H atoms bound to linked atoms
-    removed_dict = dict()
-    parent_dict = dict()
-    bonds = dict()
+    removed_dict = {}
+    parent_dict = {}
+    bonds = {}
+    bond_lengths = {}
     for proxy in all_proxies:
       if(  isinstance(proxy, ext.bond_simple_proxy)): i,j=proxy.i_seqs
       elif(isinstance(proxy, ext.bond_asu_proxy)):    i,j=proxy.i_seq,proxy.j_seq
@@ -535,11 +608,13 @@ class place_hydrogens():
       if(elements[i] in ["H","D"] and j in exclusion_iseqs):
         if i not in sel_remove:
           sel_remove.append(i)
+          bond_lengths[i] = proxy.distance_ideal
           removed_dict[i] = exclusion_dict[j]
           parent_dict[i]=j
       if(elements[j] in ["H","D"] and i in exclusion_iseqs):
         if j not in sel_remove:
           sel_remove.append(j)
+          bond_lengths[j] = proxy.distance_ideal
           removed_dict[j] = exclusion_dict[i]
           parent_dict[j]=i
     # remove H atoms NOT to remove - double negative!
@@ -561,6 +636,40 @@ class place_hydrogens():
       else:
         bonds[j_seq].remove(i_seq)
         bonds[i_seq].remove(j_seq)
+
+    #print(remove_from_sel_remove)
+    fsc0=grm.geometry.shell_sym_tables[0].full_simple_connectivity()
+    fsc1=grm.geometry.shell_sym_tables[1].full_simple_connectivity()
+    #fsc2=grm.geometry.shell_sym_tables[2].full_simple_connectivity()
+    for _i in remove_from_sel_remove:
+      #print(list(fsc0[_i]))
+      parent = fsc0[_i][0]
+      #print('origin_id', exclusion_dict[parent], origin_ids.get_origin_key(exclusion_dict[parent]))
+      first_neighbors = fsc1[_i]
+      fn_filtered = [item for item in first_neighbors if item not in sel_remove]
+      #print(list(first_neighbors), list(sel_remove), fn_filtered )
+      # now improve geometry of the H being kept
+      # TODO make sure all atoms are in same conformer
+      # TODO check that neighbor atoms are all non H
+      # TODO what about two tetrahedral geometry?
+      if len(fn_filtered) == 3:
+        #print('tetrahedral geometry')
+        coord1 = matrix.col(atoms[fn_filtered[0]].xyz)
+        coord2 = matrix.col(atoms[fn_filtered[1]].xyz)
+        coord3 = matrix.col(atoms[fn_filtered[2]].xyz)
+        coordp = matrix.col(atoms[parent].xyz)
+        orth = (coord2-coord1).cross(coord3-coord1).normalize()
+        vol = orth.dot(coordp-coord1)
+        if vol > 0: orth = -orth
+        atoms[_i].xyz = coordp - orth*bond_lengths[_i]
+      if len(fn_filtered) == 2:
+        #print('flat geometry')
+        coord1 = matrix.col(atoms[fn_filtered[0]].xyz)
+        coord2 = matrix.col(atoms[fn_filtered[1]].xyz)
+        coordp = matrix.col(atoms[parent].xyz)
+        half = ((coord1 - coordp).normalize() + (coord2 - coordp).normalize())
+        atoms[_i].xyz = coordp-half.normalize()*bond_lengths[_i]
+
     if remove_from_sel_remove:
       sel_remove=list(sel_remove)
       for r in remove_from_sel_remove:
@@ -615,7 +724,7 @@ The following H atoms were not placed because they could not be parameterized
 (not enough restraints information)'''
       print(msg, file=log)
       for label in self.site_labels_no_para:
-        print(label)
+        print(label, file=log)
 #    if self.charged_atoms:
 #      msg = '''
 #The following heavy atom have an unusual electron count. This could be because
@@ -658,7 +767,8 @@ The following H atoms were not placed because they could not be parameterized
       time_remove_isolated    = self.time_remove_isolated,
       time_riding_manager     = self.time_riding_manager,
       time_remove_H_nopara    = self.time_remove_H_nopara,
-      time_reset_idealize     = self.time_reset_idealize,
+      time_reset              = self.time_reset,
+      time_idealize           = self.time_idealize,
       time_remove_H_on_links  = self.time_remove_H_on_links)
 
 # ------------------------------------------------------------------------------
@@ -667,13 +777,14 @@ The following H atoms were not placed because they could not be parameterized
     print('Detailed timings:')
     print("Rebox model:", self.time_rebox_model)
     print('Remove element X:', self.time_remove_element_X)
-    print("Add_missing_H_atoms_at_bogus_position:", self.time_add_missing_H)
-    print('Add N-terminal propeller', self.time_terminal_propeller)
+    print("Add missing H at bogus position:", self.time_add_missing_H)
+    print('Add N-terminal propeller:', self.time_terminal_propeller)
     print("Get new model obj and grm:", self.time_make_grm )
     print("Remove isolated H:", self.time_remove_isolated)
     print("Setup Riding manager:", self.time_riding_manager)
     print("Remove H that were not parameterized:", self.time_remove_H_nopara)
-    print("Reset adp, occ; idealize H positions:", self.time_reset_idealize)
+    print("Reset adp, occ:", self.time_reset)
+    print("idealize H positions:", self.time_idealize)
     print("Remove H on links:", self.time_remove_H_on_links)
     print()
 

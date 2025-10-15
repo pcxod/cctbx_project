@@ -1,4 +1,5 @@
 from __future__ import absolute_import, division, print_function
+import numpy as np
 import time
 import sys
 
@@ -9,6 +10,9 @@ class mpiEmulator(object):
   SUM = "SUM"
   MAX = "MAX"
   MIN = "MIN"
+  LAND = "LAND"
+  LOR = "LOR"
+  LXOR = "LXOR"
   # TODO: implement more operations as needed
 
   def Wtime(self):
@@ -30,10 +34,21 @@ class mpiCommEmulator(object):
   def Bcast(self, buf, root=0):
     pass
   def reduce(self, sendobj, op=mpiEmulator.SUM, root=0):
-    if op == mpiEmulator.SUM or op == mpiEmulator.MAX or op == mpiEmulator.MIN:
+    if op in {mpiEmulator.SUM, mpiEmulator.MAX, mpiEmulator.MIN,
+              mpiEmulator.LAND, mpiEmulator.LOR, mpiEmulator.LXOR}:
       return sendobj
     else:
       assert False, "Unsupported MPI reduce operation %s"%(op)
+  def Reduce(self, sendbuf, recvbuf, op=mpiEmulator.SUM, root=0):
+    if isinstance(sendbuf, np.ndarray):  # numpy array
+      recvbuf[:] = sendbuf[:]
+    else:
+      # Handle scalar values or other types
+      if isinstance(recvbuf, list):
+        for i, value in enumerate(sendbuf):
+          recvbuf[i] = value
+      else:
+        assert False, "Unsupported MPI emulator data type."
   def allreduce(self, sendobj, op=mpiEmulator.SUM):
     return self.reduce(sendobj, op, 0)
   def alltoall(self, sendobj):
@@ -56,6 +71,8 @@ class mpiCommEmulator(object):
       counter += count
   def allgather(self, sendobj):
     return [sendobj]
+  def Allgatherv(self, sendbuf, recvbuf):
+    return self.Gatherv(sendbuf, recvbuf)
   def Abort(self,errorcode=0):
     import sys
     sys.exit()

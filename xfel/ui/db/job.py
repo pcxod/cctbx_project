@@ -69,7 +69,7 @@ class Job(db_proxy):
 
   def get_log_path(self):
     run_path = get_run_path(self.app.params.output_folder, self.trial, self.rungroup, self.run)
-    return os.path.join(run_path, "stdout", "log.out")
+    return os.path.join(run_path, "stdout", "out.log")
 
   def submit(self, previous_job = None):
     raise NotImplementedError("Override me!")
@@ -653,7 +653,7 @@ class EnsembleRefinementJob(Job):
     striping.rungroup={}
     striping.run={}
     {}
-    striping.chunk_size=256
+    striping.chunk_size=64
     striping.stripe=False
     striping.dry_run=True
     striping.output_folder={}
@@ -853,7 +853,7 @@ class MergingJob(Job):
       params = copy.deepcopy(params)
       params.nnodes = params.nnodes_merge
 
-    return do_submit(command, submit_path, output_path, params, log_name="log.out", err_name="err.out", job_name=identifier_string)
+    return do_submit(command, submit_path, output_path, params, log_name="out.log", err_name="err.log", job_name=identifier_string)
 
 class PhenixJob(Job):
   def get_global_path(self):
@@ -866,8 +866,11 @@ class PhenixJob(Job):
     return "%s_%s%03d_v%03d"%(self.dataset.name, self.task.type, self.task.id, self.dataset_version.version)
 
   def delete(self, output_only=False):
-    job_folder = self.get_global_path()
-    if os.path.exists(job_folder):
+    try:
+      job_folder = self.get_global_path()
+    except AttributeError: # If job fails to submit for example
+      job_folder = None
+    if job_folder and os.path.exists(job_folder):
       print("Deleting job folder for job", self.id)
       shutil.rmtree(job_folder)
     else:
@@ -888,12 +891,15 @@ class PhenixJob(Job):
     target_phil_path = os.path.join(output_path, identifier_string + "_params.phil")
     input_folder, _, _, input_mtz, _ = previous_job.get_output_files()
 
-    command = self.task.parameters.split('\n')[0]
-    phil_params = '\n'.join(self.task.parameters.split('\n')[1:])
-    phil_params = phil_params.replace('<PREVIOUS_TASK_MTZ>', os.path.join(input_folder, input_mtz))
-    phil_params = phil_params.replace('<PREVIOUS_TASK_FOLDER>', input_folder)
-    phil_params = phil_params.replace('<DATASET_NAME>', self.dataset.name)
-    phil_params = phil_params.replace('<DATASET_VERSION>', str(self.dataset_version.version))
+    def replace_keywords(input_str):
+      input_str = input_str.replace('<PREVIOUS_TASK_MTZ>', os.path.join(input_folder, input_mtz))
+      input_str = input_str.replace('<PREVIOUS_TASK_FOLDER>', input_folder)
+      input_str = input_str.replace('<DATASET_NAME>', self.dataset.name)
+      input_str = input_str.replace('<DATASET_VERSION>', str(self.dataset_version.version))
+      return input_str
+
+    command = replace_keywords(self.task.parameters.split('\n')[0])
+    phil_params = replace_keywords('\n'.join(self.task.parameters.split('\n')[1:]))
 
     with open(target_phil_path, 'w') as f:
       f.write(phil_params)
@@ -906,12 +912,13 @@ class PhenixJob(Job):
       params.nnodes = params.nnodes_merge
     params.use_mpi = False
     params.shifter.staging = None
-    if 'upload' in command:
-      params.nnodes = 1
-      params.nproc_per_node = 1
-      #params.queue = 'shared'
-    else:
+    if not('upload' in command or 'evaluate_anom' in command):
       params.env_script = params.phenix_script
+      if not params.extra_options:
+        params.extra_options = ""
+      params.extra_options.append("--export=None")
+    params.nnodes = 1
+    params.nproc_per_node = 1
 
     if params.method == 'shifter' and 'upload' not in command:
        import libtbx.load_env
@@ -920,7 +927,7 @@ class PhenixJob(Job):
        params.shifter.srun_script_template = os.path.join( \
          libtbx.env.find_in_repositories("xfel/ui/db/cfgs"), "phenix_srun.sh")
 
-    return do_submit(command, submit_path, output_path, params, log_name="log.out", err_name="err.out", job_name=identifier_string)
+    return do_submit(command, submit_path, output_path, params, log_name="out.log", err_name="err.log", job_name=identifier_string)
 
 # Support classes and functions for job submission
 
@@ -935,7 +942,9 @@ class _job(object):
     self.dataset_version = dataset_version
 
   def __str__(self):
-    s = "Job: Trial %d, rg %d, run %s"%(self.trial.trial, self.rungroup.id, self.run.run)
+    s = "Job: Trial %s, rg %s, run %s"%(str(self.trial.trial) if self.trial else 'None',
+                                        str(self.rungroup.id) if self.rungroup else 'None',
+                                        self.run.run if self.run else 'None')
     if self.task:
       s += ", task %d %s"%(self.task.id, self.task.type)
     if self.dataset:
@@ -1162,6 +1171,7 @@ def submit_all_jobs(app):
 
       if next_version is not None:
         latest_version = app.create_dataset_version(dataset_id = dataset.id, version=next_version)
+        print("Created a new dataset version", next_version, "with jobs", [j.id for j in global_tasks[key]])
         for job in global_tasks[key]:
           latest_version.add_job(job)
 
