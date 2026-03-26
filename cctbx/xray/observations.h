@@ -140,7 +140,7 @@ namespace cctbx { namespace xray {
     };
 
     scitbx::af::shared<miller::index<> > indices_;
-    scitbx::af::shared<FloatType> data_, sigmas_;
+    scitbx::af::shared<FloatType> data_, sigmas_, wavelengths_;
     scitbx::af::shared<scitbx::af::shared<local_twin_component> >
       index_components_;
     scitbx::af::shared<twin_component<FloatType>*> merohedral_components_;
@@ -289,6 +289,15 @@ namespace cctbx { namespace xray {
       return index_components_.size() != 0;
     }
 
+    void set_wavelengths(const scitbx::af::shared<FloatType>& wls) {
+      CCTBX_ASSERT(indices_.size() == wls.size());
+      wavelengths_ = wls;
+    }
+
+    bool has_wavelengths() const {
+      return wavelengths_.size() != 0;
+    }
+
     iterator iterate(int i) const { return iterator(*this, i); }
 
     /* must be called before using scale(index) or iterator */
@@ -322,6 +331,9 @@ namespace cctbx { namespace xray {
                       : twin_fractions_[measured_scale_indices_[i]-2]->value;
       return rv;
     }
+
+    FloatType wavelength(int i) const { return wavelengths_[i]; }
+
     const twin_fraction<FloatType>* fraction(int i) const {
       return (measured_scale_indices_.size() == 0 ||
         measured_scale_indices_[i] < 2) ? 0
@@ -445,6 +457,8 @@ namespace cctbx { namespace xray {
     scitbx::af::shared<int> const& measured_scale_indices() const {
       return measured_scale_indices_;
     }
+
+    scitbx::af::shared<FloatType> const& wavelengths() const { return wavelengths_; }
 
     scitbx::af::shared<twin_fraction<FloatType>*> const& twin_fractions() const {
       return twin_fractions_;

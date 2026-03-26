@@ -99,6 +99,7 @@ namespace {
         .def("detwin", detwin)
         .def("customized_detwin", customized_detwin)
         .def("twin", twin)
+        .def("set_wavelenghts", &obst::set_wavelengths)
         ;
 
       typedef typename obst::iterator itrt;
