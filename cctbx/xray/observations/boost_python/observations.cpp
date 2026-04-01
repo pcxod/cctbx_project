@@ -57,16 +57,30 @@ namespace {
 
       class_<obst>("observations", no_init)
         .def(init<sgtbx::space_group const&,
-                 scitbx::af::shared<cctbx::miller::index<> > const&,
+                  scitbx::af::shared<cctbx::miller::index<> > const&,
                   scitbx::af::shared<FloatType> const&,
                   scitbx::af::shared<FloatType> const&,
-                  scitbx::af::shared<
-                    cctbx::xray::twin_component<FloatType>*> const& >
+                  scitbx::af::shared<int> const&,
+                  scitbx::af::shared<cctbx::xray::twin_fraction<FloatType>*> const&,
+                  scitbx::af::shared<FloatType> const& >
              ((arg("space_group"),
                arg("indices"),
                arg("data"),
                arg("sigmas"),
-               arg("merohedral_components"))))
+               arg("scale_indices"),
+               arg("twin_fractions"),
+               arg("wavelengths"))))
+        .def(init<sgtbx::space_group const&,
+          scitbx::af::shared<cctbx::miller::index<> > const&,
+          scitbx::af::shared<FloatType> const&,
+          scitbx::af::shared<FloatType> const&,
+          scitbx::af::shared<
+          cctbx::xray::twin_component<FloatType>*> const& >
+          ((arg("space_group"),
+            arg("indices"),
+            arg("data"),
+            arg("sigmas"),
+            arg("merohedral_components"))))
         .def(init<scitbx::af::shared<cctbx::miller::index<> > const&,
                   scitbx::af::shared<FloatType> const&,
                   scitbx::af::shared<FloatType> const&,
@@ -99,7 +113,6 @@ namespace {
         .def("detwin", detwin)
         .def("customized_detwin", customized_detwin)
         .def("twin", twin)
-        .def("set_wavelenghts", &obst::set_wavelengths)
         ;
 
       typedef typename obst::iterator itrt;
