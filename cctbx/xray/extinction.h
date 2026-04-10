@@ -60,8 +60,10 @@ namespace cctbx { namespace xray {
       FloatType fc_sq) const
     {
       FloatType l = wl == 0 ? this->wavelength : wl;
-      const FloatType sin_2t = u_cell.sin_two_theta(h, l);
-      return fc_sq*std::pow(l,3)/(sin_2t*1000);
+      //const FloatType sin_2t = u_cell.sin_two_theta(h, l);
+      const double x = u_cell.d_star_sq(h) * l * l * 0.25;
+      const double sin_2t =  std::sqrt(std::abs(x * (1 - x)));
+      return fc_sq*std::pow(l,3) * 0.001/(sin_2t*2);
     }
 
     uctbx::unit_cell const &u_cell;
