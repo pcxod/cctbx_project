@@ -60,6 +60,10 @@ namespace iotbx { namespace pdb { namespace hierarchy { namespace atoms {
   extract_fdp(
     af::const_ref<atom> const& atoms);
 
+  af::shared<double>
+  extract_resolution(
+    af::const_ref<atom> const& atoms);
+
   af::shared<std::size_t>
   extract_hetero(
     af::const_ref<atom> const& atoms);
@@ -128,6 +132,12 @@ namespace iotbx { namespace pdb { namespace hierarchy { namespace atoms {
   set_fdp(
     af::ref<atom> const& atoms,
     af::const_ref<double> const& new_fdp);
+
+  void
+  set_resolution(
+    af::ref<atom> const& atoms,
+    af::const_ref<double> const& new_resolution);
+
 
   void
   reset_serial(

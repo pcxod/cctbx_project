@@ -182,9 +182,7 @@ def test_addition_scatterers():
     special_position_settings = xrs,
     scatterers                = new_scatterers)
   model.add_solvent(
-    solvent_xray_structure = new_xrs,
-    refine_occupancies     = False,
-    refine_adp             = "isotropic")
+    solvent_xray_structure = new_xrs)
 
   pnps = pnp.manager(model = model)
   clashes = pnps.get_clashes()
@@ -232,6 +230,7 @@ def test_running_from_command_line():
     #self.file_to_delete.append(self.file_name)
   cmd = 'mmtbx.nonbonded_overlaps {}'
   cmd = cmd.format(file_name)
+  print(cmd)
   r = easy_run.go(cmd, join_stdout_stderr=False)
   assert(not bool(r.stderr_lines))
 

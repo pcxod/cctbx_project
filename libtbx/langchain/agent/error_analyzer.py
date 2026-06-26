@@ -1,0 +1,1087 @@
+"""
+Error Analyzer - Automatic Recovery from Recoverable Errors.
+
+This module detects structured errors in PHENIX log output and determines
+appropriate recovery strategies. It enables the agent to automatically
+recover from certain well-defined error conditions without user intervention.
+
+Currently supported errors:
+- ambiguous_data_labels: Multiple data arrays in MTZ file
+
+Usage:
+    from libtbx.langchain.agent.error_analyzer import ErrorAnalyzer
+
+    analyzer = ErrorAnalyzer()
+    recovery = analyzer.analyze(
+        log_text="...",
+        program="phenix.autosol",
+        context={"project_advice": "MRSAD phasing"},
+        session=session
+    )
+
+    if recovery:
+        # recovery.flags contains the fix
+        # recovery.retry_program is the program to re-run
+        session.set_recovery_strategy(
+            recovery.affected_file,
+            recovery.flags,
+            recovery.retry_program,
+            recovery.reason
+        )
+        session.data["force_retry_program"] = recovery.retry_program
+
+Design Principles:
+1. Extract parameter names from error messages (don't hardcode)
+2. Use context (program type, project advice) to make smart selections
+3. Track retries to prevent infinite loops
+4. Key recovery strategies by filename to avoid cross-contamination
+"""
+
+from __future__ import absolute_import, division, print_function
+
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Any, Tuple
+
+# Silence unused import warnings (these are used in type hints)
+assert Optional is not None
+assert Any is not None
+assert Tuple is not None
+
+# YAML loading - use same pattern as other knowledge files
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+# =============================================================================
+# DATA CLASSES
+# =============================================================================
+
+@dataclass
+class ErrorRecovery:
+    """
+    Information needed to recover from an error.
+
+    Attributes:
+        error_type: Type of error (e.g., "ambiguous_data_labels")
+        affected_file: Path to the file causing the error
+        flags: Dict of parameter flags to add to command
+        reason: Human-readable explanation of the recovery
+        retry_program: Program to force-retry
+        selected_choice: The option that was selected
+        all_choices: All available options
+        selected_label: The main label extracted (e.g., "FTOXD3")
+        selected_label_pair: The full label pair (e.g., "FTOXD3,SIGFTOXD3")
+        strip_flags: List of flag-name prefixes to REMOVE from the
+            retry command (v119.H17).  Used by ``strip_parameter``-
+            resolution errors (e.g., missing_phib_input_map_file,
+            rfree_flags_mismatch).  Each entry is a parameter name
+            like "map_file" or "xray_data.r_free_flags.generate";
+            the executor matches "<name>=<value>" in the retry
+            command and removes it.  See PATCH_NOTES_H17 for the
+            executor-side regex contract (must handle quoted values
+            with spaces AND PHIL-style spacing around the equals).
+    """
+    error_type: str
+    affected_file: str
+    flags: Dict[str, str]
+    reason: str
+    retry_program: str
+    selected_choice: str
+    all_choices: List[str] = field(default_factory=list)
+    selected_label: str = ""
+    selected_label_pair: str = ""
+    strip_flags: List[str] = field(default_factory=list)
+
+
+# =============================================================================
+# ERROR ANALYZER
+# =============================================================================
+
+class ErrorAnalyzer:
+    """
+    Analyzes program errors and determines recovery strategies.
+
+    This class:
+    1. Detects recoverable errors in log output
+    2. Extracts structured information (choices, keywords)
+    3. Applies context-aware resolution logic
+    4. Tracks retry attempts to prevent infinite loops
+
+    Configuration is loaded from knowledge/recoverable_errors.yaml.
+    """
+
+    def __init__(self):
+        """Initialize with configuration from YAML."""
+        self._config = self._load_config()
+        self._label_patterns = self._config.get("label_patterns", {})
+        self._program_prefs = self._config.get("program_data_preferences", {})
+        self._context_keywords = self._config.get("context_keywords", {})
+
+    def _load_config(self) -> dict:
+        """Load recoverable errors configuration from YAML."""
+        if yaml is None:
+            print("Warning: PyYAML not available, error recovery disabled")
+            return {}
+
+        # Find the knowledge directory
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Try parent/knowledge (agent/ -> knowledge/)
+        knowledge_dir = os.path.join(os.path.dirname(this_dir), "knowledge")
+        yaml_path = os.path.join(knowledge_dir, "recoverable_errors.yaml")
+
+        if not os.path.exists(yaml_path):
+            # Try sibling directory
+            yaml_path = os.path.join(this_dir, "..", "knowledge", "recoverable_errors.yaml")
+            yaml_path = os.path.normpath(yaml_path)
+
+        if not os.path.exists(yaml_path):
+            print(f"Warning: recoverable_errors.yaml not found")
+            return {}
+
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"Warning: Could not load recoverable_errors.yaml: {e}")
+            return {}
+
+    # =========================================================================
+    # MAIN API
+    # =========================================================================
+
+    def analyze(self, log_text: str, program: str,
+                context: Dict[str, Any], session) -> Optional[ErrorRecovery]:
+        """
+        Analyze log text for recoverable errors.
+
+        This is the main entry point for error analysis. It:
+        1. Detects the error type (if any)
+        2. Checks retry limits
+        3. Extracts structured information
+        4. Determines recovery strategy
+        5. Updates retry tracking
+
+        Args:
+            log_text: Full log/error text from the failed program
+            program: Program name that failed (e.g., "phenix.autosol")
+            context: Dict containing:
+                - project_advice: User's project description
+                - history: List of previous cycle records
+                - experiment_type: "xray", "cryoem", "sad", etc.
+            session: Session object for tracking retries
+
+        Returns:
+            ErrorRecovery if a recovery is possible, None otherwise
+        """
+        if not log_text:
+            return None
+
+        # 1. Detect error type
+        error_type = self._detect_error_type(log_text)
+        if not error_type:
+            return None
+
+        # 2. Check retry limits
+        can_retry, limit_reason = self._check_retry_limits(session, error_type)
+        if not can_retry:
+            self._log_max_retries(error_type, limit_reason)
+            return None
+
+        # 3. Extract structured information
+        error_info = self._extract_error_info(log_text, error_type)
+        if not error_info:
+            return None
+
+        # 4. Determine recovery strategy
+        recovery = self._determine_recovery(error_type, error_info, program, context)
+
+        # 5. Update retry tracking in session
+        if recovery and session:
+            self._update_retry_tracking(
+                session,
+                error_type,
+                recovery.affected_file,
+                recovery.selected_choice
+            )
+
+        return recovery
+
+    def get_suggestion(self, log_text: str, program: str) -> Optional[str]:
+        """
+        Get a human-readable suggestion without attempting recovery.
+
+        Used when auto_recovery=False to inform the user what could be done.
+
+        Args:
+            log_text: Log/error text
+            program: Program that failed
+
+        Returns:
+            Human-readable suggestion string, or None
+        """
+        error_type = self._detect_error_type(log_text)
+        if not error_type:
+            return None
+
+        error_info = self._extract_error_info(log_text, error_type)
+        if not error_info:
+            return None
+
+        # Generate suggestion text based on error type
+        if error_type == "ambiguous_data_labels":
+            keyword = error_info.get("keyword", "obs_labels")
+            choices = error_info.get("choices", [])
+            if choices:
+                # Show first few choices
+                choices_preview = choices[:3]
+                choices_str = ", ".join(
+                    self._extract_main_label(c) for c in choices_preview
+                )
+                if len(choices) > 3:
+                    choices_str += ", ..."
+                return (
+                    f"Ambiguous data labels detected. "
+                    f"Add {keyword}=\"YOUR_CHOICE\" to the command, "
+                    f"where YOUR_CHOICE is one of: {choices_str}"
+                )
+
+        return None
+
+    # =========================================================================
+    # DETECTION
+    # =========================================================================
+
+    def _detect_error_type(self, log_text: str) -> Optional[str]:
+        """
+        Detect which recoverable error type (if any) is present.
+
+        Searches log text for patterns defined in the YAML config.
+        Returns the first matching error type.
+        """
+        errors = self._config.get("errors", {})
+
+        for error_type, error_def in errors.items():
+            patterns = error_def.get("detection_patterns", [])
+            for pattern in patterns:
+                try:
+                    # Use DOTALL so .* matches newlines (for multi-line patterns)
+                    if re.search(pattern, log_text, re.IGNORECASE | re.DOTALL):
+                        return error_type
+                except re.error:
+                    # Invalid regex pattern in config
+                    continue
+
+        return None
+
+    # =========================================================================
+    # EXTRACTION
+    # =========================================================================
+
+    def _extract_error_info(self, log_text: str,
+                            error_type: str) -> Optional[Dict[str, Any]]:
+        """
+        Extract structured information from error message.
+
+        Dispatches to error-type-specific extraction methods.
+        """
+        error_def = self._config.get("errors", {}).get(error_type, {})
+
+        if error_type == "ambiguous_data_labels":
+            return self._extract_ambiguous_labels_info(log_text, error_def, error_type)
+        elif error_type == "ambiguous_experimental_phases":
+            return self._extract_ambiguous_labels_info(log_text, error_def, error_type)
+
+        # v119.H17: strip_parameter resolutions don't need extracted
+        # info (no choices to parse, no labels to classify — the YAML
+        # `strip_parameters` list is the entire recovery payload).
+        # Return a non-empty marker dict so analyze() doesn't bail at
+        # the "if not error_info" check.
+        if error_def.get("resolution") == "strip_parameter":
+            return {"resolution": "strip_parameter"}
+
+        # force_retry resolutions need no extracted info either — the retry is
+        # rebuilt downstream by the BUILD node.  Return a non-empty marker so
+        # analyze() doesn't bail at the "if not error_info" check (line ~197).
+        if error_def.get("resolution") == "force_retry":
+            return {"resolution": "force_retry"}
+
+        # add_parameters resolutions (e.g. autobuild_hl_without_phib) add a fixed
+        # flag (use_hl_if_present=False) on retry.  The flag is FILE-KEYED, so we
+        # must extract the offending data MTZ from the log here — without it the
+        # recovery keys to "" , matches no selected file, and the flag is
+        # silently dropped.
+        #
+        # Use the LAST match, not the first: autobuild prints "Getting column
+        # labels from <X> for input data file" for several MTZs earlier in the
+        # same log buffer (e.g. an AutoSol internal data file), and the file that
+        # actually triggered THIS abort is the most recent one before it.  A
+        # first-match grab keys the recovery to the wrong file -> the flag never
+        # reaches the reselected data MTZ -> silent no-op.  Fall back to the
+        # "Using ... for refinement" line (also last-match).
+        if error_def.get("resolution") == "add_parameters":
+            ms = re.findall(
+                r"Getting column labels from (\S+\.mtz) for input data file",
+                log_text)
+            if not ms:
+                ms = re.findall(r"Using (\S+\.mtz) for refinement", log_text)
+            return {"resolution": "add_parameters",
+                    "affected_file": ms[-1] if ms else ""}
+
+        return None
+
+    def _extract_ambiguous_labels_info(self, log_text: str,
+                                       error_def: dict,
+                                       error_type: str = "ambiguous_data_labels") -> Optional[Dict[str, Any]]:
+        """
+        Extract keyword and choices from ambiguous data labels error.
+
+        Parses error messages like:
+            Multiple equally suitable arrays...
+            Possible choices:
+              /path/data.mtz:IMEAN,SIGIMEAN
+              /path/data.mtz:I(+),SIGI(+),I(-),SIGI(-)
+            Please use scaling.input.xray_data.obs_labels
+            to specify an unambiguous substring.
+        """
+        result = {
+            "keyword": None,
+            "choices": [],
+            "affected_file": None,
+            "choice_details": []  # [(file_path, labels), ...]
+        }
+
+        # Extract keyword name (the parameter to use)
+        keyword_pattern = error_def.get("keyword_extraction", "")
+        if keyword_pattern:
+            try:
+                match = re.search(keyword_pattern, log_text, re.IGNORECASE | re.MULTILINE)
+                if match:
+                    result["keyword"] = match.group(1)
+            except (re.error, IndexError):
+                pass
+
+        # If no keyword found, try common fallbacks
+        if not result["keyword"]:
+            # Check for common keywords in the text
+            common_keywords = [
+                "scaling.input.xray_data.obs_labels",
+                "miller_array.labels.name",
+                "obs_labels",
+                "labels.name",
+                "labels",
+            ]
+            for kw in common_keywords:
+                if kw in log_text:
+                    result["keyword"] = kw
+                    break
+
+        # Extract choices (file:labels pairs)
+        choice_pattern = error_def.get("choice_extraction", "")
+        if choice_pattern:
+            for line in log_text.split('\n'):
+                line = line.strip()
+                try:
+                    match = re.match(choice_pattern, line)
+                    if match:
+                        file_path = match.group(1)
+                        labels = match.group(2).strip()
+                        result["choices"].append(labels)
+                        result["choice_details"].append((file_path, labels))
+                        if not result["affected_file"]:
+                            result["affected_file"] = file_path
+                except (re.error, IndexError):
+                    continue
+
+        # Validation: we need at least choices to proceed
+        if not result["choices"]:
+            return None
+
+        # Default keyword if still not found - depends on error type
+        if not result["keyword"]:
+            if error_type == "ambiguous_experimental_phases":
+                result["keyword"] = "miller_array.labels.name"
+            else:
+                result["keyword"] = "obs_labels"
+
+        return result
+
+    # =========================================================================
+    # RESOLUTION
+    # =========================================================================
+
+    def _determine_recovery(self, error_type: str, error_info: Dict[str, Any],
+                           program: str, context: Dict[str, Any]) -> Optional[ErrorRecovery]:
+        """
+        Determine the recovery strategy based on error type and context.
+        """
+        if error_type == "ambiguous_data_labels":
+            return self._resolve_ambiguous_labels(error_info, program, context)
+        elif error_type == "ambiguous_experimental_phases":
+            return self._resolve_ambiguous_phases(error_info, program, context)
+
+        # v119.H17: generic strip_parameter resolution.  Any error
+        # whose YAML declares `resolution: strip_parameter` and
+        # provides a `strip_parameters` list is dispatched here.
+        # Used by:
+        #   - missing_phib_input_map_file (the H17 trigger)
+        #   - rfree_flags_mismatch (retroactive — the resolution was
+        #     declared in YAML but had no code wiring before H17)
+        error_def = self._config.get("errors", {}).get(error_type, {})
+        if error_def.get("resolution") == "strip_parameter":
+            return self._resolve_strip_parameter(error_type, error_def, program)
+
+        # rfree_flags_missing (and any future force_retry error): the fix is
+        # not a flag edit but a retry — the server-side BUILD node rebuilds the
+        # command with empty files={}, re-selecting the locked R-free MTZ (or
+        # falling back to generate=True).  See _resolve_force_retry.
+        if error_def.get("resolution") == "force_retry":
+            return self._resolve_force_retry(error_type, error_def, program)
+
+        # add_parameters (e.g. autobuild_hl_without_phib): retry with a fixed
+        # flag added, keyed to the affected data MTZ so command_builder merges it
+        # when that file is reselected.  Passes error_info for the affected_file.
+        if error_def.get("resolution") == "add_parameters":
+            return self._resolve_add_parameters(
+                error_type, error_def, program, error_info)
+
+        return None
+
+    def _resolve_strip_parameter(self, error_type: str,
+                                 error_def: Dict[str, Any],
+                                 program: str) -> Optional[ErrorRecovery]:
+        """
+        Build a recovery that strips one or more parameters from the
+        retry command.
+
+        Generic — works for any error whose YAML declares
+        ``resolution: strip_parameter`` and a non-empty
+        ``strip_parameters`` list.  Examples:
+
+        - ``missing_phib_input_map_file``: strip ``map_file=``,
+          ``input_map_file=``, etc.  Used when autobuild is given a
+          map_file MTZ lacking PHIB phase columns.
+        - ``rfree_flags_mismatch``: strip
+          ``xray_data.r_free_flags.generate=True``.  Used when the
+          input MTZ already has R-free flags.
+
+        The actual stripping happens in the executor (see
+        PATCH_NOTES_H17 for the contract regex).  This handler just
+        emits the list of flag-name prefixes to remove.
+
+        Args:
+            error_type: The YAML error key (e.g.
+                "missing_phib_input_map_file").
+            error_def: The full YAML entry for this error.
+            program: The program that produced the error (for
+                retry_program).
+
+        Returns:
+            ErrorRecovery with non-empty ``strip_flags``, or None if
+            the YAML is malformed (e.g. empty strip_parameters list).
+        """
+        strip_list = error_def.get("strip_parameters", [])
+        if not strip_list:
+            return None
+
+        description = error_def.get("description", error_type)
+        return ErrorRecovery(
+            error_type=error_type,
+            affected_file="",      # not specific to a single file
+            flags={},              # nothing to ADD
+            strip_flags=list(strip_list),
+            reason=("Stripping parameter(s) %s from %s retry: %s"
+                    % (strip_list, program, description)),
+            retry_program=program,
+            selected_choice="",
+        )
+
+    def _resolve_force_retry(self, error_type: str,
+                             error_def: Dict[str, Any],
+                             program: str) -> Optional[ErrorRecovery]:
+        """
+        Build a recovery that simply forces a retry of the program — with
+        NO flag additions and NO flag strips.
+
+        Mirror of _resolve_strip_parameter, but for errors whose YAML declares
+        ``resolution: force_retry``.  The fix lives downstream: the forced
+        retry is rebuilt by the server-side BUILD node / command_builder, which
+        re-selects files with empty ``files={}`` — substituting the locked
+        R-free MTZ (``context.rfree_mtz``) for the data slot when one is locked
+        (preserving R-free flag continuity), or falling back to
+        ``generate=True`` when no MTZ is locked.  This handler therefore emits
+        an ErrorRecovery with empty ``flags`` AND empty ``strip_flags``; the
+        only payload is the force-retry signal (``retry_program``), which
+        _handle_recovery turns into ``set_force_retry_program``.
+
+        Used by:
+        - ``rfree_flags_missing``: "No array of R-free flags found" — retry so
+          the builder re-selects the locked R-free MTZ.
+
+        Args:
+            error_type: The YAML error key (e.g. "rfree_flags_missing").
+            error_def: The full YAML entry for this error.
+            program: The program that produced the error (fallback retry target
+                if the YAML omits ``retry_program``).
+
+        Returns:
+            ErrorRecovery with empty flags and empty strip_flags, carrying the
+            retry_program signal.
+        """
+        retry_program = error_def.get("retry_program", program)
+        description = error_def.get("description", error_type)
+        return ErrorRecovery(
+            error_type=error_type,
+            affected_file="",      # not specific to a single file
+            flags={},              # nothing to ADD
+            strip_flags=[],        # nothing to STRIP
+            reason=("Forcing retry of %s; builder re-selects files "
+                    "(incl. locked R-free MTZ): %s"
+                    % (retry_program, description)),
+            retry_program=retry_program,
+            selected_choice="",
+        )
+
+    def _resolve_add_parameters(self, error_type: str, error_def: dict,
+                                program: str,
+                                error_info: Dict[str, Any]) -> Optional[ErrorRecovery]:
+        """Add fixed parameters on retry (e.g. use_hl_if_present=False).
+
+        The parameters in the YAML ``add_parameters`` map are returned as a
+        FILE-KEYED recovery (keyed to ``error_info['affected_file']``) so
+        command_builder merges them — and the post-assembly injection appends
+        them to the command string — when that file is reselected on retry.
+        Modelled on the file-keyed obs_labels recovery; NOT a global flag.
+
+        If no affected_file could be extracted, decline recovery (return None)
+        rather than fire a recovery whose flag would key to "" and silently
+        never reach the command.
+        """
+        add = dict(error_def.get("add_parameters", {}))
+        affected_file = error_info.get("affected_file", "")
+        retry_program = error_def.get("retry_program", program)
+        if not affected_file or not add:
+            return None
+        return ErrorRecovery(
+            error_type=error_type,
+            affected_file=affected_file,
+            flags=add,
+            strip_flags=[],
+            reason=("Adding %s on retry of %s (%s)"
+                    % (add, retry_program, error_type)),
+            retry_program=retry_program,
+            selected_choice="",
+        )
+
+    def _resolve_ambiguous_labels(self, error_info: Dict[str, Any],
+                                  program: str,
+                                  context: Dict[str, Any]) -> Optional[ErrorRecovery]:
+        """
+        Resolve ambiguous data labels by selecting appropriate array.
+
+        Selection logic:
+        1. Determine if program/context needs anomalous data
+        2. Classify each choice as anomalous or merged
+        3. Select the appropriate choice
+        4. Build the recovery with correct parameter
+        """
+        choices = error_info.get("choices", [])
+        keyword = error_info.get("keyword")
+        affected_file = error_info.get("affected_file", "unknown")
+
+        if not choices or not keyword:
+            return None
+
+        # Determine if we need anomalous data
+        needs_anomalous = self._needs_anomalous_data(program, context)
+
+        # Classify choices
+        anomalous_choices = [c for c in choices if self._is_anomalous_label(c)]
+        merged_choices = [c for c in choices if self._is_merged_label(c)]
+
+        # Select appropriate choice with clear reasoning
+        if needs_anomalous:
+            if anomalous_choices:
+                selected = anomalous_choices[0]
+                reason = f"Selected anomalous data for {program} (phasing workflow)"
+            else:
+                # No anomalous available - warn but proceed
+                selected = choices[0]
+                reason = f"WARNING: No anomalous data found for {program}, using first available"
+        else:
+            if merged_choices:
+                selected = merged_choices[0]
+                reason = f"Selected merged data for {program}"
+            elif anomalous_choices:
+                # Only anomalous available - that's okay for most programs
+                selected = anomalous_choices[0]
+                reason = f"Using anomalous data (only option) for {program}"
+            else:
+                selected = choices[0]
+                reason = f"Using first available data array for {program}"
+
+        # Extract the main label for the flag value
+        # E.g., "I_CuKa(+),SIGI_CuKa(+),I_CuKa(-)" -> "I_CuKa(+)"
+        label_value = self._extract_main_label(selected)
+
+        return ErrorRecovery(
+            error_type="ambiguous_data_labels",
+            affected_file=affected_file,
+            flags={keyword: label_value},
+            reason=reason,
+            retry_program=program,
+            selected_choice=selected,
+            all_choices=choices,
+            selected_label=label_value,
+            selected_label_pair=selected
+        )
+
+    def _resolve_ambiguous_phases(self, error_info: Dict[str, Any],
+                                  program: str,
+                                  context: Dict[str, Any]) -> Optional[ErrorRecovery]:
+        """
+        Resolve ambiguous experimental phase labels by selecting appropriate HL coefficients.
+
+        For phenix.refine and other refinement programs, we typically want the
+        standard HL coefficients (HLAM,HLBM,HLCM,HLDM) not the anomalous ones
+        (HLanomA,HLanomB,HLanomC,HLanomD).
+
+        Selection logic:
+        1. Check if this is a phasing program that needs anomalous HL
+        2. Otherwise prefer standard (non-anomalous) HL coefficients
+        """
+        choices = error_info.get("choices", [])
+        keyword = error_info.get("keyword")
+        affected_file = error_info.get("affected_file", "unknown")
+
+        if not choices or not keyword:
+            return None
+
+        # Classify HL coefficient choices
+        standard_hl = []
+        anomalous_hl = []
+
+        for choice in choices:
+            if self._is_anomalous_hl(choice):
+                anomalous_hl.append(choice)
+            else:
+                standard_hl.append(choice)
+
+        # Determine if we need anomalous phases
+        needs_anomalous = self._needs_anomalous_data(program, context)
+
+        # Select appropriate choice
+        if needs_anomalous:
+            if anomalous_hl:
+                selected = anomalous_hl[0]
+                reason = f"Selected anomalous HL coefficients for {program} (phasing workflow)"
+            elif standard_hl:
+                selected = standard_hl[0]
+                reason = f"Using standard HL coefficients for {program} (no anomalous available)"
+            else:
+                selected = choices[0]
+                reason = f"Using first available HL coefficients for {program}"
+        else:
+            # For refinement, prefer standard (non-anomalous) HL coefficients
+            if standard_hl:
+                selected = standard_hl[0]
+                reason = f"Selected standard HL coefficients for {program}"
+            elif anomalous_hl:
+                selected = anomalous_hl[0]
+                reason = f"Using anomalous HL coefficients for {program} (only option available)"
+            else:
+                selected = choices[0]
+                reason = f"Using first available HL coefficients for {program}"
+
+        # Extract the main label for the flag value
+        label_value = self._extract_main_label(selected)
+
+        return ErrorRecovery(
+            error_type="ambiguous_experimental_phases",
+            affected_file=affected_file,
+            flags={keyword: label_value},
+            reason=reason,
+            retry_program=program,
+            selected_choice=selected,
+            all_choices=choices,
+            selected_label=label_value,
+            selected_label_pair=selected
+        )
+
+    def _is_anomalous_hl(self, label: str) -> bool:
+        """
+        Check if HL coefficient label indicates anomalous phases.
+
+        Anomalous HL typically have 'anom' in the name:
+        - HLanomA, HLanomB, HLanomC, HLanomD
+        """
+        label_lower = label.lower()
+        return 'anom' in label_lower
+
+    # =========================================================================
+    # LABEL CLASSIFICATION
+    # =========================================================================
+
+    def _needs_anomalous_data(self, program: str, context: Dict[str, Any]) -> bool:
+        """
+        Determine if the program/context needs anomalous data.
+
+        Checks in order:
+        1. Program type (autosol, hyss, etc. need anomalous)
+        2. Project advice keywords (SAD, MAD, anomalous)
+        3. Experiment type
+        4. History (previous phasing programs)
+        """
+        # Normalize program name
+        prog_normalized = program.lower().replace("phenix.", "")
+
+        # 1. Check program preference from config
+        anomalous_programs = self._program_prefs.get("anomalous", [])
+        for ap in anomalous_programs:
+            ap_normalized = ap.lower().replace("phenix.", "")
+            if prog_normalized == ap_normalized:
+                return True
+
+        # 2. Check project advice for keywords
+        advice = context.get("project_advice", "").lower()
+        anomalous_keywords = self._context_keywords.get("anomalous_workflow", [])
+        for kw in anomalous_keywords:
+            if kw.lower() in advice:
+                return True
+
+        # 3. Check experiment type
+        exp_type = context.get("experiment_type", "").lower()
+        if exp_type in ["sad", "mad", "mrsad"]:
+            return True
+
+        # 4. Check history for phasing programs
+        history = context.get("history", [])
+        phasing_indicators = ["autosol", "hyss", "phaser_ep", "solve"]
+        for entry in history:
+            if isinstance(entry, dict):
+                prog = (entry.get("program", "") + " " + entry.get("command", "")).lower()
+                for indicator in phasing_indicators:
+                    if indicator in prog:
+                        return True
+
+        return False
+
+    def _is_anomalous_label(self, label: str) -> bool:
+        """
+        Check if label string indicates anomalous data.
+
+        Matches patterns like I(+), F(-), DANO, *anom, etc.
+        """
+        patterns = self._label_patterns.get("anomalous_indicators", [])
+        label_lower = label.lower()
+
+        for pattern in patterns:
+            try:
+                if re.search(pattern, label, re.IGNORECASE):
+                    return True
+            except re.error:
+                # Simple string match as fallback
+                if pattern.lower() in label_lower:
+                    return True
+
+        return False
+
+    def _is_merged_label(self, label: str) -> bool:
+        """
+        Check if label string indicates merged data.
+
+        Matches patterns like IMEAN, FMEAN, F_obs, etc.
+        """
+        patterns = self._label_patterns.get("merged_indicators", [])
+        label_lower = label.lower()
+
+        for pattern in patterns:
+            try:
+                if re.search(pattern, label, re.IGNORECASE):
+                    return True
+            except re.error:
+                # Simple string match as fallback
+                if pattern.lower() in label_lower:
+                    return True
+
+        return False
+
+    def _extract_main_label(self, label_string: str) -> str:
+        """
+        Extract the main label from a comma-separated label string.
+
+        PHENIX typically wants just the first column name.
+        E.g., "I_CuKa(+),SIGI_CuKa(+),I_CuKa(-),SIGI_CuKa(-)" -> "I_CuKa(+)"
+        """
+        if not label_string:
+            return label_string
+
+        parts = label_string.split(",")
+        return parts[0].strip() if parts else label_string
+
+    # =========================================================================
+    # RETRY TRACKING
+    # =========================================================================
+
+    def _check_retry_limits(self, session, error_type: str) -> Tuple[bool, Optional[str]]:
+        """
+        Check if we've exceeded retry limits for this error type.
+
+        Returns (can_retry, reason_if_not).
+        """
+        if session is None:
+            # No session = no tracking = allow retry
+            return True, None
+
+        error_def = self._config.get("errors", {}).get(error_type, {})
+        max_retries = error_def.get("max_retries", 3)
+
+        attempts = session.data.get("recovery_attempts", {}).get(error_type, {})
+        count = attempts.get("count", 0)
+
+        if count >= max_retries:
+            files_tried = attempts.get("files_tried", {})
+            return False, f"Max recovery attempts ({max_retries}) reached. Tried: {files_tried}"
+
+        return True, None
+
+    def _update_retry_tracking(self, session, error_type: str,
+                               affected_file: str, selected_choice: str):
+        """
+        Update session with new retry attempt.
+
+        Tracks:
+        - Total count per error type
+        - Which files we've tried
+        - Which choices we've selected per file
+        """
+        if session is None:
+            return
+
+        recovery_attempts = session.data.setdefault("recovery_attempts", {})
+        type_attempts = recovery_attempts.setdefault(error_type, {
+            "count": 0,
+            "files_tried": {}
+        })
+
+        # Increment count
+        type_attempts["count"] = type_attempts.get("count", 0) + 1
+
+        # Track which choices we've tried for this file
+        files_tried = type_attempts.setdefault("files_tried", {})
+        file_choices = files_tried.setdefault(affected_file, [])
+        if selected_choice not in file_choices:
+            file_choices.append(selected_choice)
+
+    def _log_max_retries(self, error_type: str, reason: str):
+        """Log when max retries reached."""
+        print(f"\n{'='*60}")
+        print(f"[WARNING] RECOVERY LIMIT REACHED")
+        print(f"Error type: {error_type}")
+        print(f"Reason: {reason}")
+        print(f"The agent will not attempt further automatic recovery.")
+        print(f"{'='*60}\n")
+
+
+# =============================================================================
+# MODULE-LEVEL CONVENIENCE FUNCTIONS
+# =============================================================================
+
+_analyzer_instance = None
+
+def get_analyzer() -> ErrorAnalyzer:
+    """Get singleton ErrorAnalyzer instance."""
+    global _analyzer_instance
+    if _analyzer_instance is None:
+        _analyzer_instance = ErrorAnalyzer()
+    return _analyzer_instance
+
+
+def analyze_error(log_text: str, program: str,
+                  context: Dict[str, Any], session) -> Optional[ErrorRecovery]:
+    """
+    Convenience function to analyze an error.
+
+    Equivalent to ErrorAnalyzer().analyze(...).
+    """
+    return get_analyzer().analyze(log_text, program, context, session)
+
+
+_detector_instance = None
+
+def get_diagnosis_detector() -> 'DiagnosisDetector':
+    """
+    Get singleton DiagnosisDetector instance.
+
+    Mirrors get_analyzer() — avoids re-parsing diagnosable_errors.yaml on
+    every failed program execution.
+    """
+    global _detector_instance
+    if _detector_instance is None:
+        _detector_instance = DiagnosisDetector()
+    return _detector_instance
+
+
+# =============================================================================
+# DIAGNOSIS DETECTOR
+# =============================================================================
+
+class DiagnosisDetector:
+    """
+    Detects diagnosable-terminal errors in program result/log text.
+
+    Unlike ErrorAnalyzer (which prepares retry strategies for recoverable
+    errors), this class only detects; the caller decides what to do.
+    When a match is found the appropriate action is always to stop the run
+    and call the LLM for a diagnosis.
+
+    Configuration is loaded from knowledge/diagnosable_errors.yaml.
+
+    The two YAML files (recoverable_errors.yaml / diagnosable_errors.yaml)
+    are intentionally kept separate so no error can accidentally be treated
+    as both retryable and terminal.
+
+    Usage:
+        detector = DiagnosisDetector()
+        match = detector.detect(result_text)
+        if match:
+            error_type, description, excerpt = match
+            # ... stop the run and diagnose
+    """
+
+    def __init__(self):
+        self._config = self._load_config()
+
+    # =========================================================================
+    # CONFIGURATION
+    # =========================================================================
+
+    def _load_config(self) -> dict:
+        """Load diagnosable errors configuration from YAML."""
+        if yaml is None:
+            print("Warning: PyYAML not available, failure diagnosis disabled")
+            return {}
+
+        # Resolve knowledge/ directory relative to this file (agent/).
+        # Mirrors the exact path-resolution logic used by ErrorAnalyzer.
+        this_dir = os.path.dirname(os.path.abspath(__file__))
+
+        # Primary: parent/knowledge  (agent/ -> ../knowledge/)
+        knowledge_dir = os.path.join(os.path.dirname(this_dir), "knowledge")
+        yaml_path = os.path.join(knowledge_dir, "diagnosable_errors.yaml")
+
+        if not os.path.exists(yaml_path):
+            # Fallback: sibling path  (handles some install layouts)
+            yaml_path = os.path.join(this_dir, "..", "knowledge",
+                                     "diagnosable_errors.yaml")
+            yaml_path = os.path.normpath(yaml_path)
+
+        if not os.path.exists(yaml_path):
+            # Missing YAML is not fatal — detection simply returns None always.
+            return {}
+
+        try:
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            print(f"Warning: Could not load diagnosable_errors.yaml: {e}")
+            return {}
+
+    # =========================================================================
+    # PUBLIC API
+    # =========================================================================
+
+    def detect(self, result_text: str) -> Optional[Tuple[str, str, str]]:
+        """
+        Check result_text for a diagnosable-terminal error.
+
+        Searches all patterns in diagnosable_errors.yaml case-insensitively.
+        Returns on the first match.
+
+        Args:
+            result_text: The full result/log text from the failing program.
+
+        Returns:
+            (error_type, description, excerpt) if a match is found, else None.
+
+            error_type:  Key from the YAML (e.g. 'crystal_symmetry_mismatch').
+            description: Human-readable label from the YAML.
+            excerpt:     Up to ~20 lines centred on the first matching line,
+                         suitable for display in the HTML report and the
+                         diagnosis prompt.
+        """
+        if not result_text:
+            return None
+
+        errors = self._config.get("errors", {})
+
+        for error_type, error_def in errors.items():
+            patterns = error_def.get("detection_patterns", [])
+            for pattern in patterns:
+                try:
+                    if re.search(pattern, result_text,
+                                 re.IGNORECASE | re.DOTALL):
+                        description = error_def.get("description", error_type)
+                        excerpt = self._extract_excerpt(result_text, pattern)
+                        return (error_type, description, excerpt)
+                except re.error:
+                    # Malformed regex in config — skip this pattern silently.
+                    continue
+
+        return None
+
+    def get_hint(self, error_type: str) -> str:
+        """
+        Return the diagnosis_hint for a given error type.
+
+        Used by build_diagnosis_prompt (server-side) and by the fallback
+        rules-only message (client-side, no LLM).
+
+        Returns:
+            The hint string, or '' if the error_type is not found.
+        """
+        error_def = self._config.get("errors", {}).get(error_type, {})
+        return error_def.get("diagnosis_hint", "").strip()
+
+    # =========================================================================
+    # INTERNAL HELPERS
+    # =========================================================================
+
+    def _extract_excerpt(self, text: str, matching_pattern: str,
+                         context_lines: int = 10) -> str:
+        """
+        Extract a readable excerpt centred on the first matching line.
+
+        Args:
+            text:             Full result/log text.
+            matching_pattern: The regex that triggered detection.
+            context_lines:    Number of lines before and after the match to
+                              include (default 10, giving ~20 lines total).
+
+        Returns:
+            A string containing the matching line plus surrounding context,
+            or the last 20 lines of the text as a fallback.
+        """
+        lines = text.splitlines()
+
+        # Find the first matching line index
+        match_idx = None
+        for i, line in enumerate(lines):
+            try:
+                if re.search(matching_pattern, line, re.IGNORECASE):
+                    match_idx = i
+                    break
+            except re.error:
+                pass
+
+        if match_idx is None:
+            # Pattern matched across lines (DOTALL) — return the tail
+            return "\n".join(lines[-20:])
+
+        start = max(0, match_idx - context_lines)
+        end   = min(len(lines), match_idx + context_lines + 1)
+        return "\n".join(lines[start:end])

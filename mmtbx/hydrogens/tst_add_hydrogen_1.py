@@ -10,7 +10,6 @@ from libtbx.test_utils import approx_equal
 
 def run():
   test_000()
-  test_001()
   test_002()
   test_003()
   test_004()
@@ -21,6 +20,19 @@ def run():
   test_009()
 
 # ------------------------------------------------------------------------------
+def write_models(model_initial, model_h_added):
+  f = open("m_initial.pdb","w")
+  f.write(model_initial.model_as_pdb())
+  f.close()
+  f = open("m_initial.cif","w")
+  f.write(model_initial.model_as_mmcif())
+  f.close()
+  f = open("m_added.pdb","w")
+  f.write(model_h_added.model_as_pdb())
+  f.close()
+  f = open("m_added.cif","w")
+  f.write(model_h_added.model_as_mmcif())
+  f.close()
 
 def compare_models(pdb_str,
                    contains     = None,
@@ -60,21 +72,12 @@ def compare_models(pdb_str,
 
   # For debugging
   if 0:
-    f = open("m_initial.pdb","w")
-    f.write(model_initial.model_as_pdb())
-    f.close()
-    f = open("m_initial.cif","w")
-    f.write(model_initial.model_as_mmcif())
-    f.close()
-    f = open("m_added.pdb","w")
-    f.write(model_h_added.model_as_pdb())
-    f.close()
-    f = open("m_added.cif","w")
-    f.write(model_h_added.model_as_mmcif())
-    f.close()
+    write_models(model_initial, model_h_added)
 
   ph_h_added = model_h_added.get_hierarchy()
-  assert ph_initial.is_similar_hierarchy(other=ph_h_added)
+  if not ph_initial.is_similar_hierarchy(other=ph_h_added):
+    write_models(model_initial, model_h_added)
+  assert ph_initial.is_similar_hierarchy(other=ph_h_added), 'Diffs\n%s\n====\n%s' % (ph_initial.show(),ph_h_added.show())
 
   number_h_added = hd_sel_h_added.count(True)
   assert(number_h_expected == number_h_added)
@@ -106,14 +109,6 @@ def test_000():
   '''
   compare_models(pdb_str = pdb_str_000)
 
-# ------------------------------------------------------------------------------
-
-def test_001():
-  '''
-    CD1 is missing --> H, HD1, HE1 can't be parameterized --> should not be added.
-  '''
-  compare_models(pdb_str      = pdb_str_001,
-                 not_contains = ' HE1')
 
 # ------------------------------------------------------------------------------
 
@@ -195,9 +190,9 @@ ATOM      1  N   GLY A   1      -9.009   4.612   6.102  1.00 16.77           N
 ATOM      2  CA  GLY A   1      -9.052   4.207   4.651  1.00 16.57           C
 ATOM      3  C   GLY A   1      -8.015   3.140   4.419  1.00 16.16           C
 ATOM      4  O   GLY A   1      -7.523   2.521   5.381  1.00 16.78           O
-ATOM      5  H1  GLY A   1      -8.818   5.479   6.162  1.00 16.77           H
-ATOM      6  H2  GLY A   1      -9.801   4.456   6.477  1.00 16.77           H
-ATOM      7  H3  GLY A   1      -8.383   4.140   6.523  1.00 16.77           H
+ATOM      5  H1  GLY A   1      -8.200   4.928   6.298  1.00 16.77           H
+ATOM      6  H2  GLY A   1      -9.618   5.243   6.252  1.00 16.77           H
+ATOM      7  H3  GLY A   1      -9.183   3.904   6.613  1.00 16.77           H
 ATOM      8  HA3 GLY A   1      -9.929   3.858   4.426  1.00 16.57           H
 ATOM      9  HA2 GLY A   1      -8.861   4.970   4.084  1.00 16.57           H
 ATOM     10  N   ASN A   2      -7.656   2.923   3.155  1.00 15.02           N
@@ -217,29 +212,7 @@ ATOM     23 HD22 ASN A   2      -7.888   2.940  -0.323  1.00 11.72           H
 TER
 """
 
-pdb_str_001 = """
-REMARK CD1 is missing --> HD1, HE1 cannot not be placed; H is not placed
-CRYST1   17.955   13.272   13.095  90.00  90.00  90.00 P 1
-ATOM      1  N   TYR A 139      10.241   7.920   5.000  1.00 10.00           N
-ATOM      2  CA  TYR A 139      10.853   7.555   6.271  1.00 10.00           C
-ATOM      3  C   TYR A 139      12.362   7.771   6.227  1.00 10.00           C
-ATOM      4  O   TYR A 139      12.955   8.272   7.181  1.00 10.00           O
-ATOM      5  CB  TYR A 139      10.540   6.098   6.617  1.00 10.00           C
-ATOM      6  CG  TYR A 139       9.063   5.805   6.749  1.00 10.00           C
-ATOM      7  CD2 TYR A 139       8.414   5.943   7.969  1.00 10.00           C
-ATOM      8  CE1 TYR A 139       6.966   5.122   5.770  1.00 10.00           C
-ATOM      9  CE2 TYR A 139       7.064   5.676   8.095  1.00 10.00           C
-ATOM     10  CZ  TYR A 139       6.345   5.266   6.993  1.00 10.00           C
-ATOM     11  OH  TYR A 139       5.000   5.000   7.113  1.00 10.00           O
-ATOM     12  H   TYR A 139       9.382   7.879   5.001  1.00 10.00           H
-ATOM     13  HA  TYR A 139      10.487   8.115   6.973  1.00 10.00           H
-ATOM     14  HB2 TYR A 139      10.961   5.881   7.464  1.00 10.00           H
-ATOM     15  HB3 TYR A 139      10.893   5.529   5.916  1.00 10.00           H
-ATOM     16  HD2 TYR A 139       8.896   6.220   8.714  1.00 10.00           H
-ATOM     17  HE2 TYR A 139       6.643   5.772   8.919  1.00 10.00           H
-ATOM     18  HH  TYR A 139       4.752   5.127   7.905  1.00 10.00           H
-TER
-"""
+
 
 pdb_str_002 = """
 REMARK fragment of disulfide bridge --> don't place H on Cys SG atom

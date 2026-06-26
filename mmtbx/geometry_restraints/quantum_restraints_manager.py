@@ -14,6 +14,7 @@ from mmtbx.geometry_restraints import quantum_interface
 from mmtbx.geometry_restraints import qm_manager
 from mmtbx.geometry_restraints import mopac_manager
 from mmtbx.geometry_restraints import orca_manager
+from mmtbx.geometry_restraints import xtb_manager
 
 from mmtbx.model.restraints import get_restraints_from_model_via_grm
 
@@ -504,6 +505,9 @@ def get_qm_manager(ligand_model, buffer_model, qmr, program_goal, log=StringIO()
   elif program=='mopac':
     qmm = mopac_manager.mopac_manager
     default_solvent_model='EPS=78.4'
+  elif program=='xtb':
+    qmm = xtb_manager.xtb_manager
+    default_solvent_model='ALPB=ether'
   else:
     assert 0
   qmr = quantum_interface.populate_qmr_defaults(qmr)
@@ -628,6 +632,7 @@ def get_qm_manager(ligand_model, buffer_model, qmr, program_goal, log=StringIO()
 
 def qm_restraints_initialisation(params, log=StringIO()):
   for i, qmr in enumerate(params.qi.qm_restraints):
+    if qmr.selection is None: continue
     if not i: print('  QM restraints selections', file=log)
     print('    %s - buffer %s (%s)' % (qmr.selection,
                                        qmr.buffer,
@@ -1019,6 +1024,7 @@ def setup_qm_jobs(model,
     elif len(qmr.freeze_specific_atoms)==1:
       if qmr.freeze_specific_atoms[0].atom_selection!=Auto:
         raise Sorry('Freezing ligand atoms only supports "Auto" for centre of mass.')
+    print('\n%s QM selection %d "%s" %s' % ('-'*10, i+1, qmr.selection, '-'*10), file=log)
     number_of_macro_cycles = 1
     if hasattr(params, 'main'):
       number_of_macro_cycles = params.main.number_of_macro_cycles
@@ -1042,6 +1048,7 @@ def setup_qm_jobs(model,
     #
     program_goals = get_program_goal(qmr, macro_cycle, energy_only=energy_only)
     for program_goal in program_goals:
+      print(f'  QM program "{program_goal}"', file=log)
       qmm = get_qm_manager(ligand_model, buffer_model, qmr, program_goal, log=log)
       preamble = quantum_interface.get_preamble(macro_cycle, i, qmr)
       if not energy_only: # only write PDB files for restraints update

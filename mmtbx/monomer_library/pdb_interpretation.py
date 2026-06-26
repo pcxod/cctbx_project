@@ -161,6 +161,7 @@ restraints_library_str = """
       .style = bold
     include_modified_amino_acid_in_cdl = False
       .type = bool
+      .style = hidden
     mcl = True
       .type = bool
       .short_caption = Use Metal Coordination Library (MCL)
@@ -184,15 +185,12 @@ restraints_library_str = """
         .short_caption = Use RestraintsLib for DNA and RNA
         .help = Use RestraintsLib for DNA and RNA \
           for geometry restraints
-        .style = hidden
       esd = *phenix csd
         .type = choice
         .short_caption = Apply the e.s.d. values from Phenix or CSD
-        .style = hidden
       factor = 2.0
         .type = float
         .short_caption = Factor applied to the e.s.d. values from CSD (not Phenix)
-        .style = hidden
     }
     cdl_svl = False
       .type = bool
@@ -206,7 +204,7 @@ restraints_library_str = """
       .style = hidden
     hpdl = False
       .type = bool
-      .style = hidden
+    include scope mmtbx.conformation_dependent_library.density_dependent_restraints.ddw_master_params
     user_supplied
       .short_caption = Directory to load user supplied restraints
     {
@@ -826,6 +824,7 @@ class counters(object):
     self.unresolved_non_hydrogen = 0
     self.unresolved_hydrogen = 0
     self.undefined = 0
+    self.const = 0
     self.resolved = 0
     self.discarded_because_of_special_positions = 0
 
@@ -937,6 +936,11 @@ class type_symbol_registry_base(object):
     print ('source_n_expected_atoms:', list(self.source_n_expected_atoms))
     print ('charges', list(self.charges))
     print ('==== end of symbol registry base:')
+
+  def size(self):
+    assert self.symbols.size() == self.source_labels.size() == \
+        self.source_n_expected_atoms.size() == self.charges.size()
+    return self.symbols.size()
 
   def expand_with_ncs(self, nrgl, n_atoms_full):
     new_symbols = flex.std_string(n_atoms_full)
@@ -1107,6 +1111,7 @@ class monomer_mapping_summary(slots_getstate_setstate):
     "ignored_atoms",
     "classification",
     "incomplete_info",
+    'missing_atoms_info',
     "is_terminus",
     "is_unusual"]
 
@@ -1209,6 +1214,7 @@ class monomer_mapping(slots_getstate_setstate):
     #
     'atom_names_mappings',
     'skipped_deletes',
+    'missing_atoms_info',
     ]
 
   def __init__(self,
@@ -1259,6 +1265,7 @@ class monomer_mapping(slots_getstate_setstate):
       for atom,atom_name in zip(self.active_atoms, self.atom_names_given):
         self.unexpected_atoms[atom_name] = atom
       self.incomplete_info = None
+      self.missing_atoms_info = None
       self.is_terminus = None
     else:
       self.chem_mod_ids = set()
@@ -1288,6 +1295,7 @@ class monomer_mapping(slots_getstate_setstate):
         self.resolve_unexpected()
       # strange behaviour of mods destroys cif_object
       self.monomer.cif_object = cif_object
+      self._set_missing_atoms_info()
     if (self.pdb_residue_id_str in apply_cif_links_mm_pdbres_dict):
       apply_cif_links_mm_pdbres_dict[self.pdb_residue_id_str].setdefault(
         self.i_conformer, []).append(self)
@@ -1511,10 +1519,22 @@ class monomer_mapping(slots_getstate_setstate):
       elif (self.is_rna_dna or self.monomer.is_rna_dna()):
         atom_ids = " ".join(self.expected_atoms.keys())
         if (atom_ids == "P"): return "p_only"
+      # return atom_ids
     return None
+
+  def _get_missing_atoms_info(self):
+    rc={}
+    if self.missing_hydrogen_atoms:
+      rc['hydrogens']=self.missing_hydrogen_atoms
+    if self.missing_non_hydrogen_atoms:
+      rc['heavy']=self.missing_non_hydrogen_atoms
+    return rc
 
   def _set_incomplete_info(self):
     self.incomplete_info = self._get_incomplete_info()
+
+  def _set_missing_atoms_info(self):
+    self.missing_atoms_info = self._get_missing_atoms_info()
 
   def resolve_unexpected(self):
     get_class = iotbx.pdb.common_residue_names_get_class
@@ -1702,6 +1722,7 @@ Please contact cctbx@cci.lbl.gov for more information.""" % (id, id, h))
       ignored_atoms=list(self.ignored_atoms.values()),
       classification=classification,
       incomplete_info=self.incomplete_info,
+      missing_atoms_info=self.missing_atoms_info,
       is_terminus=self.is_terminus,
       is_unusual=self._is_unusual())
 
@@ -1729,7 +1750,8 @@ Please contact cctbx@cci.lbl.gov for more information.""" % (id, id, h))
   def add_dihedral_proxies(self,
         dihedral_function_type,
         special_position_dict,
-        dihedral_proxy_registry):
+        dihedral_proxy_registry,
+        const_dihedral_proxy_registry):
     self.dihedral_counters = add_dihedral_proxies(
       counters=counters(label="dihedral"),
       m_i=self,
@@ -1738,6 +1760,7 @@ Please contact cctbx@cci.lbl.gov for more information.""" % (id, id, h))
       dihedral_function_type=dihedral_function_type,
       peptide_link_params=None,
       dihedral_proxy_registry=dihedral_proxy_registry,
+      const_dihedral_proxy_registry=const_dihedral_proxy_registry,
       special_position_dict=special_position_dict).counters
 
   def add_chirality_proxies(self, special_position_dict,
@@ -2189,9 +2212,10 @@ class add_angle_proxies(object):
               origin_id=origin_id,
               ),
             replace_in_place=replace_in_place)
-          evaluate_registry_process_result(
-            proxy_label="angle", m_i=m_i, m_j=m_j, i_seqs=i_seqs,
-            registry_process_result=registry_process_result)
+          if not replace_in_place:
+            evaluate_registry_process_result(
+              proxy_label="angle", m_i=m_i, m_j=m_j, i_seqs=i_seqs,
+              registry_process_result=registry_process_result)
 
 class add_dihedral_proxies(object):
 
@@ -2203,6 +2227,7 @@ class add_dihedral_proxies(object):
         dihedral_function_type,
         peptide_link_params,
         dihedral_proxy_registry,
+        const_dihedral_proxy_registry,
         special_position_dict,
         sites_cart=None,
         chem_link_id=None,
@@ -2260,9 +2285,31 @@ class add_dihedral_proxies(object):
           counters.unresolved_hydrogen += 1
         else:
           counters.unresolved_non_hydrogen += 1
-      elif (   tor.value_angle is None
-            or tor.value_angle_esd in [None, 0]):
+      elif tor.value_angle is None:
         counters.undefined += 1
+      elif tor.value_angle_esd in [None, 0]:
+        counters.const += 1
+        i_seqs = [atom.i_seq for atom in atoms]
+        if (special_position_dict.involves_special_positions(i_seqs)):
+          counters.discarded_because_of_special_positions += 1
+        elif (involves_broken_bonds(broken_bond_i_seq_pairs, i_seqs)):
+          pass
+        else:
+          proxy = geometry_restraints.dihedral_proxy(
+            i_seqs=i_seqs,
+            angle_ideal=tor.value_angle,
+            weight=0.0,
+            periodicity=0,
+            origin_id=origin_id)
+          replace_in_place=override_origin_ids(origin_id)
+          registry_process_result = const_dihedral_proxy_registry.process(
+            source_info=source_info_server(m_i=m_i, m_j=m_j),
+            proxy=proxy,
+            replace_in_place=replace_in_place)
+          evaluate_registry_process_result(
+            proxy_label="const_dihedral", m_i=m_i, m_j=m_j, i_seqs=i_seqs,
+            registry_process_result=registry_process_result,
+            lines=["tor id: " + str(tor.id)])
       else:
         counters.resolved += 1
         i_seqs = [atom.i_seq for atom in atoms]
@@ -2633,6 +2680,40 @@ class conformer_i_seq(dict):
     self.update(other)
     return self
 
+  def expand_with_ncs(self, nrgl, n_atoms_full):
+    """
+    Add entries for NCS copy atoms by copying from master atoms.
+    Called before convert() to populate the dict with copy i_seqs.
+    AI inspired by type_symbol_registry_base.expand_with_ncs()
+
+    Args:
+      nrgl: NCS restraint group list
+      n_atoms_full: Total atoms including NCS copies
+    """
+    # Create new dict with entries for full hierarchy
+    new_dict = {}
+    # Identify which atoms in full hierarchy are masters/rest (non-copies)
+    masters_and_rest_bool_selection = ~flex.bool(n_atoms_full, nrgl.get_all_copies_selection())
+    masters_and_rest_iselection = masters_and_rest_bool_selection.iselection()
+    # Reindexing array: maps full hierarchy i_seq -> reduced hierarchy index
+    ra = reindexing_array(n_atoms_full, masters_and_rest_iselection.as_int())
+    # Copy existing entries to new positions in full hierarchy
+    for reduced_i_seq, value in self.items():
+      full_i_seq = masters_and_rest_iselection[reduced_i_seq]
+      new_dict[full_i_seq] = value
+    # Add copy entries
+    for ncs_group in nrgl:
+      # Translate master i_seqs from full hierarchy to reduced hierarchy indices
+      translated_master_iselection = flex.size_t([ra[i] for i in ncs_group.master_iselection])
+      for c in ncs_group.copies:
+        for copy_i_seq, reduced_master_idx in zip(c.iselection, translated_master_iselection):
+          # Look up master's value in old dict (using reduced index)
+          if reduced_master_idx in self:
+            new_dict[copy_i_seq] = self[reduced_master_idx]
+    # Replace dict contents
+    self.clear()
+    self.update(new_dict)
+
   def convert(self):
     rc = flex.std_string()
     for i, (i_seq, item) in enumerate(sorted(self.items())):
@@ -2806,10 +2887,6 @@ class build_chain_proxies(object):
             raise Sorry('Not able to determine energy type for atom %s' % atom.quote())
       #
       if (mm.monomer is None):
-        # try to get restraints from e tu
-        pass
-      #
-      if (mm.monomer is None):
         def use_scattering_type_if_available_to_define_nonbonded_type():
           if (   residue.atoms_size() != 1
               or len(mm.active_atoms) != 1): return False
@@ -2827,9 +2904,24 @@ class build_chain_proxies(object):
           nonbonded_energy_type_registry.assign_directly(
             i_seq=i_seq, symbol=ad_hoc.energy_type)
           ad_hoc_single_atom_residues[mm.residue_name] += 1
+          self.type_energies[atom.i_seq] = ad_hoc.energy_type
+          if entry is not None:
+            self.type_h_bonds[atom.i_seq] = entry.hb_type
+          else:
+            self.type_h_bonds[atom.i_seq] = 'N'
           return True
         if (not use_scattering_type_if_available_to_define_nonbonded_type()):
           unknown_residues[mm.residue_name] += 1
+          for atom in residue.atoms():
+            if atom.element:
+              scattering_type = atom.element
+            else:
+              scattering_type = ''
+            energy_type = ''
+            scattering_type_registry.assign_directly(i_seq=atom.i_seq, symbol=scattering_type)
+            nonbonded_energy_type_registry.assign_directly(i_seq=atom.i_seq, symbol=energy_type)
+            self.type_energies[atom.i_seq] = energy_type
+            self.type_h_bonds[atom.i_seq] = 'N'
         n_chain_breaks += 1
       elif (prev_mm is not None and not residue.link_to_previous):
         n_chain_breaks += 1
@@ -2901,6 +2993,7 @@ class build_chain_proxies(object):
               dihedral_function_type=dihedral_function_type,
               peptide_link_params=peptide_link_params,
               dihedral_proxy_registry=geometry_proxy_registries.dihedral,
+              const_dihedral_proxy_registry=geometry_proxy_registries.const_dihedral,
               special_position_dict=special_position_dict,
               sites_cart=sites_cart,
               chem_link_id=prev_mm.lib_link.chem_link.id,
@@ -2997,7 +3090,8 @@ class build_chain_proxies(object):
         mm.add_dihedral_proxies(
           dihedral_function_type=dihedral_function_type,
           special_position_dict=special_position_dict,
-          dihedral_proxy_registry=geometry_proxy_registries.dihedral)
+          dihedral_proxy_registry=geometry_proxy_registries.dihedral,
+          const_dihedral_proxy_registry=geometry_proxy_registries.const_dihedral)
         if (mm.dihedral_counters.corrupt_monomer_library_definitions > 0):
           corrupt_monomer_library_definitions[mm.residue_name] \
             += mm.dihedral_counters.corrupt_monomer_library_definitions
@@ -3184,6 +3278,8 @@ class geometry_restraints_proxy_registries(object):
       strict_conflict_handling=strict_conflict_handling)
     self.dihedral = geometry_restraints.dihedral_proxy_registry(
       strict_conflict_handling=strict_conflict_handling)
+    self.const_dihedral = geometry_restraints.dihedral_proxy_registry(
+      strict_conflict_handling=strict_conflict_handling)
     self.chirality = geometry_restraints.chirality_proxy_registry(
       strict_conflict_handling=strict_conflict_handling)
     self.planarity = geometry_restraints.planarity_proxy_registry(
@@ -3197,6 +3293,7 @@ class geometry_restraints_proxy_registries(object):
     self.bond_simple.expand_with_ncs(nrgl, masters_and_rest_iselection)
     self.angle.expand_with_ncs(nrgl, masters_and_rest_iselection)
     self.dihedral.expand_with_ncs(nrgl, masters_and_rest_iselection)
+    self.const_dihedral.expand_with_ncs(nrgl, masters_and_rest_iselection)
     self.chirality.expand_with_ncs(nrgl, masters_and_rest_iselection)
     self.planarity.expand_with_ncs(nrgl, masters_and_rest_iselection)
     self.parallelity.expand_with_ncs(nrgl, masters_and_rest_iselection)
@@ -3206,6 +3303,7 @@ class geometry_restraints_proxy_registries(object):
     self.bond_simple.initialize_table()
     self.angle.initialize_table()
     self.dihedral.initialize_table()
+    self.const_dihedral.initialize_table()
     self.chirality.initialize_table()
     self.planarity.initialize_table()
     self.parallelity.initialize_table()
@@ -3214,6 +3312,7 @@ class geometry_restraints_proxy_registries(object):
     self.bond_simple.discard_table()
     self.angle.discard_table()
     self.dihedral.discard_table()
+    self.const_dihedral.discard_table()
     self.chirality.discard_table()
     self.planarity.discard_table()
     self.parallelity.discard_table()
@@ -3231,6 +3330,10 @@ class geometry_restraints_proxy_registries(object):
       print(prefix + (
         "Number of resolved dihedral restraint conflicts: %d"
           % self.dihedral.n_resolved_conflicts), file=log)
+    if (self.const_dihedral.n_resolved_conflicts > 0):
+      print(prefix + (
+        "Number of resolved const-dihedral restraint conflicts: %d"
+          % self.const_dihedral.n_resolved_conflicts), file=log)
     if (self.chirality.n_resolved_conflicts > 0):
       print(prefix + (
         "Number of resolved chirality restraint conflicts: %d"
@@ -3242,7 +3345,7 @@ class geometry_restraints_proxy_registries(object):
     if (self.parallelity.n_resolved_conflicts > 0):
       print(prefix + (
         "Number of resolved parallelity restraint conflicts: %d"
-          % self.planarity.n_resolved_conflicts), file=log)
+          % self.parallelity.n_resolved_conflicts), file=log)
 
 class cif_output_holder:
   def __init__(self):
@@ -3974,6 +4077,7 @@ class build_all_chain_proxies(linking_mixins):
               dihedral_function_type=self.params.dihedral_function_type,
               peptide_link_params=self.params.peptide_link,
               dihedral_proxy_registry=self.geometry_proxy_registries.dihedral,
+              const_dihedral_proxy_registry=self.geometry_proxy_registries.const_dihedral,
               origin_id=origin_ids.get_origin_id('User supplied cif_link'),
               special_position_dict=self.special_position_dict,
               sites_cart=self.sites_cart,
@@ -4042,6 +4146,8 @@ class build_all_chain_proxies(linking_mixins):
       self.scattering_type_registry.expand_with_ncs(nrgl, self.pdb_hierarchy.atoms_size())
       self.nonbonded_energy_type_registry.expand_with_ncs(nrgl, self.pdb_hierarchy.atoms_size())
       self.geometry_proxy_registries.expand_with_ncs(nrgl, self.pdb_hierarchy.atoms_size())
+      self.type_energies.expand_with_ncs(nrgl, self.pdb_hierarchy.atoms_size())
+      self.type_h_bonds.expand_with_ncs(nrgl, self.pdb_hierarchy.atoms_size())
       # Expand cystein_sulphur_i_seqs
       new_cystein_sulphur_i_seqs = list(self.cystein_sulphur_i_seqs)
       for master_c_iseq in self.cystein_sulphur_i_seqs:
@@ -4092,6 +4198,17 @@ class build_all_chain_proxies(linking_mixins):
       curr_sym_excl_index=len(sym_excl_residue_groups))
     self.type_energies = self.type_energies.convert()
     self.type_h_bonds = self.type_h_bonds.convert()
+
+    n_atoms = self.pdb_atoms.size()
+    # Assert arrays match atom count - safeguard check
+    assert len(self.type_energies) == n_atoms, \
+      "type_energies array size (%d) != n_atoms (%d)" % (len(self.type_energies), n_atoms)
+    assert len(self.type_h_bonds) == n_atoms, \
+      "type_h_bonds array size (%d) != n_atoms (%d)" % (len(self.type_h_bonds), n_atoms)
+    assert self.scattering_type_registry.size() == n_atoms, \
+      "scattering_type_registry size (%d) != n_atoms (%d)" % (self.scattering_type_registry.size(), n_atoms)
+    assert self.nonbonded_energy_type_registry.size() == n_atoms, \
+      "nonbonded_energy_type_registry size (%d) != n_atoms (%d)" % (self.nonbonded_energy_type_registry.size(), n_atoms)
     self.time_building_chain_proxies = timer.elapsed()
     # Make sure pdb_hierarchy and xray_structure are consistent
     if(self.special_position_settings is not None):
@@ -5757,6 +5874,7 @@ class build_all_chain_proxies(linking_mixins):
       nonbonded_buffer=self.params.nonbonded_buffer,
       angle_proxies=self.geometry_proxy_registries.angle.proxies,
       dihedral_proxies=self.geometry_proxy_registries.dihedral.proxies,
+      const_dihedral_proxies=self.geometry_proxy_registries.const_dihedral.proxies,
       chirality_proxies=self.geometry_proxy_registries.chirality.proxies,
       planarity_proxies=self.geometry_proxy_registries.planarity.proxies,
       parallelity_proxies=self.geometry_proxy_registries.parallelity.proxies,
@@ -5811,9 +5929,10 @@ class build_all_chain_proxies(linking_mixins):
         verbose=True,
         )
       if number_of_enols:
-        print("""\
-  Enol-peptide restraints (%d) added in %0.1f %sseconds
-  """ % (number_of_enols, greek_time(enol_time)), file=log)
+        gt, gu = greek_time(enol_time)
+        print(f"""\
+  Enol-peptide restraints ({number_of_enols}) added in {gt} {gu}seconds
+  """, file=log)
     #
     # need autodetect code
     #

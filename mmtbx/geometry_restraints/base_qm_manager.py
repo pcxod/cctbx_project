@@ -8,6 +8,11 @@ from libtbx.utils import Sorry
 from scitbx.array_family import flex
 from libtbx import adopt_init_args
 from libtbx import easy_run
+from libtbx import Auto
+
+# Shared by the QM managers: Eh -> kcal/mol and bohr -> Angstrom.
+harkcal = 627.50946900
+bohrang = 0.52918
 
 def dist2(xyz1, xyz2):
   d2=0
@@ -51,8 +56,13 @@ def process_qm_log_file(log_filename=None,
                         verbose=False,
                         ):
   if log_filename is not None: generator=loop_over_file(log_filename)
+  if error_lines is None:
+    error_lines = {
+      '* GEOMETRY IN ERROR.' : 'Check protonated ligand and/or protein pocket',
+      }
   error_line = None
   status = None
+  errors=None
   for i, line in enumerate(generator):
     if line.find('GEOMETRY OPTIMIZATION CYCLE')>-1:
       cycle = int(line.split()[4])
@@ -67,17 +77,29 @@ def process_qm_log_file(log_filename=None,
       status = True
     if line.find('* JOB ENDED NORMALLY *')>-1:
       status = True
+    # 'abnormal termination of xtb' contains 'normal termination of xtb' as a
+    # substring, so guard against the failure line matching as success.
+    if line.find('normal termination of xtb')>-1 and line.find('abnormal')==-1:
+      status = True
     if error_lines:
-      for el in error_lines:
-        if line.find(el)>-1:
-          error_line = line
-          break
+      if type(error_lines)==type({}):
+        for el, ad in error_lines.items():
+          if line.find(el)>-1:
+            error_line = line
+            advice = ad
+            break
+      else:
+        for el in error_lines:
+          if line.find(el)>-1:
+            error_line = line
+            advice = '='
+            break
     if error_line: break
   if error_line:
-    raise Sorry(error_line)
+    raise Sorry(f'{error_line}\nAdvice: {advice}')
   if not status:
     raise Sorry('QM does not seem to have converged. Check %s' % log_filename)
-  return status
+  return status, errors
 
 def run_command(command):
     """
@@ -175,6 +197,7 @@ class base_manager():
       )
     residues = []
     for i, atom in enumerate(self.atoms):
+      if atom.parent() is None: continue
       ann=''
       if self.ligand_atoms_array: ann=self.ligand_atoms_array[i]
       outl += '  %s %s\n' % (atom.quote(), ann)
@@ -184,9 +207,26 @@ class base_manager():
     outl += '\n  '.join(residues)
     return outl
 
-  def get_charge(self): return self.charge
+  def check_charge(self):
+    from mmtbx.ligands.electrons import default_metal_charges
+    from mmtbx.monomer_library.pdb_interpretation import ad_hoc_single_atom_residue_element_types
+    for atom in self.atoms:
+      if atom.element.upper() in ad_hoc_single_atom_residue_element_types:
+        if atom.element.capitalize() not in default_metal_charges:
+          print(f'\n\n  Atom\n    {atom.quote()}\n  may need an atomic charge. The charge is currently {self.charge}.\n\n')
 
-  def set_charge(self, charge): self.charge = charge
+  def get_charge(self):
+    self.check_charge()
+    if self.charge in [None, Auto]: self.charge=0
+    return self.charge
+
+  def set_charge(self, charge): self.charge=charge
+
+  def get_multiplicity(self):
+    if self.multiplicity in [None, Auto]: self.multiplicity=1
+    return self.multiplicity
+
+  def set_multiplicity(self, multiplicity): self.multiplicity=multiplicity
 
   def add_atoms(self, atoms, replace=False):
     if replace:
@@ -313,7 +353,7 @@ class base_qm_manager(base_manager):
       optimise_ligand=True
     # elif self.program_goal in ['energy']:
     #   optimise_ligand=False
-    constrain_torsions = self.exclude_torsions_from_optimisation
+    constrain_torsions = getattr(self, 'exclude_torsions_from_optimisation', False)
 
     coordinates = None
     rc=True
@@ -348,6 +388,7 @@ class base_qm_manager(base_manager):
         if sel:
           tmp.append(atom)
       coordinates=tmp
+    assert coordinates
     return flex.vec3_double(coordinates), flex.vec3_double(coordinates_buffer)
 
   def get_energy(self,

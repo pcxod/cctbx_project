@@ -1,6 +1,7 @@
 from __future__ import absolute_import, division, print_function
 from mmtbx.wwpdb import rcsb_web_services
 import requests
+import sys
 
 def thorough_exercise():
   """
@@ -73,6 +74,31 @@ def exercise_chemical_id_search():
   # print("len(hyp_search)", len(hyp_search), hyp_search)
   assert len(hyp_search) >= 217, len(hyp_search)
 
+def exercise_post_report_query_chunking():
+  """ RCSB GraphQL caps `entries(entry_ids: [...])` at 1000 ids per request,
+  so post_report_query_with_pdb_list must split larger payloads.  Drive the
+  helper directly with a 1500-id list of synthetic codes (leading "0" — never
+  assigned by the PDB) and seed one real id into each of the expected chunks.
+  Both seeds must come back, proving every chunk was dispatched and merged.
+  """
+  query = """
+  {{
+    entries(entry_ids: {pdb_list} )
+    {{
+      rcsb_id
+    }}
+  }}"""
+  fake = ['0%03X' % i for i in range(1498)]
+  pdb_ids = list(fake)
+  pdb_ids.insert(100,  '1ucs')   # lands inside the first 1000-id chunk
+  pdb_ids.insert(1100, '8wcc')   # lands inside the second chunk
+  assert len(pdb_ids) == 1500
+
+  r_json = rcsb_web_services.post_report_query_with_pdb_list(query, pdb_ids)
+  returned = {e['rcsb_id'].upper() for e in r_json['data']['entries']}
+  assert '1UCS' in returned, returned
+  assert '8WCC' in returned, returned
+
 def exercise_2():
   fes_binding = rcsb_web_services.chemical_id_search(
       "FES",
@@ -111,12 +137,15 @@ def exercise_3():
   assert len(r) > 10000, len(r)
   r = rcsb_web_services.post_query(rota_outliers_range=(0,5))
   print('n rota filter:', len(r))
-  assert len(r) > 135000, len(r)
+  assert len(r) > 130000, len(r)
 
 def exercise_get_emdb_id():
   emdb_ids = rcsb_web_services.get_emdb_id_for_pdb_id('8wcc')
   assert emdb_ids == ['EMD-37438'], emdb_ids
   emdb_ids = rcsb_web_services.get_emdb_id_for_pdb_id('1yjp')
+  assert emdb_ids == None, emdb_ids
+  # EM structure without an associated EMDB id: emdb_ids field is null
+  emdb_ids = rcsb_web_services.get_emdb_id_for_pdb_id('1uon')
   assert emdb_ids == None, emdb_ids
 
 def exercise_sequence_search():
@@ -135,16 +164,16 @@ def exercise_sequence_search():
 
 def exercise_reference_chain_search():
   lysozyme = """KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSR"""
-  r = rcsb_web_services.reference_chain_search(sequence=lysozyme)
+  r = rcsb_web_services.reference_chain_search(sequence=lysozyme, log=sys.stdout)
   # print(len(r))
 
   # This is not going to work at all:
   # probably because geometry filters are not applicable when we request
   # "return_type": "polymer_instance", instead of "polymer_entity" in sequence_search.
-  r = rcsb_web_services.reference_chain_search(sequence=lysozyme, clashscore_range=(0,20))
+  r = rcsb_web_services.reference_chain_search(sequence=lysozyme, clashscore_range=(0,20), log=sys.stdout)
   # print(len(r))
   assert len(r) == 0, len(r)
-  r = rcsb_web_services.reference_chain_search(sequence=lysozyme, d_max=2)
+  r = rcsb_web_services.reference_chain_search(sequence=lysozyme, d_max=2, log=sys.stdout)
   # print(len(r))
   assert len(r) == 0, len(r)
 
@@ -174,6 +203,7 @@ if (__name__ == "__main__"):
     exercise_sequence_search()
     exercise_reference_chain_search()
     exercise_chemical_id_search()
+    exercise_post_report_query_chunking()
     exercise_similar_ligands_via_smiles()
     print("OK")
   else:

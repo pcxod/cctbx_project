@@ -1,139 +1,100 @@
 from __future__ import absolute_import, division, print_function
-from cctbx import maptbx
-from scitbx.array_family import flex
 from cctbx.eltbx import xray_scattering
-from libtbx import group_args, easy_mp
-import sys
-import traceback
-
-import boost_adaptbx.boost.python as bp
-ext = bp.import_ext("cctbx_maptbx_bcr_bcr_ext")
+from libtbx import easy_mp
+from cctbx import crystal
+from cctbx.array_family import flex
+from cctbx import xray
+from cctbx.maptbx.bcr import bcr
 
 std_labels = xray_scattering.standard_labels_list()
 
-import json
 
-def add_entry(results, d_min, dist, err, table, R, B, C):
-  results[str(d_min)] = {
-      "dist": dist,
-      "err": err,
-      "scat_factor": table,
-      "R": R,
-      "B": B,
-      "C": C
-  }
+def chunk_list(input_list, N=3):
+    """
+    Splits the input list into a list of lists, where each sub-list has at
+    least N elements.
+    Returns: A list of sub-lists, where each sub-list contains at least N
+             elements, except possibly the last one if not enough elements
+            remain.
+    """
+    if N <= 0: raise ValueError("N must be a positive integer.")
+    result = []
+    # Iterate through the list while ensuring we create sub-lists of at least N elements.
+    for i in range(0, len(input_list), N):
+      sub_list = input_list[i:i + N]
+      # Adjust if the last sub-list is smaller than N but not empty
+      if len(sub_list) < N and len(result) > 0:
+        result[-1].extend(sub_list)  # Combine with the last sub-list
+      else:
+        result.append(sub_list)
+    return result
 
-def rfactor(a,b):
-  n = flex.sum(flex.abs(a-b))
-  d = flex.sum(flex.abs(a+b))
-  return n/d*100*2, flex.max(flex.abs(a-b))
+def make_xrs(s):
+  cs1 = crystal.symmetry((10, 20, 30, 90, 90, 90), "P 1")
+  sp1 = crystal.special_position_settings(cs1)
+  scatterers1 = flex.xray_scatterer((
+    xray.scatterer(s, (0.5, 0, 0)),
+    xray.scatterer(s, (0, 0, 0))))
+  return xray.structure(sp1, scatterers1)
 
-def run_one(args):
-  e, d_min, table = args
-  dist = 14.0
-  o = maptbx.atom_curves(scattering_type=e, scattering_table=table)
-  #
-  err1, err2 = None, None
-  #
-  try:
-    b1 = o.bcr_approx(
-      d_min       = d_min,
-      radius_max  = dist,
-      radius_step = 0.01,
-      mxp   = 1000,
-      epsc  = 0.001,
-      epsp  = 0.000,
-      edist = 1.0E-13,
-      kpres = 1,
-      kprot = 111
-      )
-    r1, err1 = rfactor(b1.image_values, b1.bcr_approx_values)
-  except Exception as e:
-    of = open("%s_%s.111.error.log"%(e, str(d_min)), "w")
-    traceback.print_exc(file=of)
-    of.close()
-  #
-  if err1 > 0.01:
-    try:
-      b2 = o.bcr_approx(
-        d_min       = d_min,
-        radius_max  = dist,
-        radius_step = 0.01,
-        mxp   = 1000,
-        epsc  = 0.001,
-        epsp  = 0.000,
-        edist = 1.0E-13,
-        kpres = 1,
-        kprot = 112
-        )
-      r2, err2 = rfactor(b2.image_values, b2.bcr_approx_values)
-    except Exception as e:
-      of = open("%s_%s.112.error.log"%(e, str(d_min)), "w")
-      traceback.print_exc(file=of)
-      of.close()
-  #
-  if not None in [err1, err2]:
-    if err1 < err2: b, err = b1, err1
-    else:           b, err = b2, err2
-  elif [err1, err2].count(None) == 2: return None
-  else:
-    if err1 is not None: b, err = b1, err1
-    else:                b, err = b2, err2
-  #
-  return group_args(
-   d_min = d_min,
-   dist  = dist,
-   err   = err,
-   table = table,
-   R     = b.R,
-   B     = b.B,
-   C     = b.C)
+def run_one_x(args):
+  bcr.compute_tables(
+    MinResolution    = 0.996,
+    MaxResolution    = 10.1,
+    DistMax          = 11.0,
+    Ngrid            = 1101,
+    scattering_table = "wk1995",
+    TypesAtoms       = args)
 
-if (__name__ == "__main__"):
+def run_one_e(args):
+  bcr.compute_tables(
+    MinResolution    = 0.996,
+    MaxResolution    = 10.1,
+    DistMax          = 11.0,
+    Ngrid            = 1101,
+    scattering_table = "electron",
+    TypesAtoms       = args)
+
+def run_one():
+   bcr.compute_tables(
+     MinResolution   = 0.996,
+     MaxResolution    = 1.1,
+     DistMax          = 11.0,
+     Ngrid            = 1101,
+     scattering_table = "wk1995",
+     TypesAtoms       = ["N", "S", "C"])
+
+def run_all(xray=True, electron=True):
+  #
+  e_list = []
+  for l in std_labels:
+    xrs = make_xrs(s=l)
+    r = xrs.scattering_type_registry(table="electron")
+    if len(list(r.unassigned_types()))==0:
+      e_list.append(l)
+  #
+  e_list = chunk_list(input_list=e_list)
+  x_list = chunk_list(input_list=std_labels)
   #
   NPROC=120
   #
-  for table in ["electron", "wk1995"]:
-    for e in ["H", "O", "C", "N", "S"]:
-      print(e)
-      sys.stdout.flush()
-      results = {}
-      argss = []
-      for d_min in [round(0.3+i*0.01, 2) for i in range(int((6-0.3)/0.01)+1)]:
-        argss.append([e, d_min, table])
-      #
-      if(NPROC>1):
-        stdout_and_results = easy_mp.pool_map(
-          processes    = NPROC,
-          fixed_func   = run_one,
-          args         = argss,
-          func_wrapper = "buffer_stdout_stderr")
-        for it in stdout_and_results:
-          o = it[1]
-          if o is None:
-            print("FAILED"*5)
-            continue
-          add_entry(
-            results = results,
-            d_min   = o.d_min,
-            dist    = o.dist,
-            err     = o.err,
-            table   = o.table,
-            R       = o.R,
-            B       = o.B,
-            C       = o.C)
-      else:
-        for args in argss:
-          o = run_one(args)
-          add_entry(
-            results = results,
-            d_min   = o.d_min,
-            dist    = o.dist,
-            err     = o.err,
-            table   = o.table,
-            R       = o.R,
-            B       = o.B,
-            C       = o.C)
-      #
-      with open("%s_%s.json"%(e, table), "w") as f:
-        json.dump(results, f, indent=2)
+  if(NPROC>1):
+    if xray:
+      stdout_and_results = easy_mp.pool_map(
+        processes    = NPROC,
+        fixed_func   = run_one_x,
+        args         = x_list,
+        func_wrapper = "buffer_stdout_stderr")
+    if electron:
+      stdout_and_results = easy_mp.pool_map(
+        processes    = NPROC,
+        fixed_func   = run_one_e,
+        args         = e_list,
+        func_wrapper = "buffer_stdout_stderr")
+  else: # XXX BROKEN
+    for args in argss:
+      o = run_one(args)
+
+if (__name__ == "__main__"):
+  if True: run_all()
+  else:    run_one()

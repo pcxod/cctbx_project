@@ -34,13 +34,13 @@ import copy
 from iotbx.data_manager import DataManager
 import csv
 
-version = "2.14.0"
+version = "3.0.0"
 
 master_phil_str = '''
-approach = *add remove
+approach = *add remove optimize
   .type = choice
-  .short_caption = Add or remove Hydrogens
-  .help = Determines whether Reduce will add (and optimize) or remove Hydrogens from the model
+  .short_caption = Add (and optimize), remove, or optimize Hydrogens
+  .help = Determines whether Reduce will add (and optimize), remove, or optimize Hydrogens from the model. Note: if using optimize and add_flip_movers=True, all possible hydrogens must be added to histidines (even ones making collision).
 keep_existing_H = False
   .type = bool
   .short_caption = Do not remove Hydrogens in the original model
@@ -746,7 +746,7 @@ def _AddFlipkinBase(states, views, fileName, fileBaseName, model, alts, bondedNe
 
   # Add spheres for ions (was single-atom Het groups in original Flipkins?)
   ret += '@subgroup {het groups} dominant\n'
-  ret += '@spherelist {het M} color= gray  radius= 0.5  nubutton master= {hets}\n'
+  ret += '@spherelist {het M} color= gray radius= 0.5 nobutton master= {hets}\n'
   for a in model.get_atoms():
     if a.element_is_ion():
       ret += _AddPosition(a, '', fileBaseName) + '\n'
@@ -1042,7 +1042,7 @@ NOTES:
       model = self.model,
       use_neutron_distances=self.params.use_neutron_distances,
       n_terminal_charge=self.params.n_terminal_charge,
-      exclude_water=True,
+      exclude_water = True,
       stop_for_unknowns=self.params.stop_on_any_missing_hydrogen,
       keep_existing_H=self.params.keep_existing_H
     )
@@ -1178,6 +1178,7 @@ NOTES:
     # Set the default output file name if one has not been given.
     if self.params.output.filename is None:
       inName = self.data_manager.get_default_model_name()
+      if inName is None: raise Sorry('model not found')
       suffix = os.path.splitext(os.path.basename(inName))[1]
       if self.params.add_flip_movers:
         pad = 'FH'
@@ -1265,12 +1266,17 @@ NOTES:
     # about the original model for use by Kinemages.
     initialModel = self.model.deep_copy()
 
-    if self.params.approach == 'add':
-      # Add Hydrogens to the model
-      make_sub_header('Adding Hydrogens', out=self.logger)
-      startAdd = time.time()
-      self._AddHydrogens()
-      doneAdd = time.time()
+    if self.params.approach == 'add' or self.params.approach == 'optimize':
+
+      if self.params.approach == 'add':
+        # Add Hydrogens to the model
+        make_sub_header('Adding Hydrogens', out=self.logger)
+        startAdd = time.time()
+        self._AddHydrogens()
+        doneAdd = time.time()
+      else:
+        # We need restraints on the model for optimization, so we interpret it to get them.
+        self._ReinterpretModel(make_restraints=True)
 
       # NOTE: We always optimize all models (leave modelIndex alone) because we've removed all
       # but the desired model ID structure from the model.
@@ -1294,7 +1300,26 @@ NOTES:
       if len(warnings) > 0:
         print('\nWarnings during optimization:\n'+warnings, file=self.logger)
       outString += opt.getInfo()
-      outString += 'Time to Add Hydrogen = {:.3f} sec'.format(doneAdd-startAdd)+'\n'
+
+      # Delete any hydrogens that we've been asked to delete, adding this to the info.
+      hToDelete = opt.getHydrogensToDelete()
+      if len(hToDelete) > 0:
+        outString += ' Deleting hydrogens requested for deletion by optimization:\n'
+        for a in hToDelete:
+          aName = a.name.strip().upper()
+          chainID = a.parent().parent().parent().id
+          resName = a.parent().resname.strip().upper()
+          resID = str(a.parent().parent().resseq_as_int())
+          altLoc = a.parent().altloc
+          # Don't print the code if it is a space (blank).
+          insertionCode = a.parent().parent().icode.strip()
+          resNameAndID = "chain "+str(chainID)+" "+altLoc+resName+" "+resID+insertionCode
+          outString += "  Deleting {} {}\n".format(resNameAndID, aName)
+
+          a.parent().remove_atom(a)
+
+      if self.params.approach == 'add':
+        outString += 'Time to Add Hydrogen = {:.3f} sec'.format(doneAdd-startAdd)+'\n'
       outString += 'Time to Optimize = {:.3f} sec'.format(doneOpt-startOpt)+'\n'
       if self.params.output.print_atom_info:
         print('Atom information used during calculations:', file=self.logger)
@@ -1484,8 +1509,8 @@ NOTES:
         carts = flex.vec3_double()
         for a in self.model.get_atoms():
           carts.append(a.xyz)
-        bondProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)[0]
-        bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies)
+        bondProxies, asuProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)
+        bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies, asuProxies)
 
         # Get the other characteristics we need to know about each atom to do our work.
         inWater, inHet, inMainChain, inSideChain = self._GetAtomCharacteristics(bondedNeighborLists)
@@ -1556,8 +1581,8 @@ NOTES:
           carts = flex.vec3_double()
           for a in self.model.get_atoms():
             carts.append(a.xyz)
-          bondProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)[0]
-          bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies)
+          bondProxies, asuProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)
+          bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies, asuProxies)
           inWater, inHet, inMainChain, inSideChain = self._GetAtomCharacteristics(bondedNeighborLists)
 
           # Write the updates to the Flipkin for this configuration, showing the
@@ -1604,8 +1629,8 @@ NOTES:
         carts = flex.vec3_double()
         for a in self.model.get_atoms():
           carts.append(a.xyz)
-        bondProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)[0]
-        bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies)
+        bondProxies, asuProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)
+        bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies, asuProxies)
 
         # Get the other characteristics we need to know about each atom to do our work.
         inWater, inHet, inMainChain, inSideChain = self._GetAtomCharacteristics(bondedNeighborLists)
@@ -1676,8 +1701,8 @@ NOTES:
           carts = flex.vec3_double()
           for a in self.model.get_atoms():
             carts.append(a.xyz)
-          bondProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)[0]
-          bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies)
+          bondProxies, asuProxies = self.model.get_restraints_manager().geometry.get_all_bond_proxies(sites_cart = carts)
+          bondedNeighborLists = Helpers.getBondedNeighborLists(self.model.get_atoms(), bondProxies, asuProxies)
           inWater, inHet, inMainChain, inSideChain = self._GetAtomCharacteristics(bondedNeighborLists)
 
           # Write the updates to the Flipkin for this configuration, showing the

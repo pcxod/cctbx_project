@@ -1,13 +1,17 @@
 from __future__ import absolute_import, division, print_function
+import time, os
 from iotbx.cli_parser import run_program
 from mmtbx.programs import reduce2 as reduce2
 from libtbx.utils import null_out
-import time, os
+from mmtbx.hydrogens.tst_add_hydrogen_1 import compare_models
 
 # ------------------------------------------------------------------------------
 
 def run():
   test_000()
+  test_001()
+  test_002()
+  test_003()
 
 # ------------------------------------------------------------------------------
 
@@ -34,6 +38,40 @@ def test_000():
 
 # ------------------------------------------------------------------------------
 
+def test_001():
+  '''
+    5b1a : SAC is residue number 1. This molecule has a N nitrogen atom but
+    only a single H atom (not a propeller) because it is not at the end of the
+    molecule.
+  '''
+  compare_models(pdb_str = pdb_str_001)
+
+# ------------------------------------------------------------------------------
+
+def test_002():
+  '''
+    1eko : AYA is residue number 1. This molecule has a N nitrogen atom but
+    only a single H atom (not a propeller) because it is not at the end of the
+    molecule.
+  '''
+  compare_models(pdb_str = pdb_str_002)
+
+# ------------------------------------------------------------------------------
+
+def test_003():
+  '''
+    EKB ligand (geostd cif): the four primary-amine H atoms HN1A/B/E/F have
+    only CONST (period=0, ESD=0) torsions as third-neighbor source. They
+    are placed correctly via the CONST-proxy connectivity path; pre-fix
+    they were silently dropped.
+  '''
+  compare_models(pdb_str  = pdb_str_003,
+                 contains = 'HN1A')
+
+# ------------------------------------------------------------------------------
+
+
+
 pdb_str_000 = '''
 REMARK based on PDB model 3njw
 CRYST1   19.465   21.432   29.523  90.00  90.00  90.00 P 21 21 21
@@ -57,6 +95,138 @@ ATOM     19  HB2 ASP A   9       3.543  23.362   5.059  1.00  3.84           H
 ATOM     20  HB3 ASP A   9       4.131  21.896   5.231  1.00  3.84           H
 END
 '''
+
+pdb_str_001 = '''
+REMARK based on 5b1a
+CRYST1   18.410   15.860   17.467  90.00  90.00  90.00 P 1
+SCALE1      0.054318  0.000000  0.000000        0.00000
+SCALE2      0.000000  0.063052  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.057251        0.00000
+HETATM    1  N   SAC I   1       7.347   7.485  10.838  1.00 72.85           N
+HETATM    2  CA  SAC I   1       8.265   8.536  10.273  1.00 65.93           C
+HETATM    3  C   SAC I   1       9.533   7.934   9.714  1.00 61.51           C
+HETATM    4  O   SAC I   1       9.919   6.721   9.909  1.00 54.09           O
+HETATM    5  CB  SAC I   1       8.769   9.656  11.243  1.00 75.40           C
+HETATM    6  OG  SAC I   1       7.699   9.995  12.090  1.00 74.06           O
+HETATM    7  C1A SAC I   1       6.609   6.651  10.059  1.00 74.63           C
+HETATM    8  C2A SAC I   1       5.724   5.626  10.777  1.00 82.80           C
+HETATM    9  OAC SAC I   1       6.705   6.749   8.717  1.00 70.21           O
+HETATM   10  H   SAC I   1       7.552   7.191  11.620  1.00 72.85           H
+HETATM   11  HA  SAC I   1       7.694   8.955   9.610  1.00 65.93           H
+HETATM   12  HB2 SAC I   1       9.532   9.332  11.747  1.00 75.40           H
+HETATM   13  HB3 SAC I   1       9.071  10.421  10.729  1.00 75.40           H
+HETATM   14  HG  SAC I   1       7.429   9.283  12.467  1.00 74.06           H
+HETATM   15 H2A1 SAC I   1       6.226   5.100  11.419  1.00 82.80           H
+HETATM   16 H2A2 SAC I   1       5.317   5.000  10.157  1.00 82.80           H
+HETATM   17 H2A3 SAC I   1       5.000   6.050  11.265  1.00 82.80           H
+ATOM     18  N   THR I   2      10.131   8.757   8.935  1.00 51.98           N
+ATOM     19  CA  THR I   2      11.426   8.484   8.402  1.00 54.97           C
+ATOM     20  C   THR I   2      12.126   9.761   8.554  1.00 59.30           C
+ATOM     21  O   THR I   2      11.599  10.860   8.274  1.00 47.76           O
+ATOM     22  CB  THR I   2      11.514   7.889   6.907  1.00 58.76           C
+ATOM     23  OG1 THR I   2      12.896   7.485   6.503  1.00 58.81           O
+ATOM     24  CG2 THR I   2      11.011   8.856   5.886  1.00 63.25           C
+ATOM     25  H   THR I   2       9.803   9.512   8.685  1.00 51.98           H
+ATOM     26  HA  THR I   2      11.858   7.749   8.865  1.00 54.97           H
+ATOM     27  HB  THR I   2      10.953   7.098   6.919  1.00 58.76           H
+ATOM     28  HG1 THR I   2      13.410   8.149   6.535  1.00 58.81           H
+ATOM     29 HG21 THR I   2      10.083   9.074   6.065  1.00 63.25           H
+ATOM     30 HG22 THR I   2      11.078   8.467   5.000  1.00 63.25           H
+ATOM     31 HG23 THR I   2      11.537   9.671   5.913  1.00 63.25           H
+TER
+END
+'''
+
+pdb_str_002 = '''
+CRYST1   16.414   13.704   17.728  90.00  90.00  90.00 P 1
+SCALE1      0.060924  0.000000  0.000000        0.00000
+SCALE2      0.000000  0.072971  0.000000        0.00000
+SCALE3      0.000000  0.000000  0.056408        0.00000
+HETATM    1  N   AYA A   1       9.296   7.617  11.004  1.00 79.54           N
+HETATM    2  CA  AYA A   1       7.999   6.974  10.799  1.00 77.17           C
+HETATM    3  C   AYA A   1       7.913   6.349   9.406  1.00 75.41           C
+HETATM    4  O   AYA A   1       8.493   5.293   9.127  1.00 75.33           O
+HETATM    5  CB  AYA A   1       6.879   7.999  10.982  1.00 77.63           C
+HETATM    6  CM  AYA A   1      10.269   5.465  11.808  1.00 79.53           C
+HETATM    7  CT  AYA A   1      10.339   6.982  11.537  1.00 80.57           C
+HETATM    8  OT  AYA A   1      11.414   7.576  11.665  1.00 78.24           O
+HETATM    9  H   AYA A   1       9.252   8.471  11.098  1.00 79.54           H
+HETATM   10  HA  AYA A   1       7.886   6.268  11.455  1.00 77.17           H
+HETATM   11  HB1 AYA A   1       6.007   7.584  10.896  1.00 77.63           H
+HETATM   12  HB2 AYA A   1       6.937   8.704  10.318  1.00 77.63           H
+HETATM   13  HB3 AYA A   1       6.923   8.414  11.858  1.00 77.63           H
+HETATM   14  HM1 AYA A   1       9.365   5.148  11.655  1.00 79.53           H
+HETATM   15  HM2 AYA A   1      10.520   5.287  12.728  1.00 79.53           H
+HETATM   16  HM3 AYA A   1      10.877   5.000  11.213  1.00 79.53           H
+ATOM     17  N   SER A   2       7.170   6.983   8.504  1.00 72.40           N
+ATOM     18  CA  SER A   2       7.016   6.502   7.133  1.00 67.69           C
+ATOM     19  C   SER A   2       7.368   7.668   6.208  1.00 63.08           C
+ATOM     20  O   SER A   2       7.553   7.516   5.000  1.00 61.07           O
+ATOM     21  CB  SER A   2       5.572   6.031   6.895  1.00 68.39           C
+ATOM     22  OG  SER A   2       5.010   6.600   5.725  1.00 68.99           O
+ATOM     23  H   SER A   2       6.736   7.708   8.663  1.00 72.40           H
+ATOM     24  HA  SER A   2       7.588   5.741   6.946  1.00 67.69           H
+ATOM     25  HB2 SER A   2       5.031   6.291   7.657  1.00 68.39           H
+ATOM     26  HB3 SER A   2       5.572   5.066   6.802  1.00 68.39           H
+ATOM     27  HG  SER A   2       5.000   7.437   5.789  1.00 68.99           H
+TER
+END'''
+
+pdb_str_003 = """
+REMARK EKB ligand: HN1A/B/E/F driven by CONST torsions (period=0, ESD=0).
+REMARK H atom positions are reduce_hydrogen output (idealized) - not the
+REMARK QM-optimized positions in the geostd cif - so the compare_models
+REMARK roundtrip is self-consistent within its 0.01 A tolerance.
+CRYST1   50.000   50.000   50.000  90.00  90.00  90.00 P 1
+HETATM    1  N1  EKB A   1      -3.949   1.249  -1.562  1.00 20.00           N
+HETATM    2  C2  EKB A   1      -5.127   0.815  -1.114  1.00 20.00           C
+HETATM    3  N3  EKB A   1      -5.332   0.048  -0.036  1.00 20.00           N
+HETATM    4  C4  EKB A   1      -4.257  -0.317   0.650  1.00 20.00           C
+HETATM    5  C5  EKB A   1      -2.971   0.072   0.283  1.00 20.00           C
+HETATM    6  C6  EKB A   1      -2.872   0.886  -0.878  1.00 20.00           C
+HETATM    7  C1A EKB A   1      -4.316  -2.688   1.438  1.00 20.00           C
+HETATM    8  C1B EKB A   1       3.560   3.153   1.638  1.00 20.00           C
+HETATM    9  C1C EKB A   1       3.010  -3.103  -1.785  1.00 20.00           C
+HETATM   10  C1D EKB A   1       6.031   0.189  -0.851  1.00 20.00           C
+HETATM   11  N1E EKB A   1      -6.214   1.187  -1.806  1.00 20.00           N
+HETATM   12  N1F EKB A   1      -1.681   1.304  -1.322  1.00 20.00           N
+HETATM   13  C1G EKB A   1      -0.768  -0.601   1.537  1.00 20.00           C
+HETATM   14  C1H EKB A   1      -1.803  -0.310   0.988  1.00 20.00           C
+HETATM   15  C1I EKB A   1       2.264   0.674   1.426  1.00 20.00           C
+HETATM   16  C1J EKB A   1       2.082  -1.438   0.274  1.00 20.00           C
+HETATM   17  C1K EKB A   1      -4.478  -1.218   1.827  1.00 20.00           C
+HETATM   18  C1L EKB A   1       0.503  -0.953   2.161  1.00 20.00           C
+HETATM   19  O1O EKB A   1       3.959   2.221   0.652  1.00 20.00           O
+HETATM   20  O1P EKB A   1       3.608  -1.840  -1.563  1.00 20.00           O
+HETATM   21  O1Q EKB A   1       4.727   0.559  -1.277  1.00 20.00           O
+HETATM   22  C1S EKB A   1       1.661  -0.565   1.268  1.00 20.00           C
+HETATM   23  C1V EKB A   1       3.307   1.048   0.580  1.00 20.00           C
+HETATM   24  C1W EKB A   1       3.123  -1.068  -0.575  1.00 20.00           C
+HETATM   25  C1Y EKB A   1       3.732   0.181  -0.430  1.00 20.00           C
+HETATM   26  H1A EKB A   1      -4.978  -2.938   0.774  1.00 20.00           H
+HETATM   27  H1B EKB A   1       3.660   2.799   2.535  1.00 20.00           H
+HETATM   28  H1C EKB A   1       3.093  -3.684  -1.012  1.00 20.00           H
+HETATM   29  H1D EKB A   1       6.127  -0.774  -0.782  1.00 20.00           H
+HETATM   30  H1I EKB A   1       1.962   1.242   2.098  1.00 20.00           H
+HETATM   31  H1J EKB A   1       1.662  -2.263   0.186  1.00 20.00           H
+HETATM   32  H1K EKB A   1      -3.844  -1.003   2.528  1.00 20.00           H
+HETATM   33  H1L EKB A   1       0.584  -0.508   3.019  1.00 20.00           H
+HETATM   34 H1AA EKB A   1      -4.429  -3.259   2.214  1.00 20.00           H
+HETATM   35 H1AB EKB A   1      -3.434  -2.846   1.067  1.00 20.00           H
+HETATM   36 H1BA EKB A   1       2.630   3.410   1.541  1.00 20.00           H
+HETATM   37 H1BB EKB A   1       4.082   3.970   1.599  1.00 20.00           H
+HETATM   38 H1CA EKB A   1       3.415  -3.569  -2.533  1.00 20.00           H
+HETATM   39 H1CB EKB A   1       2.063  -3.026  -1.979  1.00 20.00           H
+HETATM   40 H1DA EKB A   1       6.244   0.560   0.020  1.00 20.00           H
+HETATM   41 H1DB EKB A   1       6.713   0.500  -1.467  1.00 20.00           H
+HETATM   42 H1KA EKB A   1      -5.370  -1.080   2.183  1.00 20.00           H
+HETATM   43 H1LA EKB A   1       0.529  -1.906   2.342  1.00 20.00           H
+HETATM   44 HN1A EKB A   1      -6.997   0.933  -1.557  1.00 20.00           H
+HETATM   45 HN1B EKB A   1      -1.632   1.791  -2.029  1.00 20.00           H
+HETATM   46 HN1E EKB A   1      -6.137   1.683  -2.504  1.00 20.00           H
+HETATM   47 HN1F EKB A   1      -0.964   1.085  -0.901  1.00 20.00           H
+END
+"""
 
 # ------------------------------------------------------------------------------
 

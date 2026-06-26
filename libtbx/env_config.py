@@ -38,7 +38,7 @@ default_enable_cuda = False
 default_enable_kokkos = False
 default_opt_resources = False
 default_enable_cxx11 = False
-default_cxxstd = None
+default_cxxstd = 'c++14'
 default_use_conda = False
 
 def is_64bit_architecture():
@@ -276,6 +276,107 @@ def write_do_not_edit(f, win_bat=False):
   else:         s = "#"
   print(s+' THIS IS AN AUTOMATICALLY GENERATED FILE.', file=f)
   print(s+' DO NOT EDIT! CHANGES WILL BE LOST.', file=f)
+
+def conda_activation_lines(shell, conda_prefix=None):
+  """Lines that run a conda environment's activate.d hooks without requiring
+  "conda activate".
+
+  The hooks in <prefix>/etc/conda/activate.d set environment variables some
+  packages need at runtime (e.g. COOT_DATA_DIR, GSETTINGS_SCHEMA_DIR,
+  XML_CATALOG_FILES). They reference CONDA_PREFIX, so it is pointed at the
+  target prefix only while they run and then restored to its prior value, so a
+  different active environment is left untouched. They are skipped when that
+  environment is already active (CONDA_PREFIX already equals the prefix).
+
+  The dispatchers run these hooks per command, in a subshell that exits, so
+  nothing persists into the user's shell. Two dispatcher kinds share this,
+  differing only in how the prefix is found:
+
+  - **conda-package dispatchers** (``conda_prefix=None``): the prefix is
+    resolved at runtime from LIBTBX_PREFIX (for "sh" it is the prefix; for
+    "bat" it is <prefix>\\Library, so the prefix is its parent), because
+    there the build directory is the conda prefix.
+  - **development-build dispatchers** (``conda_prefix=<path>``): the prefix
+    is baked in as a literal, because there the build directory is not the
+    conda prefix.
+
+  Parameters
+  ----------
+  shell : str
+      "sh" or "bat".
+  conda_prefix : str or None
+      Literal prefix baked into the script, or None to resolve from
+      LIBTBX_PREFIX at runtime.
+
+  Returns
+  -------
+  list of str
+      The script lines that source the activate.d hooks.
+
+  Raises
+  ------
+  ValueError
+      If shell is not one of "sh", "bat".
+  """
+  resolve_at_runtime = conda_prefix is None
+  if (shell == "sh"):
+    # Expression that yields the prefix inside double quotes.
+    prefix = "${LIBTBX_PREFIX}" if resolve_at_runtime else conda_prefix
+    guard = ('[ "${CONDA_PREFIX}" != "%s" ] && [ -d "%s/etc/conda/activate.d" ]'
+             % (prefix, prefix))
+    return [
+      '# Run the conda environment activate.d scripts so packages that rely on',
+      '# activation-time environment variables work without "conda activate".',
+      '# CONDA_PREFIX is set only while the scripts run, then restored, so',
+      '# only the variables they change persist.',
+      'if %s; then' % guard,
+      '  libtbx_conda_prefix_was_set="${CONDA_PREFIX+set}"',
+      '  libtbx_conda_prefix_backup="${CONDA_PREFIX}"',
+      '  CONDA_PREFIX="%s"' % prefix,
+      '  export CONDA_PREFIX',
+      '  for libtbx_activate_script in "%s"/etc/conda/activate.d/*.sh; do' % prefix,
+      '    if [ -r "${libtbx_activate_script}" ]; then',
+      '      . "${libtbx_activate_script}"',
+      '    fi',
+      '  done',
+      '  if [ "${libtbx_conda_prefix_was_set}" = "set" ]; then',
+      '    CONDA_PREFIX="${libtbx_conda_prefix_backup}"',
+      '    export CONDA_PREFIX',
+      '  else',
+      '    unset CONDA_PREFIX',
+      '  fi',
+      '  unset libtbx_activate_script libtbx_conda_prefix_backup libtbx_conda_prefix_was_set',
+      'fi',
+    ]
+  if (shell == "bat"):
+    # Build these lines by concatenation: %-formatting would collide with the
+    # literal %VAR% batch references.
+    if (resolve_at_runtime):
+      set_prefix = r'@for %%F in ("%LIBTBX_PREFIX%\..") do @set "LIBTBX_CONDA_PREFIX=%%~fF"'
+    else:
+      set_prefix = r'@set "LIBTBX_CONDA_PREFIX=' + conda_prefix + r'"'
+    hookdir = r'%LIBTBX_CONDA_PREFIX%\etc\conda\activate.d'
+    exist = '@if exist "' + hookdir + '\\" @set LIBTBX_RUN_ACTIVATE=1'
+    exist = r'@if /i not "%CONDA_PREFIX%"=="%LIBTBX_CONDA_PREFIX%" ' + exist
+    loop = ('@if "%LIBTBX_RUN_ACTIVATE%"=="1" @for %%S in ("'
+            + hookdir + '\\*.bat") do @call "%%S"')
+    return [
+      r'@rem Run the conda environment activate.d scripts so packages that',
+      r'@rem rely on activation-time environment variables work without',
+      r'@rem "conda activate". CONDA_PREFIX is set only while the scripts run,',
+      r'@rem then restored, so only the variables they change persist.',
+      r'@set "LIBTBX_CONDA_PREFIX_BACKUP=%CONDA_PREFIX%"',
+      set_prefix,
+      r'@set LIBTBX_RUN_ACTIVATE=0',
+      exist,
+      r'@if "%LIBTBX_RUN_ACTIVATE%"=="1" @set "CONDA_PREFIX=%LIBTBX_CONDA_PREFIX%"',
+      loop,
+      r'@if "%LIBTBX_RUN_ACTIVATE%"=="1" @set "CONDA_PREFIX=%LIBTBX_CONDA_PREFIX_BACKUP%"',
+      r'@set "LIBTBX_CONDA_PREFIX="',
+      r'@set "LIBTBX_CONDA_PREFIX_BACKUP="',
+      r'@set "LIBTBX_RUN_ACTIVATE="',
+    ]
+  raise ValueError("shell must be 'sh' or 'bat', not %r" % (shell,))
 
 def open_info(path, mode="w", info="   "):
   print(info, path.basename())
@@ -1217,6 +1318,8 @@ Wait for the command to finish, then try again.""" % vars())
               print(line, file=f)
             else :
               print("@" + line, file=f)
+        for line in conda_activation_lines(shell="bat"):
+          print(line, file=f)
         write_dispatcher_include(where="at_start")
         print('@set LIBTBX_PYEXE=%s' % self.python_exe.bat_value(anchor_var='LIBTBX_PREFIX'), file=f)
         write_dispatcher_include(where="before_command")
@@ -1259,6 +1362,8 @@ Wait for the command to finish, then try again.""" % vars())
           % show_string(self.under_build("dispatcher_include_template.sh")), file=f)
         print('#', file=f)
         print(_SHELLREALPATH_CODE, file=f)
+        print('LC_NUMERIC=C', file=f)
+        print('export LC_NUMERIC', file=f)
         print('LIBTBX_PREFIX="$(shellrealpath "$0" && cd "$(dirname "$RESULT")/.." && pwd)"', file=f)
         print('export LIBTBX_PREFIX', file=f)
         print('LIBTBX_BUILD=${LIBTBX_PREFIX}/share/cctbx', file=f)
@@ -1276,6 +1381,8 @@ Wait for the command to finish, then try again.""" % vars())
         print('  unset DYLD_FALLBACK_LIBRARY_PATH', file=f)
         print('  export PATH="${LIBTBX_PREFIX}/bin:${PATH}"', file=f)
         print('fi', file=f)
+        for line in conda_activation_lines(shell="sh"):
+          print(line, file=f)
         source_is_py = False
         if (source_file is not None):
           dispatcher_name = target_file.basename()
@@ -1507,6 +1614,13 @@ Wait for the command to finish, then try again.""" % vars())
       print('  %s="%s"' % (n, v), file=f)
       print('  export %s' % n, file=f)
       print('fi', file=f)
+    if (self.build_options.use_conda):
+      # Run the conda activate.d hooks here -- like the conda-package
+      # dispatchers -- instead of from setpaths. The build directory is not
+      # the conda prefix in a development build, so the prefix is baked in as
+      # a literal rather than resolved from LIBTBX_PREFIX at runtime.
+      for line in conda_activation_lines("sh", get_conda_prefix()):
+        print(line, file=f)
     precall_commands = self.dispatcher_precall_commands()
     if (precall_commands is not None):
       for line in precall_commands:
@@ -1631,6 +1745,13 @@ Wait for the command to finish, then try again.""" % vars())
       if (len(v) == 0): continue
       v = ';'.join([ op.join('%LIBTBX_BUILD%', p.relocatable) for p in v ])
       print('@set %s=%s;%%%s%%' % (n, v, n), file=f)
+    if self.build_options.use_conda:
+      # Run the conda activate.d hooks here -- like the conda-package
+      # dispatchers -- instead of from setpaths. The build directory is not
+      # the conda prefix in a development build, so the prefix is baked in as
+      # a literal rather than resolved from LIBTBX_PREFIX at runtime.
+      for line in conda_activation_lines("bat", get_conda_prefix()):
+        print(line, file=f)
     print('@set LIBTBX_PYEXE=%s' % self.python_exe.bat_value(), file=f)
     write_dispatcher_include(where="before_command")
     qnew_tmp = qnew
@@ -2854,7 +2975,7 @@ class pre_process_args:
       action="store",
       type="choice",
       default=default_cxxstd,
-      choices=['c++11', 'c++14'], # this should just be the argument to the -std flag
+      choices=['c++11', 'c++14', 'c++17', 'c++20'], # this should just be the argument to the -std flag
       help="Set the C++ standard. This cannot be set along with --enable_cxx11")
     parser.option("--skip_phenix_dispatchers",
       action="store_true",

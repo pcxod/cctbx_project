@@ -56,23 +56,53 @@ def stepper(b,e,s):
     b+=s
     if b>e: break
 
-def merge_water(filenames, chain_id='A'):
+def substitute_ag_into_hierarchy(hierarchy, atom_group):
+  for ag in hierarchy.atom_groups():
+    if ag.id_str()==atom_group.id_str():
+      rg=ag.parent()
+      # not alt loc aware
+      rg.remove_atom_group(ag)
+      rg.append_atom_group(atom_group.detached_copy())
+      break
+
+def merge_water(model, filenames, chain_id='A', carve_selection=None):
+  hierarchy=model.get_hierarchy()
+  selected_model=None
+  if carve_selection:
+    selection_array = model.selection(carve_selection)
+    selected_model = model.select(selection_array)
+    for ag in hierarchy.atom_groups():
+      if ag.resname=='DOD': assert 0
+      if ag.resname=='HOH':
+        remove=[]
+        for atom in ag.atoms():
+          if atom.element.strip()=='H':
+            remove.append(atom)
+        for atom in remove:
+          ag.remove_atom(atom)
   hierarchies = []
   for filename in filenames:
     ph = iotbx.pdb.input(filename).construct_hierarchy()
     hierarchies.append(ph)
   waters = {}
   for ph in hierarchies:
+    # ph.show()
+    if selected_model:
+      smp=selected_model.get_hierarchy()
+      for hoh in ph.atom_groups(): break
+      for ag in smp.atom_groups():
+        if ag.id_str()==hoh.id_str(): break
+      else:
+        continue
     for ag in ph.atom_groups():
-      if ag.parent().parent().id!=chain_id: continue
-      if get_class(ag.resname)=='common_water':
-        waters.setdefault(ag.id_str(), [])
-        waters[ag.id_str()].append(ag)
+      substitute_ag_into_hierarchy(hierarchy, ag)
+  return
+
   outl = ''
   for id_str, ags in waters.items():
     if len(ags)>1 or 1:
       for i, ag in enumerate(ags):
-        ag.altloc='ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i]
+        # ag.altloc='ABCDEFGHIJKLMNOPQRSTUVWXYZ'[i]
         for atom in ag.atoms():
           outl += '%s\n' % atom.format_atom_record()
   print('-'*80)
@@ -364,6 +394,9 @@ Usage examples:
       .type = str
     include_amino_acids = None
       .type = str
+    carve_selection = None
+      .type = atom_selection
+      .help = only work on this selection
     each_amino_acid = False
       .type = bool
     each_water = False
@@ -402,6 +435,7 @@ Usage examples:
 
   # ---------------------------------------------------------------------------
   def run(self, log=None):
+    self.results=[]
     self.logger = multi_out()
     self.logger.register("stdout", sys.stdout)
     log_filename = '%s.log' % self.data_manager.get_default_output_filename()
@@ -420,6 +454,8 @@ Usage examples:
       arguments: %s
           ''' % (sys.executable, ' '.join(sys.argv[1:])))
     model = self.data_manager.get_model()
+    if self.params.qi.each_water:
+      model.add_hydrogens(1., occupancy=1.)
     self.restraint_filenames = []
     rc = self.data_manager.get_restraint_names()
     for f in rc:
@@ -523,9 +559,13 @@ Usage examples:
         print('no working directory', file=self.logger)
 
     if self.params.qi.each_water:
-      if not self.params.qi.run_qmr:
-        hierarchy = model.get_hierarchy()
-        outl = ''
+      def _water_scope_generator(hierarchy, carve_selection=None):
+        if carve_selection:
+          selection_array = model.selection(carve_selection)
+          selected_model = model.select(selection_array)
+          hierarchy = selected_model.get_hierarchy()
+        else:
+          hierarchy = model.get_hierarchy()
         for rg in hierarchy.residue_groups():
           if len(rg.atom_groups())!=1: continue
           resname=rg.atom_groups()[0].resname
@@ -535,12 +575,17 @@ Usage examples:
           if gc not in ['common_water']: continue
           selection = 'chain %s and resid %s and resname HOH' % (rg.parent().id, rg.resseq.strip())
           qi_phil_string = self.get_single_qm_restraints_scope(selection)
-          qi_phil_string = self.set_one_write_to_true(qi_phil_string, 'pdb_final_buffer')
+          qi_phil_string = self.set_one_write_to_true(qi_phil_string, 'pdb_final_core')
           qi_phil_string = qi_phil_string.replace('ignore_x_h_distance_protein = False',
                                                   'ignore_x_h_distance_protein = True')
           qi_phil_string = qi_phil_string.replace('do_not_update_restraints = False',
                                                   'do_not_update_restraints = True')
-          print('  writing phil for %s %s' % (rg.id_str(), rg.atom_groups()[0].resname), file=self.logger)
+          # print('  writing phil for %s %s' % (rg.id_str(), rg.atom_groups()[0].resname), file=self.logger)
+          yield qi_phil_string
+      if not self.params.qi.run_qmr:
+        outl = ''
+        for qi_phil_string in _water_scope_generator(model,
+                                                     carve_selection=self.params.qi.carve_selection):
           outl += '%s' % qi_phil_string
         pf = '%s_water.phil' % (
           self.data_manager.get_default_model_name().replace('.pdb',''))
@@ -553,6 +598,8 @@ Usage examples:
         del f
 
         ih = 'each_water=True'
+        if self.params.qi.carve_selection:
+          ih += ' carve_selection="%s"' % self.params.qi.carve_selection
         print('''
 
         mmtbx.quantum_interface %s run_qmr=True %s %s
@@ -561,17 +608,55 @@ Usage examples:
                pf), file=self.logger)
 
       else:
-        rc = self.run_qmr(self.params.qi.format)
-        rc=rc[0]
+        nproc=self.params.qi.nproc
+        argstuples=[]
+        # for qmr in self.params.qi.qm_restraints:
+        for i, qi_phil_string in enumerate(_water_scope_generator(model,
+                                                                  carve_selection=self.params.qi.carve_selection)):
+          if nproc==-1:
+            print('  Running %s flip %d' % (nq_or_h, i+1), file=self.logger)
+            res = update_restraints(model,
+                                    self.params,
+                                    never_write_restraints=True,
+                                    # never_run_strain=True,
+                                    log=arg_log)
+            energies.append(energies)
+            units=res.units
+            rmsds.append(res.rmsds[0][1])
+            print('    Energy : %s %s' % (energies[-1],units), file=self.logger)
+            print('    Time   : %ds' % (time.time()-t0), file=self.logger)
+            print('    RMSD   : %8.3f' % res.rmsds[0][1], file=self.logger)
+          else:
+            params = copy.deepcopy(self.params)
+            for j in range(len(params.qi.qm_restraints)-1,-1,-1):
+              if i==j: continue
+              del params.qi.qm_restraints[j]
+            if len(params.qi.qm_restraints)==0: continue
+            print('  Queued selection "%s"' % params.qi.qm_restraints[0].selection, file=self.logger)
+            argstuples.append(( model,
+                                params,
+                                None, # macro_cycle=None,
+                                True, #never_write_restraints=False,
+                                1, # nproc=1,
+                                None, #null_out(),
+                                ))
+        results = run_serial_or_parallel(update_restraints, argstuples, nproc)
         args = []
-        cmd = '\n\tphenix.start_coot'
-        for filenames in rc.final_pdbs:
-          print(filenames)
-          args.append(filenames[-1])
-          cmd += ' %s' % args[-1]
-        print(cmd)
+        for result in results:
+          for filenames in result.final_pdbs:
+            args.append(filenames[-1])
+
+        cwd=os.getcwd()
         os.chdir(qm_work_dir)
-        merge_water(args)
+        merge_water(model, args, carve_selection=self.params.qi.carve_selection)
+        os.chdir(cwd)
+        model = self.data_manager.get_model()
+        fn=self.data_manager.get_default_model_name()
+        fnw=fn.replace('.pdb', '_water.pdb')
+        self.data_manager.write_model_file(model, fnw, overwrite=True)
+        cmd = '\n\tphenix.start_coot %s %s' % (fn, fnw)
+        print(cmd)
+
       return
 
     if self.params.qi.randomise_selection:
@@ -667,6 +752,7 @@ Usage examples:
               self.params.qi.iterate_metals)):
       self.params.qi.qm_restraints.selection=self.params.qi.selection
       rcs = self.run_qmr(self.params.qi.format)
+      self.results.append(rcs)
       dmn = self.data_manager.get_default_model_name()
       cmd = '\n\n\tphenix.start_coot %s' % dmn
       for rc in rcs:
@@ -1164,7 +1250,7 @@ Usage examples:
     self.process_flipped_jobs('radius', results, id_str=id_str, nproc=nproc, log=log)
     return results
 
-  def run_qmr(self, format, log=None):
+  def run_qmr(self, format, return_minimised=False, log=None):
     from mmtbx.refinement.energy_monitor import digest_return_energy_object
     model = self.data_manager.get_model()
     qmr = self.params.qi.qm_restraints[0]
@@ -1197,6 +1283,11 @@ Usage examples:
     #
     # minimise ligands geometry
     #
+    if return_minimised:
+      for qmr in self.params.qi.qm_restraints:
+        if 'pdb_final_buffer' in qmr.write_files:
+          qmr.write_files.remove('pdb_final_buffer')
+        qmr.write_files.append('pdb_final_core')
     rc = update_restraints( model,
                             self.params,
                             log=log,
@@ -1407,4 +1498,4 @@ Usage examples:
 
   # ---------------------------------------------------------------------------
   def get_results(self):
-    return None
+    return self.results

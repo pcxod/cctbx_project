@@ -3,7 +3,7 @@ import os
 from scitbx.array_family import flex
 from cctbx.array_family import flex as cctbx_flex
 from cctbx import sgtbx, miller
-from libtbx import easy_mp, Auto
+from libtbx import Auto
 from scipy import sparse
 import numpy as np
 from ordered_set import OrderedSet
@@ -174,7 +174,7 @@ class CosymAnalysis(BaseClass):
 from dials.command_line.cosym import logger
 from dials.command_line.cosym import cosym as dials_cl_cosym_wrapper
 from dials.util.exclude_images import get_selection_for_valid_image_ranges
-from dials.command_line.symmetry import (
+from dials.algorithms.symmetry import (
     apply_change_of_basis_ops,
     change_of_basis_ops_to_minimum_cell,
     eliminate_sys_absent,

@@ -1,3 +1,61 @@
+2026.5
+======
+
+* Added qttbx PySide2 and PySide6 widgets for editing PHIL parameters with validation
+* Migrated wxtbx and gltbx to wxPython 4.2 and dropped wxPython 3 support
+* Added reference-model hydrogen-bond restraints and a Ramachandran target override
+* Added CONST dihedral restraints and parameterization of riding hydrogens when a torsion is missing
+
+2026.4
+======
+
+* Added new xcif C++ CIF parser, selectable via engine= in iotbx.cif.reader
+* Ported Niggli reduction to C++
+* Improvements to ligand validation GUI
+
+2026.3
+======
+
+* Add hydrogens that may not be uniquely defined by geometry
+* Improvements to ligand validation tool
+* Fix bug in adding sequence information to mmCIF files where
+  _entity_poly.entity_id could be overridden
+
+2026.2
+======
+
+* Expand support for variable resolution maps
+* Improve probe2 support for RNA
+* Fixed bug for Boost 1.88 support
+
+2026.1
+======
+
+* Improvements to variable resolution map calculation
+* Fix bug in counting atoms split across chains with the same chain ID
+* Fix bug in reading MRC files with 16-bit floats
+
+2025.12
+=======
+
+* Polder maps: stop when data is twinned
+* mmtbx.table_one: fix bug with twinned data and using model header information
+* Speed up variable resolution map calculation
+
+2025.11
+=======
+
+* Print additional information from DiSCaMB
+* More developments in QM restraints
+
+2025.10
+=======
+
+* Added mmtbx.reduce_cryoem_resolution for creating lower resolution maps
+  from existing maps
+* Initial support for Python 3.14
+* General wxPython syntax updates in wxtbx
+
 2025.9
 ======
 

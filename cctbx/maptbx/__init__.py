@@ -25,6 +25,7 @@ from scitbx import fftpack
 from libtbx.test_utils import approx_equal
 from cctbx import uctbx
 import scitbx.math
+from libtbx.math_utils import ifloor, iceil
 
 debug_peak_cluster_analysis = os.environ.get(
   "CCTBX_MAPTBX_DEBUG_PEAK_CLUSTER_ANALYSIS", "")
@@ -328,7 +329,8 @@ def mask(xray_structure,
          mask_value_inside_molecule = 0,
          mask_value_outside_molecule = 1,
          solvent_radius = 0,
-         atom_radius = None):
+         atom_radius = None,
+         wrapping = True):
   xrs_p1 = xray_structure.expand_to_p1(sites_mod_positive = True)
   if(atom_radius is None):
     from cctbx.masks import vdw_radii_from_xray_structure
@@ -341,7 +343,8 @@ def mask(xray_structure,
     n_real                      = n_real,
     mask_value_inside_molecule  = mask_value_inside_molecule,
     mask_value_outside_molecule = mask_value_outside_molecule,
-    radii                       = atom_radii + solvent_radius)
+    radii                       = atom_radii + solvent_radius,
+    wrapping                    = wrapping)
 
 class statistics(ext.statistics):
 
@@ -1440,6 +1443,90 @@ def atom_radius_as_central_peak_width(element, b_iso, d_min, scattering_table):
   assert radius is not None
   return radius
 
+def atom_image_fast(ff_packed, d_min, n_grid, dist_max, n_sf_grid=2000, charge_density = False, B = None):
+  #
+  # ff_packed is linear array of array_of_a() + c() + array_of_b() + (0,)
+  # n_grid - number of intervals
+  #
+  DistImage  = dist_max
+  NImage     = n_grid
+  if n_sf_grid != int(n_sf_grid/2) * 2 : n_sf_grid +=1
+  #
+  def _SFactG(ScatAtom,Resolution,n_sf_grid) :
+    ScatFunc = [0.0 for ig in range(n_sf_grid+1)]
+    Smax    = 1.0 / Resolution
+    dsstep  = Smax / n_sf_grid
+    NGauss  = int(len(ScatAtom) / 2)
+    for isg in range(n_sf_grid+1) :
+      sg   = dsstep * isg
+      ss24 = sg * sg / 4.0
+      fact = 0.0
+      for ig in range(NGauss) :
+        argexp = ScatAtom[ig + NGauss] * ss24
+        fact  += ScatAtom[ig] * math.exp(-argexp)
+      ScatFunc[isg] = fact
+    return ScatFunc
+  #
+  def _AtomImage(ScatFunc,Resolution,DistImage,NImage) :
+    StepImage  = DistImage /NImage
+    NSGrid = len(ScatFunc) - 1
+    Smax   = 1.0 / Resolution
+    SStep  = Smax / NSGrid
+    Image = [0.0 for j in range(NImage+1)]
+    dx = 2. * math.pi * StepImage
+#   integrate scattering curve
+#   odd points
+    for igs in range(1, NSGrid, 2):
+      ss     = SStep * igs
+      fatoms = ScatFunc[igs] * ss * 4.
+      if charge_density: fatoms *= ss**2
+      if B is not None: fatoms *= math.exp(-B * ss**2/4)
+      for ir in range(1,NImage+1):
+        rr   = dx * ir
+        arg  = rr * ss
+        sarg = math.sin(arg)
+        Image[ir] = Image[ir] + fatoms * sarg
+      Image[0] = Image[0] + fatoms * ss
+#   even points
+    for igs in range(2, NSGrid-1, 2):
+      ss     = SStep * igs
+      fatoms = ScatFunc[igs] * ss * 2.
+      if charge_density: fatoms *= ss**2
+      if B is not None: fatoms *= math.exp(-B * ss**2/4)
+      for ir in range(1,NImage+1):
+        rr   = dx * ir
+        arg  = rr * ss
+        sarg = math.sin(arg)
+        Image[ir] = Image[ir] + fatoms * sarg
+      Image[0] = Image[0] + fatoms * ss
+#   terminal point (point s = 0 gives zero contribution and is ignored)
+    ss     = SStep * NSGrid
+    fatoms = ScatFunc[NSGrid] * ss
+    if charge_density: fatoms *= ss**2
+    if B is not None: fatoms *= math.exp(-B * ss**2/4)
+    for ir in range(1,NImage+1):
+      rr   = dx * ir
+      arg  = rr * ss
+      sarg = math.sin(arg)
+      Image[ir] = Image[ir] + fatoms * sarg
+    Image[0] = Image[0] + fatoms * ss
+# ---- normalisation ----
+    scal = 2.0 * SStep / 3.0
+    for ir in range(1,NImage+1):
+      rr = ir * StepImage
+      Image[ir] = Image[ir] * scal / rr
+    Image[0] = Image[0] * SStep * 4. * math.pi / 3.
+    return Image, StepImage
+  #
+  ScatFunc = _SFactG(ScatAtom=ff_packed, Resolution=d_min, n_sf_grid=n_sf_grid)
+  Image, StepImage = _AtomImage(
+    ScatFunc   = ScatFunc,
+    Resolution = d_min,
+    DistImage  = DistImage,
+    NImage     = NImage)
+  Distance = [_ * StepImage for _ in range(len(Image))]
+  return flex.double(Image), flex.double(Distance)
+
 class atom_curves(object):
   """
 Class-toolkit to compute various 1-atom 1D curves: exact electron density,
@@ -1476,15 +1563,20 @@ Fourier image of specified resolution, etc.
     return self.scr.gaussian(self.scattering_type).gradient(r = r, t = t, t0 = t0,
       b_iso = b_iso)
 
-  def exact_density(self, b_iso, radius_max = 5., radius_step = 0.001):
-    r = 0.0
+  def exact_density(self, b_iso, radius_max = 5., radius_step = 0.001,
+                    radii = None, norm_to_max = False):
+    if radii is None:
+      radii = flex.double()
+      r = 0
+      while r <= radius_max:
+        radii.append(r)
+        r+= radius_step
     density = flex.double()
-    radii   = flex.double()
     ed = self.scr.gaussian(self.scattering_type)
-    while r < radius_max:
-      density.append(ed.electron_density(r, b_iso))
-      radii.append(r)
-      r+= radius_step
+    for r in radii:
+      val = ed.electron_density(r, b_iso)
+      density.append(val)
+    if norm_to_max: density = density / flex.max(density)
     return group_args(radii = radii, density = density)
 
   def form_factor(self, ss, b_iso):
@@ -1511,8 +1603,9 @@ Fourier image of specified resolution, etc.
                  kpres = 1,
                  kprot = 112,
                  ):
-    b_iso = 0 # Must always be 0! All image vals below are for b_iso=0 !!!
     from cctbx.maptbx.bcr import bcr
+    b_iso = 0 # Must always be 0! All image vals below are for b_iso=0 !!!
+
     im = self.image(
       d_min=d_min, b_iso=0, radius_max=radius_max, radius_step=radius_step)
     bpeak, cpeak, rpeak, _,_,_,_ = bcr.get_BCR(
@@ -1525,28 +1618,10 @@ Fourier image of specified resolution, etc.
       edist = edist,
       kpres = kpres,
       kprot = kprot,
+      nfmes = None,
       )
-    #
-    bcr_approx_values = flex.double()
-    # FILTER
-    bpeak_, cpeak_, rpeak_ = [],[],[]
-    for bi, ci, ri in zip(bpeak, cpeak, rpeak):
-      if(abs(bi)<1.e-6 or abs(ci)<1.e-6): continue
-      else:
-        bpeak_.append(bi)
-        cpeak_.append(ci)
-        rpeak_.append(ri)
-    bpeak, cpeak, rpeak = bpeak_, cpeak_, rpeak_
-    #
-    for r in im.radii:
-      first = 0
-      second = 0
-      for B, C, R in zip(bpeak, cpeak, rpeak):
-        if(abs(R)<1.e-6):
-          first += bcr.gauss(B=B, C=C, r=r, b_iso=0)
-        else:
-          second += C*bcr.chi(B=B, R=R, r=r, b_iso=0)
-      bcr_approx_values.append(first + second)
+    bcr_approx_values = bcr.curve(
+      B=bpeak, C=cpeak, R=rpeak, radii=im.radii, b_iso=0)
     return group_args(
       radii             = im.radii,
       image_values      = im.image_values,
@@ -1557,46 +1632,82 @@ Fourier image of specified resolution, etc.
             d_min,
             b_iso,
             d_max = None,
+            radii = None,
             radius_min = 0,
             radius_max = 5.,
             radius_step = 0.001,
-            n_integration_steps = 2000):
-    r = radius_min
+            n_integration_steps = 2000,
+            compute_derivatives=True,
+            charge_density=False, # supported only in atom_image_fast
+            fast=False):
+    if charge_density:
+      assert fast
+    # define radii if not supplied
+    if radii is None:
+      radii = flex.double()
+      r = radius_min
+      while r <= radius_max + 1e-10:
+        radii.append(r)
+        r += radius_step
+        if math.isclose(r, radius_max, abs_tol=1e-10):
+            radii.append(radius_max)
+            break
     assert d_max !=  0.
     if(d_max is None): s_min = 0
     else:              s_min = 1./d_max
     assert d_min !=  0.
     s_max = 1./d_min
     image_values = flex.double()
-    radii        = flex.double()
-    while r < radius_max:
-      s = scitbx.math.simpson(
-        f = self.integrand(r, b_iso), a = s_min, b = s_max, n = n_integration_steps)
-      image_values.append(s)
-      radii.append(r)
-      r+= radius_step
+    if not fast: # Use direct integration
+      for r in radii:
+        s = scitbx.math.simpson(
+          f = self.integrand(r, b_iso), a = s_min, b = s_max,
+          n=n_integration_steps)
+        image_values.append(s)
+    else: # use AU's adopted code, limited (see assertions below)
+      assert d_max is None
+#      assert abs(b_iso) < 1.e-6
+      v = self.scr.as_type_gaussian_dict()[self.scattering_type]
+      ff_AU_style=tuple(v.array_of_a())+(v.c(),)+tuple(v.array_of_b())+(0,)
+      #
+      # Reason for this is unclear. Values in ff_AU_style do not match
+      # wk1995.ccp -- there is more digits after 6x position. The rounding
+      # below is meant to make these numbers match the wk1995.ccp table
+      # exactly.
+      #
+      ff_AU_style = [round(_,6) for _ in ff_AU_style]
+      image_values, _ = atom_image_fast(
+        ff_packed      = ff_AU_style,
+        d_min          = d_min,
+        n_grid         = radii.size()-1,
+        dist_max       = radii[-1],
+        B              = b_iso,
+        charge_density = charge_density)
+      image_values = flex.double(image_values)
     # Fine first inflection point
     first_inflection_point = None
     i_first_inflection_point = None
     size = image_values.size()
     second_derivatives = flex.double()
-    for i in range(size):
-      if(i>0 and i<size-1):
-        dxx = image_values[i-1]+image_values[i+1]-2*image_values[i]
-      elif(i == 0):
-        dxx = 2*image_values[i+1]-2*image_values[i]
-      else:
-        dxx = second_derivatives[i-1]*radius_step**2
-      if(first_inflection_point is None and dxx>0):
-        first_inflection_point = (radii[i-1]+radii[i])/2.
-        i_first_inflection_point = i
-      second_derivatives.append(dxx/radius_step**2)
+    if compute_derivatives:
+      for i in range(size):
+        if(i>0 and i<size-1):
+          dxx = image_values[i-1]+image_values[i+1]-2*image_values[i]
+        elif(i == 0):
+          dxx = 2*image_values[i+1]-2*image_values[i]
+        else:
+          dxx = second_derivatives[i-1]*radius_step**2
+        if(first_inflection_point is None and dxx>0):
+          first_inflection_point = (radii[i-1]+radii[i])/2.
+          i_first_inflection_point = i
+        second_derivatives.append(dxx/radius_step**2)
+      first_inflection_point = first_inflection_point*2
     return group_args(
       radii                    = radii,
       image_values             = image_values,
       first_inflection_point   = first_inflection_point,
       i_first_inflection_point = i_first_inflection_point,
-      radius                   = first_inflection_point*2,
+      radius                   = first_inflection_point,
       second_derivatives       = second_derivatives)
 
   def image_from_miller_indices(self, miller_indices, b_iso, uc,
@@ -2294,3 +2405,185 @@ def map_values_along_line_connecting_two_points(map_data, points_cart,
         point_max = p[:]
     vals.append(mv)
   return group_args(dist = dist, vals = vals, point_max = point_max)
+
+def find_peak_local(rrange, map_data, site_cart, unit_cell, wrapping, eps=1.e-3):
+  """
+  Find peak inside a sphere inscribed within the cube defined by rrange
+  around a specified point.
+  Return None ONLY if the best peak is near the sphere surface (indicating
+  the true peak is outside the search radius).
+  """
+  x_start, y_start, z_start = site_cart
+  site_frac = unit_cell.fractionalize(site_cart)
+  mv_start = map_data.tricubic_interpolation(site_frac)
+  mv_best = mv_start
+  # Initialize to the starting point so we return the center if it's already
+  # the peak
+  site_cart_best = site_cart
+  dist_best = 0.0
+  assert abs(rrange[0])==abs(rrange[-1])
+  r = abs(rrange[0])
+  for dx in rrange:
+    for dy in rrange:
+      for dz in rrange:
+        site_cart_ = [x_start+dx, y_start+dy, z_start+dz]
+        site_frac_ = unit_cell.fractionalize(site_cart_)
+        if not wrapping:
+          if not (0.0 <= site_frac_[0] <= 1.0 and
+                  0.0 <= site_frac_[1] <= 1.0 and
+                  0.0 <= site_frac_[2] <= 1.0):
+            raise Sorry("Cannot have coordinates outside non-periodic box.")
+        dist = unit_cell.distance(site_frac, site_frac_)
+        if dist > r: continue
+        mv = map_data.tricubic_interpolation(site_frac_)
+        if mv > mv_best:
+          dist_best = dist
+          mv_best = mv
+          site_cart_best = site_cart_
+  # eps is now 1.e-3, so it only rejects the paper-thin mathematical boundary
+  if abs(dist_best - r) < eps: return None
+  return group_args(
+    value_start    = mv_start,
+    value_best     = mv_best,
+    site_cart_best = site_cart_best)
+
+class MapPeakLocator(object):
+
+  """
+  map_data: flex.double 3D array of the real space map.
+  unit_cell: cctbx.uctbx.unit_cell object.
+  is_periodic: bool, True for periodic maps, False for cryoEM.
+  threshold: float, cutoff for peak search. Defaults to None (returns all
+  peaks).
+
+  NOTE: THIS IS AI GENERATE CODE IN RESPONSE TO THE FOLLOWING PROMPT:
+
+  Write code that takes a real space map (flex array) and a point in space
+  (target point, Cartesian coordinates) and locates all map peaks within the
+  distance R from this target point. Needless to say, crystallographic map
+  can be in any unit cell box (orthogonal or not, any space group).
+
+  My map can be extra-huge (zillions of peaks) and I may have thousands of
+  target points. This means the implementation needs to be a class, where
+  the constructor does all the pre-calcs, and the member function takes
+  target point and returns peaks.
+
+  The map can be cryoEM map (no periodicity, no symmetry, no wrapping) or
+  crystallographic map (needs wrapping, has crystallographic symmetry).
+
+  For crystallographic map, I always pass full unit cell of map (not the
+  asymetric unit).
+
+  Target points can be close to the border which means symmetry/periodicity
+  needs to be taken care of if it is crystallography or the search volume
+  truncated at the border (cryoEM). Also, target points can be exactly on
+  the border or outside the border, both directions, including negative
+  coordinates. Target point can be an origin, [0,0,0] and this needs to work
+  for both kinds of maps.
+
+  I can tell upfront if the map is crystallographic or cryoEM (no need to
+  guess periodicity etc just make it a parameter).
+
+  I need this as robust and reliable as possible. So make sure you check
+  each and every line of the code you make, for both, bugs and performance.
+  """
+
+  def __init__(self, map_data, unit_cell, is_periodic, threshold=None):
+    self.map_data = map_data
+    self.unit_cell = unit_cell
+    self.is_periodic = is_periodic
+    if not self.map_data.is_0_based():
+      self.origin_grid = self.map_data.origin()
+      self.map_data_0 = self.map_data.shift_origin()
+    else:
+      self.origin_grid = (0, 0, 0)
+      self.map_data_0 = self.map_data
+    # Setup symmetry tags (unconditionally P 1)
+    self.space_group_info = sgtbx.space_group_info("P 1")
+    self.tags = grid_tags(self.map_data_0.focus())
+    self.tags.build(self.space_group_info.type(), use_space_group_symmetry)
+    # Extract all viable peaks natively in C++ once
+    self.peaks = peak_list(
+      data=self.map_data_0,
+      tags=self.tags.tag_array(),
+      peak_search_level=1,
+      max_peaks=0,
+      peak_cutoff=threshold,
+      interpolate=True)
+    self.peak_sites_frac_0 = self.peaks.sites()
+    self.peak_heights = self.peaks.heights()
+    n_peaks = self.peak_sites_frac_0.size()
+    grid_all = self.map_data_0.all()
+    self.origin_frac = (
+      self.origin_grid[0] / grid_all[0],
+      self.origin_grid[1] / grid_all[1],
+      self.origin_grid[2] / grid_all[2])
+    origin_frac_array = flex.vec3_double(n_peaks, self.origin_frac)
+    self.peak_sites_frac = self.peak_sites_frac_0 + origin_frac_array
+    # Convert directly to Cartesian space exactly once
+    self.peak_sites_cart = self.unit_cell.orthogonalize(self.peak_sites_frac)
+
+  def get_peaks_within_radius(self, target_cart, R, threshold=None):
+    target_cart = tuple(target_cart)
+    R_sq = R * R
+    nearby_peaks_cart = flex.vec3_double()
+    nearby_peaks_heights = flex.double()
+    n_peaks = self.peak_sites_cart.size()
+    if n_peaks == 0: return nearby_peaks_cart, nearby_peaks_heights
+    if not self.is_periodic:
+      # CRYO-EM: Strict Euclidean distance check.
+      target_array = flex.vec3_double(n_peaks, target_cart)
+      diffs = self.peak_sites_cart - target_array
+      dist_sq = diffs.dot()
+      # 1. Filter by distance
+      sel = dist_sq <= R_sq
+      # 2. Filter dynamically by the target-specific threshold
+      if threshold is not None: sel &= (self.peak_heights >= threshold)
+      nearby_peaks_cart = self.peak_sites_cart.select(sel)
+      nearby_peaks_heights = self.peak_heights.select(sel)
+    else:
+      # CRYSTALLOGRAPHY: Periodic wrapping using unit cell boundaries
+      frac_min, frac_max = self.unit_cell.box_frac_around_sites(
+        sites_cart=flex.vec3_double([target_cart]), buffer=R)
+      min_h, min_k, min_l = \
+        ifloor(frac_min[0]), ifloor(frac_min[1]), ifloor(frac_min[2])
+      max_h, max_k, max_l = \
+        iceil(frac_max[0]), iceil(frac_max[1]), iceil(frac_max[2])
+      for h in range(min_h, max_h + 1):
+        for k in range(min_k, max_k + 1):
+          for l in range(min_l, max_l + 1):
+            T_frac = (float(h), float(k), float(l))
+            T_cart = self.unit_cell.orthogonalize(T_frac)
+            v_target_cart = (
+              target_cart[0] - T_cart[0],
+              target_cart[1] - T_cart[1],
+              target_cart[2] - T_cart[2])
+            v_target_array = flex.vec3_double(n_peaks, v_target_cart)
+            diffs = self.peak_sites_cart - v_target_array
+            dist_sq = diffs.dot()
+            # 1. Filter by distance
+            sel = dist_sq <= R_sq
+            # 2. Filter dynamically by the target-specific threshold
+            if threshold is not None:
+              sel &= (self.peak_heights >= threshold)
+            n_found = sel.count(True)
+            if n_found > 0:
+              selected_peaks_cart = self.peak_sites_cart.select(sel)
+              T_cart_array = flex.vec3_double(n_found, T_cart)
+              shifted_peaks_cart = selected_peaks_cart + T_cart_array
+              nearby_peaks_cart.extend(shifted_peaks_cart)
+              nearby_peaks_heights.extend(self.peak_heights.select(sel))
+    #
+    # Convert to tricubic interpolation values
+    #tmp = flex.double()
+    #for site_cart in nearby_peaks_cart:
+    #  site_frac = self.unit_cell.fractionalize(site_cart)
+    #  mv = self.map_data_0.tricubic_interpolation(site_frac)
+    #  if threshold is not None:
+    #    if mv > threshold:
+    #      tmp.append(mv)
+    #  else:
+    #    tmp.append(mv)
+    #nearby_peaks_heights = tmp
+    #
+    return nearby_peaks_cart, nearby_peaks_heights

@@ -285,6 +285,79 @@ def bz2_open(file_name, mode):
                        % ({'r':'un', 'w':''}[mode], file_name))
   return bz2.BZ2File(file_name, mode)
 
+def lzma_open(file_name, mode):
+  """
+  Wraps lzma.open to open a .xz or .lzma file. The container is auto-detected on
+  read; on write it is chosen from the extension (.lzma -> legacy FORMAT_ALONE,
+  otherwise FORMAT_XZ). lzma is stdlib but may be absent on minimal builds.
+
+  Parameters
+  ----------
+  file_name : str
+  mode : str
+
+  Returns
+  -------
+  file
+
+  Raises
+  ------
+  RuntimeError
+      If lzma is not available.
+  """
+  assert mode in ["r", "rb", "rt", "w", "wb", "wt", "a", "ab"]
+  try:
+    import lzma
+  except ImportError:
+    un = "un" if (mode[0] == "r") else ""
+    raise RuntimeError(
+      "lzma module not available: cannot %scompress file %s"
+        % (un, show_string(file_name)))
+  if (mode[0] == "r"):
+    return lzma.open(file_name, mode)
+  fmt = lzma.FORMAT_ALONE if file_name.endswith(".lzma") else lzma.FORMAT_XZ
+  return lzma.open(file_name, mode, format=fmt)
+
+def zstd_open(file_name, mode):
+  """
+  Wraps zstandard.open to open a .zst file. zstandard is an OPTIONAL dependency;
+  it is imported lazily so libtbx keeps working when it is absent.
+
+  Parameters
+  ----------
+  file_name : str
+  mode : str
+
+  Returns
+  -------
+  file
+
+  Raises
+  ------
+  RuntimeError
+      If zstandard is not available or is too old to provide zstandard.open.
+  """
+  assert mode in ["r", "rb", "rt", "w", "wb", "wt", "a", "ab"]
+  try:
+    import zstandard
+  except ImportError:
+    un = "un" if (mode[0] == "r") else ""
+    raise RuntimeError(
+      "zstandard package not available: cannot %scompress file %s\n"
+      "  Install it with 'libtbx.conda install zstandard' or "
+      "'libtbx.pip install zstandard'." % (un, show_string(file_name)))
+  if not hasattr(zstandard, 'open'):
+    raise RuntimeError(
+      "the installed zstandard lacks zstandard.open (need >= 0.15); upgrade "
+      "with 'libtbx.conda install zstandard' or "
+      "'libtbx.pip install -U zstandard'.")
+  # zstandard.open() defaults a bare r/w/a mode to TEXT, unlike lzma/gzip/bz2
+  # which are binary; normalize so .zst matches the sibling compressors that
+  # smart_open dispatches to.
+  if mode in ("r", "w", "a"):
+    mode = mode + "b"
+  return zstandard.open(file_name, mode)
+
 def warn_if_unexpected_md5_hexdigest(
       path,
       expected_md5_hexdigests,
@@ -323,20 +396,34 @@ def warn_if_unexpected_md5_hexdigest(
   print("*"*width, file=out)
   return True
 
-def md5_hexdigest(filename=None, blocksize=256):
-  """ Compute the MD5 hexdigest of the content of the given file,
-      efficiently even for files much larger than the available RAM.
-
-      The file is read by chunks of `blocksize` MB.
+def file_hexdigest(filename=None, algorithm=None, blocksize=256):
+  """
+  Compute the hexdigest in blocksize (MB) chunks
   """
   blocksize *= 1024**2
-  m = hashlib.md5()
+  m = algorithm()
   with open(filename, 'rb') as f:
     buf = f.read(blocksize)
     while buf:
       m.update(buf)
       buf = f.read(blocksize)
   return m.hexdigest()
+
+def md5_hexdigest(filename=None, blocksize=256):
+  """ Compute the MD5 hexdigest of the content of the given file,
+      efficiently even for files much larger than the available RAM.
+
+      The file is read by chunks of `blocksize` MB.
+  """
+  return file_hexdigest(filename=filename, algorithm=hashlib.md5, blocksize=blocksize)
+
+def sha256_hexdigest(filename, blocksize=256):
+  """ Compute the sha256 hexdigest of the content of the given file,
+      efficiently even for files much larger than the available RAM.
+
+      The file is read by chunks of `blocksize` MB.
+  """
+  return file_hexdigest(filename=filename, algorithm=hashlib.sha256, blocksize=blocksize)
 
 def get_memory_from_string(mem_str):
   """
@@ -2418,8 +2505,7 @@ def to_unicode(text, codec=None, errors='replace'):
       new_text = text.decode(codec, errors)
     except UnicodeDecodeError: # in case errors='strict'
       raise Sorry('Unable to decode text with %s' % codec)
-    finally:
-      return new_text
+    return new_text
   elif (text is not None):
     return unicode(text)
   else:
@@ -2457,8 +2543,7 @@ def to_bytes(text, codec=None, errors='replace'):
       new_text = text.encode(codec, errors)
     except UnicodeEncodeError: # in case errors='strict'
       raise Sorry('Unable to encode text with %s' % codec)
-    finally:
-      return new_text
+    return new_text
   elif (text is not None):
     return bytes(text)
   else:

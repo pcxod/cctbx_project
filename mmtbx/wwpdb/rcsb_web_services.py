@@ -8,9 +8,13 @@ from __future__ import absolute_import, division, print_function
 import libtbx.utils
 import json
 import requests
+from requests.adapters import HTTPAdapter, Retry
 
 search_base_url = "https://search.rcsb.org/rcsbsearch/v2/query?json="
 report_base_url = "https://data.rcsb.org/graphql"
+
+# RCSB GraphQL caps `entries(entry_ids: [...])` at 1000 ids per request.
+report_entry_ids_chunk_size = 1000
 
 def value_attribute_filter(attribute_name, operator, value):
   assert operator in ["greater", "less", "less_or_equal", "greater_or_equal", "exact_match"]
@@ -70,7 +74,8 @@ def add_nodes_to_query_if_needed_in_place(query_json):
 def post_query(query_json=None, xray_only=True, d_max=None, d_min=None,
     protein_only=False, data_only=False, log=None,
     sort_by_resolution=False, clashscore_range=None,
-    rama_outliers_range=None, rota_outliers_range=None):
+    rama_outliers_range=None, rota_outliers_range=None,
+    n_retries_on_no_results=2):
   """  Make request to RCSB search API and return list of PDB ids, optionally with
   chain IDs. If query_json is not supplied, generic one will be used which
   searches for everything in PDB. It will be enhanced according to other parameters.
@@ -144,13 +149,33 @@ def post_query(query_json=None, xray_only=True, d_max=None, d_min=None,
     query_json["request_options"]["results_verbosity"] = "compact"
   print("  executing HTTP request...", file=log)
   # print(json.dumps(query_json, indent=4))
-  r = requests.post(search_base_url, json=query_json)
   res_ids = []
-  # print('r.status_code', r.status_code)
-  if r.status_code == 200:
-    r_json = r.json()
-    # print(json.dumps(r_json, indent=4))
-    res_ids = r_json["result_set"]
+  attempt_number = 0
+  while len(res_ids) == 0 and attempt_number < n_retries_on_no_results:
+    if attempt_number > 0:
+      print("  Retry # %d to get non empty result from RCSB" % attempt_number, file=log)
+    s = requests.Session()
+    retries = Retry(
+        total=5,
+        connect=5,
+        read=5,
+        other=5,
+        backoff_factor=0.1,
+        status_forcelist=[ 500, 502, 503, 504 ],
+        allowed_methods=frozenset(["POST"]),
+        raise_on_status=False)
+    s.mount('https://', HTTPAdapter(max_retries=retries))
+    r = s.post(search_base_url, json=query_json)
+    # print('r.status_code', r.status_code)
+    retry_state = r.raw.retries              # urllib3.util.retry.Retry
+    num_retries = len(retry_state.history)   # how many retry events occurred
+    if num_retries > 0:
+      print("  Number of retries for RCSB query: %d" % num_retries, file=log)
+    if r.status_code == 200:
+      r_json = r.json()
+      # print(json.dumps(r_json, indent=4))
+      res_ids = r_json["result_set"]
+    attempt_number += 1
   return res_ids
 
 def sequence_search(
@@ -328,11 +353,21 @@ def get_high_resolution_for_structures(pdb_ids):
   return result
 
 def post_report_query_with_pdb_list(query, pdb_ids):
-  pdb_list = "%s" % pdb_ids
-  pdb_list = pdb_list.replace("'", '"')
-  request = query.format(pdb_list=pdb_list)
-  r = requests.post(report_base_url, json={"query":request})
-  return r.json()
+  merged_entries = []
+  for i in range(0, len(pdb_ids), report_entry_ids_chunk_size):
+    chunk = pdb_ids[i:i + report_entry_ids_chunk_size]
+    pdb_list = "%s" % list(chunk)
+    pdb_list = pdb_list.replace("'", '"')
+    request = query.format(pdb_list=pdb_list)
+    r = requests.post(report_base_url, json={"query":request})
+    r_json = r.json()
+    entries = r_json.get("data", {}).get("entries")
+    if entries is None:
+      raise RuntimeError(
+          "RCSB GraphQL request failed for %d ids (chunk starting at %d): %s" % (
+              len(chunk), i, r_json.get("errors", r_json)))
+    merged_entries.extend(entries)
+  return {"data": {"entries": merged_entries}}
 
 def get_r_work_rfree_for_structures(pdb_ids):
   """ Get Rwork and Rfree for list of pdb ids
@@ -480,7 +515,7 @@ query
   if data_entry['exptl'][0]['method'] != 'ELECTRON MICROSCOPY':
     return None
   emdb_ids = data_entry['rcsb_entry_container_identifiers']['emdb_ids']
-  if len(emdb_ids)==0:
+  if not emdb_ids:
     return None
   return emdb_ids
 
