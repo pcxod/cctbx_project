@@ -2,9 +2,10 @@
 #pragma once
 #include <limits>
 #include <charconv>
-#include <bit>
 #include <array>
+#include <cstring>
 #include <iomanip>
+#include <type_traits>
 
 namespace cctbx {
   namespace xray {
@@ -210,6 +211,20 @@ namespace cctbx {
 
     namespace atomID_utils {
 
+        template <typename To, typename From>
+        To bit_cast(const From& from) noexcept
+        {
+            static_assert(sizeof(To) == sizeof(From),
+                "bit_cast requires source and destination to have the same size");
+            static_assert(std::is_trivially_copyable<To>::value &&
+                std::is_trivially_copyable<From>::value,
+                "bit_cast requires trivially copyable types");
+
+            To to;
+            std::memcpy(&to, &from, sizeof(to));
+            return to;
+        }
+
         inline constexpr double max_fractional_coordinate = 16.0;
 
         inline const double integer_max = static_cast<double>(std::numeric_limits<int32_t>::max());
@@ -298,10 +313,10 @@ namespace cctbx {
             const auto data_bits =
                 static_cast<std::uint16_t>(second >> 32);
 
-            result.frac_x_int = std::bit_cast<std::int32_t>(frac_x_bits);
-            result.frac_y_int = std::bit_cast<std::int32_t>(frac_y_bits);
-            result.frac_z_int = std::bit_cast<std::int32_t>(frac_z_bits);
-            result.data_ = std::bit_cast<std::int16_t>(data_bits);
+            result.frac_x_int = atomID_utils::bit_cast<std::int32_t>(frac_x_bits);
+            result.frac_y_int = atomID_utils::bit_cast<std::int32_t>(frac_y_bits);
+            result.frac_z_int = atomID_utils::bit_cast<std::int32_t>(frac_z_bits);
+            result.data_ = atomID_utils::bit_cast<std::int16_t>(data_bits);
 
             result.Z_ =
                 static_cast<std::uint8_t>(second >> 48);
