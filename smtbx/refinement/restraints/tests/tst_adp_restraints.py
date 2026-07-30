@@ -8,17 +8,22 @@ from cctbx import crystal
 from six.moves import range
 
 def refinable_sucrose():
-  """ Sucrose with everything flagged for refinement.
+  """ Sucrose as an ordinary refinement has it: heavy atoms anisotropic and
+  refined, hydrogens riding.
 
-  The ADP restraint builders only restrain a scatterer whose ADPs are actually
-  being refined, so a structure straight out of development, whose flags are
-  all at their defaults, yields no proxies at all.
+  The flags are not incidental. The ADP restraint builders only restrain a
+  scatterer whose ADPs are actually being refined, so a structure straight out
+  of development, whose flags are all at their defaults, yields no proxies at
+  all -- which is what the counts below were failing on.
+
+  The hydrogens are deliberately left unflagged, which is what makes those
+  counts what they are: riding hydrogens have no ADPs of their own to restrain.
+  Refine them, as an aspherical model does, and they are restrained too.
   """
   xs = development.sucrose()
   for sc in xs.scatterers():
     sc.flags.set_grad_site(True)
     if sc.flags.use_u_aniso(): sc.flags.set_grad_u_aniso(True)
-    if sc.flags.use_u_iso(): sc.flags.set_grad_u_iso(True)
   return xs
 
 
