@@ -236,6 +236,7 @@ def exercise_non_finite_guard():
         scipy_iterations.scipy_iterations.function_and_gradient(self, p)
       if self.n_iterations >= self.blow_up_after:
         gradient = numpy.full_like(gradient, numpy.nan)
+        self.check_is_finite(objective, numpy.linalg.norm(gradient))
       return objective, gradient
 
   problem = test_problems.exponential_fit()
