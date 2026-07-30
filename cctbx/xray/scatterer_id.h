@@ -1,5 +1,7 @@
 // (c) O.V.D., OlexSys Ltd, 2025
 #pragma once
+#include <cstdint>
+#include <cmath>
 #include <limits>
 #include <charconv>
 #include <array>
