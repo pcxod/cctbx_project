@@ -4,13 +4,107 @@
 #include <cctbx/xray/twin_component.h>
 #include <cctbx/xray/dispersion_radial.h>
 #include <scitbx/array_family/ref_reductions.h>
+#include <scitbx/sparse/matrix.h>
 #include <boost/shared_ptr.hpp>
+#include <vector>
 
 namespace smtbx {
   namespace refinement {
     namespace least_squares {
       using namespace cctbx;
       using namespace cctbx::xray;
+
+      /** @brief The reparametrisation's Jacobian transpose, flattened once so
+          that applying it does not walk a sparse structure per reflection.
+
+      scitbx::sparse::matrix is a vector of sparse columns, each column its own
+      heap block. Applying it the way it applies itself means, for every
+      reflection, stepping through every column object in turn and following
+      each to its own storage -- and the columns are many and nearly all of them
+      hold one or two entries, so that walk costs more than the arithmetic it
+      carries. The structure does not change during a build, only the vector it
+      is applied to does, so the walk is done once here and what is left is a
+      flat sequential pass.
+
+      The entries are laid down in the order the sparse traversal visits them
+      and accumulated in that order, so a column with a repeated row index --
+      which is allowed, the columns not being compacted -- still adds up the
+      same way, and the result is the one the sparse product gives, bit for bit.
+
+      Kept grouped by column rather than as a flat list of triples so that a
+      caller which produces the vector's elements on demand may produce each
+      one once, when its column comes up. See apply_converted.
+      */
+      template <typename FloatType>
+      struct flattened_jacobian_transpose {
+        struct entry {
+          int row;
+          FloatType value;
+        };
+        /// a column with at least one entry, and where its entries end
+        struct column {
+          int index;
+          std::size_t end;
+        };
+
+        flattened_jacobian_transpose(
+          scitbx::sparse::matrix<FloatType> const &jt)
+          : n_rows(jt.n_rows())
+        {
+          entries.reserve(jt.non_zeroes());
+          for (int j = 0; j < jt.n_cols(); j++) {
+            typename scitbx::sparse::matrix<FloatType>::const_row_iterator
+              p = jt.col(j).begin();
+            if (p == jt.col(j).end()) {
+              continue;
+            }
+            for (; p != jt.col(j).end(); ++p) {
+              entry e = { static_cast<int>(p.index()), *p };
+              entries.push_back(e);
+            }
+            column c = { j, entries.size() };
+            columns.push_back(c);
+          }
+        }
+
+        /// w = J^T v
+        void apply(af::const_ref<FloatType> const &v, FloatType *w) const {
+          std::fill(w, w + n_rows, FloatType(0));
+          std::size_t at = 0;
+          for (std::size_t c = 0; c < columns.size(); c++) {
+            FloatType const v_c = v[columns[c].index];
+            for (; at < columns[c].end; at++) {
+              w[entries[at].row] += entries[at].value*v_c;
+            }
+          }
+        }
+
+        /** @brief w = J^T v, with v[j] handed over by convert(j) rather than
+            read out of an array.
+
+        The elements are asked for one per column, in column order, which is
+        exactly as many times as an array of them would have been written. So a
+        caller whose v is a transformation of something it already holds may
+        skip materialising v at all, and the pass which would have written it
+        and the pass which would have read it back both disappear.
+        */
+        template <class Convert>
+        void apply_converted(Convert const &convert, FloatType *w) const {
+          std::fill(w, w + n_rows, FloatType(0));
+          std::size_t at = 0;
+          for (std::size_t c = 0; c < columns.size(); c++) {
+            FloatType const v_c = convert(columns[c].index);
+            for (; at < columns[c].end; at++) {
+              w[entries[at].row] += entries[at].value*v_c;
+            }
+          }
+        }
+
+        std::vector<entry> entries;
+        std::vector<column> columns;
+        int n_rows;
+      };
+
       /* Need inheritance to achive more flexibility */
       template <typename FloatType>
       struct f_calc_function_base {
@@ -66,6 +160,36 @@ namespace smtbx {
         virtual af::const_ref<FloatType> get_grad_observable() const = 0;
         /* returns true if grads are for all and not independent only params */
         virtual bool raw_gradients() const { return true; }
+
+        /** @brief Apply the Jacobian to the gradients of the observable
+            without ever assembling them.
+
+        The gradients of Fc are complex and the least squares wants gradients of
+        the observable, a conversion elementwise in the components. Done in the
+        obvious order that is a pass which writes the converted vector and a
+        pass which reads it back to apply the Jacobian; done here it is one
+        pass, each component converted as its column comes up. The conversion is
+        the observable's own, so which observable it is stays where it is known.
+
+        Only meaningful when the functor was told to defer -- otherwise the
+        converted vector has already been assembled and there is nothing to
+        save. Returns false if this functor has no fused form, and the caller
+        should then apply the Jacobian to get_grad_observable() itself.
+        */
+        virtual bool apply_jacobian_to_grad_observable(
+          flattened_jacobian_transpose<FloatType> const &,
+          FloatType *) const
+        {
+          return false;
+        }
+
+        /** @brief Stop assembling the gradients of the observable, because the
+            caller will take them through apply_jacobian_to_grad_observable.
+
+        Off by default and set once per build, not per reflection. While it is
+        on get_grad_observable() is stale and must not be read.
+        */
+        virtual void set_defer_grad_observable(bool) {}
         /* The radial correction of f' and f'', or null if there is none.
 
         It is owned by the structure factor functor rather than sitting beside
@@ -149,6 +273,18 @@ namespace smtbx {
         get_dispersion_correction() const
         {
           return f_calc_function->disp_cr.get();
+        }
+        /* Forwarded to the linearisation, which is where the observable is
+           known and so where the conversion has to happen.
+         */
+        virtual bool apply_jacobian_to_grad_observable(
+          flattened_jacobian_transpose<FloatType> const &jt,
+          FloatType *w) const
+        {
+          return f_calc_function->apply_jacobian_to_grad_observable(jt, w);
+        }
+        virtual void set_defer_grad_observable(bool defer) {
+          f_calc_function->set_defer_grad_observable(defer);
         }
 
         boost::shared_ptr<OneMillerIndexFcalc> f_calc_function;

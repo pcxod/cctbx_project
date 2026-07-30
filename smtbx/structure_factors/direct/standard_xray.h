@@ -1056,6 +1056,24 @@ namespace smtbx { namespace structure_factors { namespace direct {
         scatterer_contribution_type;
       typedef cctbx::xray::dispersion_radial_correction<float_type>
         disp_correction_type;
+
+      /** @brief Deferring the gradients of the observable, for a functor which
+          has no observable to speak of.
+
+      This one computes Fc and its gradients and stops there, so there is
+      nothing to defer and nothing to fuse a Jacobian into. base_obs, which does
+      have an observable, hides both of these with the real thing.
+      */
+      //@{
+      void set_defer_grad_observable(bool) {}
+      template <class FlattenedJacobianTranspose>
+      bool apply_jacobian_to_grad_observable(
+        FlattenedJacobianTranspose const &, float_type *) const
+      {
+        return false;
+      }
+      //@}
+
     protected:
       cctbx::xray::scatterer_grad_flags_counts grad_flags_counts;
       uctbx::unit_cell const &unit_cell;
@@ -1318,6 +1336,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
     public:
       float_type observable;
       af::ref_owning_shared<float_type> grad_observable;
+      /// while set, grad_observable is not assembled; see below
+      bool defer_grad_observable;
 
     public:
       base_obs(uctbx::unit_cell const& unit_cell,
@@ -1330,8 +1350,51 @@ namespace smtbx { namespace structure_factors { namespace direct {
         : parent_t(unit_cell, space_group, scatterers, h_scatterer_contribution,
           own_scatterer_contribution, disp_cr),
         grad_observable(parent_t::grad_flags_counts.n_parameters(),
-          af::init_functor_null<float_type>())
+          af::init_functor_null<float_type>()),
+        defer_grad_observable(false)
       {}
+
+      /** @brief Leave the gradients of the observable unassembled, because the
+          caller will convert them itself as it applies the Jacobian.
+
+      Set once per build. While it is on grad_observable is stale, and the only
+      way to the gradients is apply_jacobian_to_grad_observable below.
+      */
+      void set_defer_grad_observable(bool defer) {
+        defer_grad_observable = defer;
+      }
+
+      /** @brief w = J^T (gradients of the observable), converting on the way.
+
+      The conversion from the complex gradients of Fc is elementwise, and the
+      Jacobian visits each component once, so the two fuse into a single pass
+      and the vector of converted gradients is never written down at all.
+
+      Each component is converted exactly once, in the same order and by the
+      same arithmetic as the loop in observable_type::compute, and accumulated
+      into w in the order the sparse traversal gives -- so the result is the one
+      the two-step form gives, bit for bit.
+      */
+      /// Turns the observable's elementwise conversion into the by-component
+      /// lookup the flattened Jacobian asks for
+      struct grad_of_component {
+        typename observable_type::grad_functor g;
+        complex_type const *grad_f_calc;
+        float_type operator()(int j) const { return g(grad_f_calc[j]); }
+      };
+
+      template <class FlattenedJacobianTranspose>
+      bool apply_jacobian_to_grad_observable(
+        FlattenedJacobianTranspose const &jt, float_type *w) const
+      {
+        grad_of_component const c = {
+          observable_type::grad_of(parent_t::origin_centric_case,
+            parent_t::f_calc, observable),
+          parent_t::grad_f_calc.begin()
+        };
+        jt.apply_converted(c, w);
+        return true;
+      }
 
       /// Evaluate the structure factors
       void evaluate(miller::index<> const& h,
@@ -1399,7 +1462,7 @@ namespace smtbx { namespace structure_factors { namespace direct {
         observable_type::compute(parent_t::origin_centric_case,
           parent_t::f_calc, parent_t::grad_f_calc,
           observable, grad_observable,
-          compute_grad);
+          compute_grad && !defer_grad_observable);
         /* The radial correction's gradients of Fc become gradients of the
            observable the same way every other one does. The functor is
            elementwise in grad_f_calc, so it takes the correction's own
@@ -1555,6 +1618,43 @@ namespace smtbx { namespace structure_factors { namespace direct {
       typedef FloatType float_type;
       typedef std::complex<float_type> complex_type;
 
+      /** @brief One component of the gradient of the observable, given the
+          things that are the same for all of them.
+
+      The whole-array compute() below is this in a loop, and the fused Jacobian
+      product applies it one component at a time as each column comes up. Both
+      go through here so that there is one statement of the algebra and the two
+      cannot drift apart -- including the branches, which are not merely an
+      optimisation: skipping the imaginary term when it is zero is what keeps
+      the origin-centric case free of a signed zero it would otherwise pick up.
+      */
+      struct grad_functor {
+        bool origin_centric_case;
+        complex_type f_calc;
+
+        float_type operator()(complex_type const &g) const {
+          if (!origin_centric_case) {
+            return 2 * (f_calc.real()*g.real() + f_calc.imag()*g.imag());
+          }
+          if (f_calc.imag() == 0) {
+            return 2 * f_calc.real() * g.real();
+          }
+          float_type grad = f_calc.real() * g.real();
+          if (g.imag()) {
+            grad += f_calc.imag() * g.imag();
+          }
+          return grad * 2;
+        }
+      };
+
+      static grad_functor grad_of(bool origin_centric_case,
+                                  complex_type const &f_calc,
+                                  float_type)
+      {
+        grad_functor f = { origin_centric_case, f_calc };
+        return f;
+      }
+
       static
       void compute(bool origin_centric_case,
                    complex_type f_calc,
@@ -1572,28 +1672,9 @@ namespace smtbx { namespace structure_factors { namespace direct {
 
         if (!compute_grad) return;
 
-        if (!origin_centric_case) {
-          for (int j=0; j < grad_f_calc.size(); ++j) {
-            grad_observable[j] = 2 * (  f_calc.real() * grad_f_calc[j].real()
-                                      + f_calc.imag() * grad_f_calc[j].imag() );
-          }
-        }
-        else {
-          if (f_calc.imag() == 0) {
-            for (int j=0; j < grad_f_calc.size(); ++j) {
-                grad_observable[j] =  2 * f_calc.real() * grad_f_calc[j].real();
-            }
-          }
-          else {
-            for (int j=0; j < grad_f_calc.size(); ++j) {
-              float_type &grad = grad_observable[j];
-              grad = f_calc.real() * grad_f_calc[j].real();
-              if (grad_f_calc[j].imag()) {
-                grad += f_calc.imag() * grad_f_calc[j].imag();
-              }
-              grad *= 2;
-            }
-          }
+        grad_functor const g = grad_of(origin_centric_case, f_calc, observable);
+        for (int j=0; j < grad_f_calc.size(); ++j) {
+          grad_observable[j] = g(grad_f_calc[j]);
         }
       }
     };
@@ -1604,6 +1685,43 @@ namespace smtbx { namespace structure_factors { namespace direct {
     {
       typedef FloatType float_type;
       typedef std::complex<float_type> complex_type;
+
+      /// \copydoc modulus_squared::grad_functor
+      struct grad_functor {
+        bool origin_centric_case, f_calc_is_real;
+        complex_type f_calc;
+        /// 1/|Fc|, hoisted here because it is the same for every component
+        float_type observable_inverse;
+
+        float_type operator()(complex_type const &g) const {
+          if (origin_centric_case && f_calc_is_real) {
+            return f_calc.real() > 0 ? g.real() : -g.real();
+          }
+          if (!origin_centric_case) {
+            return (f_calc.real()*g.real() + f_calc.imag()*g.imag())
+                   *observable_inverse;
+          }
+          float_type grad = f_calc.real() * g.real();
+          if (g.imag()) {
+            grad += f_calc.imag() * g.imag();
+          }
+          return grad * observable_inverse;
+        }
+      };
+
+      static grad_functor grad_of(bool origin_centric_case,
+                                  complex_type const &f_calc,
+                                  float_type observable)
+      {
+        bool const real = f_calc.imag() == 0;
+        /* The branch which needs no division is also the one where the
+           observable may be zero, so the reciprocal is only formed where it
+           will be used.
+         */
+        grad_functor f = { origin_centric_case, real, f_calc,
+          (origin_centric_case && real) ? 0 : 1/observable };
+        return f;
+      }
 
       static
       void compute(bool origin_centric_case,
@@ -1622,32 +1740,9 @@ namespace smtbx { namespace structure_factors { namespace direct {
 
         if (!compute_grad) return;
 
-        if (!origin_centric_case) {
-          float_type observable_inverse = 1./observable;
-          for (int j=0; j < grad_f_calc.size(); ++j) {
-            grad_observable[j] =   f_calc.real() * grad_f_calc[j].real()
-                                 + f_calc.imag() * grad_f_calc[j].imag();
-            grad_observable[j] *= observable_inverse;
-          }
-        }
-        else {
-          if (f_calc.imag() == 0) {
-            for (int j=0; j < grad_f_calc.size(); ++j) {
-              grad_observable[j] = f_calc.real() > 0 ?  grad_f_calc[j].real()
-                                                     : -grad_f_calc[j].real();
-            }
-          }
-          else {
-            float_type observable_inverse = 1./observable;
-            for (int j=0; j < grad_f_calc.size(); ++j) {
-              float_type &grad = grad_observable[j];
-              grad = f_calc.real() * grad_f_calc[j].real();
-              if (grad_f_calc[j].imag()) {
-                grad += f_calc.imag() * grad_f_calc[j].imag();
-              }
-              grad *= observable_inverse;
-            }
-          }
+        grad_functor const g = grad_of(origin_centric_case, f_calc, observable);
+        for (int j=0; j < grad_f_calc.size(); ++j) {
+          grad_observable[j] = g(grad_f_calc[j]);
         }
       }
     };

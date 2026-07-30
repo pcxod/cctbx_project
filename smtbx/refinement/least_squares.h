@@ -477,56 +477,9 @@ namespace smtbx { namespace refinement { namespace least_squares {
       }
     };
 
-    /** @brief The reparametrisation's Jacobian transpose, flattened once so
-        that applying it does not walk a sparse structure per reflection.
-
-    scitbx::sparse::matrix is a vector of sparse columns, each column its own
-    heap block. Applying it the way it applies itself means, for every
-    reflection, stepping through every column object in turn and following each
-    to its own storage -- and the columns are many and nearly all of them hold
-    one or two entries, so that walk costs more than the arithmetic it carries.
-    The structure does not change during a build, only the vector it is applied
-    to does, so the walk is done once here and what is left is a flat sequential
-    pass.
-
-    The entries are laid down in the order the sparse traversal visits them and
-    accumulated in that order, so a column with a repeated row index -- which is
-    allowed, the columns not being compacted -- still adds up the same way, and
-    the result is the one the sparse product gives, bit for bit.
-    */
-    struct flattened_jacobian_transpose {
-      struct entry {
-        int row, col;
-        FloatType value;
-      };
-
-      flattened_jacobian_transpose(
-        scitbx::sparse::matrix<FloatType> const &jt)
-        : n_rows(jt.n_rows())
-      {
-        entries.reserve(jt.non_zeroes());
-        for (int j=0; j < jt.n_cols(); j++) {
-          for (typename scitbx::sparse::matrix<FloatType>::const_row_iterator
-               p = jt.col(j).begin(); p != jt.col(j).end(); ++p)
-          {
-            entry e = { (int)p.index(), j, *p };
-            entries.push_back(e);
-          }
-        }
-      }
-
-      /// w = J^T v, with w a row the caller owns
-      void apply(af::const_ref<FloatType> const &v, FloatType *w) const {
-        std::fill(w, w + n_rows, FloatType(0));
-        for (std::size_t k=0; k < entries.size(); k++) {
-          entry const &e = entries[k];
-          w[e.row] += e.value*v[e.col];
-        }
-      }
-
-      std::vector<entry> entries;
-      int n_rows;
-    };
+    /// the shared one, defined next to f_calc_function_base which uses it
+    typedef least_squares::flattened_jacobian_transpose<FloatType>
+      flattened_jacobian_transpose;
 
     /** @brief The gradients of the observable with respect to the parameters,
         written into somewhere the caller already has.
@@ -544,14 +497,25 @@ namespace smtbx { namespace refinement { namespace least_squares {
       flattened_jacobian_transpose const &jacobian_transpose,
       FloatType *destination, int n_params)
     {
-      af::const_ref<FloatType> g = f_calc_function.get_grad_observable();
       if (f_calc_function.raw_gradients()) {
-        jacobian_transpose.apply(g, destination);
+        /* Fused when the functor can: the gradients of the observable are
+           converted from the complex ones a component at a time, as the
+           Jacobian reaches each column, and never assembled into a vector of
+           their own. Whoever cannot do that says so and is served the long way.
+         */
+        if (f_calc_function.apply_jacobian_to_grad_observable(
+              jacobian_transpose, destination))
+        {
+          return;
+        }
+        jacobian_transpose.apply(f_calc_function.get_grad_observable(),
+          destination);
+        return;
       }
-      else {
-        SMTBX_ASSERT(g.size() == n_params)(g.size())(n_params);
-        std::copy(g.begin(), g.end(), destination);
-      }
+      // already in the basis of the refined parameters, so nothing to apply
+      af::const_ref<FloatType> g = f_calc_function.get_grad_observable();
+      SMTBX_ASSERT(g.size() == n_params)(g.size())(n_params);
+      std::copy(g.begin(), g.end(), destination);
     }
 
     /** @brief One row of sqrt(W) J.
@@ -669,6 +633,13 @@ namespace smtbx { namespace refinement { namespace least_squares {
             && twp.is_trivial()
             && fc_cr->is_trivial()
             && f_calc_function.get_dispersion_correction() == 0;
+          /* The fused conversion is only reachable from the fast path, so the
+             functor may stop assembling the gradients of the observable
+             exactly when that path is taken -- and only when the Jacobian is
+             applied at all, the other case reading them straight out.
+           */
+          f_calc_function.set_defer_grad_observable(
+            fast && f_calc_function.raw_gradients());
           while (true) {
             chunk ch = scheduler.next();
             if (ch.size == 0) {
