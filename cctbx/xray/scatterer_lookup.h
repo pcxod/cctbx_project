@@ -138,7 +138,7 @@ namespace xray {
       {
         return index_of_cartesian(u_cell.orthogonalize(site), Z, sdata, eps);
       }
-    
+
       size_t index_of_cartesian(const cart_t& crd, int Z, int sdata = 0,
         FloatType eps = 1e-3) const
       {

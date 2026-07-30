@@ -1,8 +1,6 @@
 from __future__ import absolute_import, division, print_function
 
 from cctbx import adp_restraints, adptbx, xray, uctbx
-from cctbx.adp_restraints import adp_restraint_params
-from cctbx.array_family import flex
 from cctbx.xray import parameter_map
 from scitbx import matrix
 from smtbx.refinement import restraints

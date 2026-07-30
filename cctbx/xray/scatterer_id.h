@@ -346,7 +346,7 @@ namespace cctbx {
             }
             return from_uint64(first, second);
         }
-    
+
     public:
         scatterer_id_big() : frac_x_int(0), frac_y_int(0), frac_z_int(0), data_(0), Z_(0), reserved_(0) {}
 

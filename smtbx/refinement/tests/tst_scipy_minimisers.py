@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function
 
-from cctbx import crystal, sgtbx, xray
+from cctbx import crystal, xray
 from cctbx import euclidean_model_matching as emma
 from cctbx.array_family import flex
 from scitbx import matrix
