@@ -12,6 +12,7 @@
 #include <boost/python/implicit.hpp>
 #include <boost/python/docstring_options.hpp>
 
+#include <boost/python/list.hpp>
 #include <boost_adaptbx/iterator_range.h>
 #include <scitbx/boost_python/container_conversions.h>
 
@@ -595,11 +596,31 @@ namespace boost_python {
       return borrowed_param.get();
     }
 
+    /** @brief The parameters, as a list.
+
+    reparametrisation::parameters() hands back a boost::iterator_range, for
+    which there is no to_python converter: the generic one in boost_adaptbx
+    passes each element out by internal reference, and that stopped being
+    possible when the array became one of shared_ptr rather than one of raw
+    pointers. Hence the registration below it, which has been commented out for
+    as long as it has been there.
+
+    A list costs one traversal, needs no converter for the range at all, and its
+    elements are shared_ptr<parameter>, which Python already knows about because
+    that is the held type of every wrapped parameter class. Iterating it is what
+    the callers do -- see reparametrisation.__str__.
+    */
+    static boost::python::list parameters(wt &self) {
+      boost::python::list result;
+      wt::range r = self.parameters();
+      for (wt::iterator i = r.begin(); i != r.end(); ++i) {
+        result.append(*i);
+      }
+      return result;
+    }
+
     static void wrap() {
       using namespace boost::python;
-
-      //boost_adaptbx::iterator_range_wrapper<wt::range>
-      //::wrap("parameter_iterator");
 
       class_<wt> klass("reparametrisation", no_init);
       klass
@@ -608,7 +629,7 @@ namespace boost_python {
         .def("finalise", &wt::finalise)
         .def("linearise", &wt::linearise)
         .def("store", &wt::store)
-        .def("parameters", &wt::parameters)
+        .def("parameters", parameters)
         .add_property("jacobian_transpose",
                       make_getter(&wt::jacobian_transpose))
         .def("jacobian_transpose_matching",
