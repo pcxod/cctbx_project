@@ -39,12 +39,16 @@ class method_traits(object):
   """
 
   def __init__(self, arguments=(), tolerances=None, max_evaluations=None,
-               self_scaling=False):
+               self_scaling=False, max_iterations='maxiter'):
     """ arguments: which of 'jac', 'hessp' and 'bounds' the method takes.
         tolerances: maps 'f', 'g' and 'x' onto the options the method uses for
           them; those it has no option for are simply left out.
         max_evaluations: the option limiting the number of function
           evaluations, or None if the method has none.
+        max_iterations: the option capping the number of iterations, or None
+          for a method which does not accept one. Nearly every method spells it
+          'maxiter', but which accept it has changed between scipy releases,
+          and passing it to one which does not earns an OptimizeWarning.
         self_scaling: whether the method works out the size of its own steps,
           either from a trust region it adapts or from a Newton direction. The
           others start from a step of unit norm, which is only a sensible one
@@ -54,6 +58,7 @@ class method_traits(object):
     self.tolerances = tolerances or {}
     self.max_evaluations = max_evaluations
     self.self_scaling = self_scaling
+    self.max_iterations = max_iterations
 
 
 class scipy_iterations(normal_eqns_solving.iterations):
@@ -250,7 +255,9 @@ class scipy_iterations(normal_eqns_solving.iterations):
 
   def minimize_keywords(self, traits):
     """ The arguments to pass to scipy.optimize.minimize. """
-    options = {'maxiter': self.n_max_iterations}
+    options = {}
+    if traits.max_iterations is not None:
+      options[traits.max_iterations] = self.n_max_iterations
     for name, value in (('f', self.f_tolerance),
                         ('g', self.g_tolerance),
                         ('x', self.x_tolerance)):
@@ -367,6 +374,16 @@ class scipy_iterations(normal_eqns_solving.iterations):
     self.p_accepted = self.as_flex(p)
     self.on_iteration_completion()
     if self.interrupted: self.stop("the minimisation was interrupted")
+    """ A backstop, deliberately one past the cap scipy was given.
+
+    A method which honours its own iteration option stops before this is
+    reached, and keeps whatever final point it settled on -- which is not
+    always the last one it handed the callback. This is here for a method which
+    ignores the option, so that it does not run away uncapped and silent.
+    """
+    if (self.n_max_iterations is not None
+        and self.n_iterations > self.n_max_iterations):
+      self.stop("the maximum number of iterations was reached")
 
   def build_at(self, p, objective_only=False):
     """ Make the normal equations describe the point p, rebuilding if needed.
