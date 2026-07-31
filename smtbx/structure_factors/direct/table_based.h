@@ -523,7 +523,17 @@ namespace smtbx { namespace structure_factors { namespace table_based {
   private:
     typedef std::map<cctbx::miller::index<>, std::size_t,
       cctbx::miller::fast_less_than<> > lookup_t;
-    lookup_t mi_lookup;
+    /** Which row of the table each Miller index is in.
+
+    Held behind a shared pointer so that a fork shares it rather than copying
+    it. It is written once, when the table is read, and only ever searched
+    afterwards, so the threads have nothing to race over -- and it is a
+    red-black tree with an entry per index in the table, which on a large
+    structure is hundreds of thousands of separately allocated nodes. Copying
+    that per thread, once per build, costs more than the lookups it serves.
+    The table itself was already shared; this is the index to it.
+    */
+    boost::shared_ptr<lookup_t> mi_lookup;
     /* Held by value, not by reference. A contribution can outlive the call
     that built it -- a caller may keep one to reuse across refinements rather
     than read a large table again -- and the space group it was given is
@@ -536,15 +546,46 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     af::shared<std::vector<complex_type> > data;
     bool anomalous_flag;
     mutable std::vector<complex_type> tmp;
+
+    /** @brief Which row of the table each symmetry equivalent of the current
+        reflection lives in, and whether it has to be conjugated.
+
+    Resolving that costs a Miller index times a rotation matrix and a lookup in
+    a std::map of every index in the table -- a red-black tree, so some
+    seventeen pointer chases on a large one, nearly all of them cache misses.
+    None of it depends on the scatterer, and the loop over the scatterers is the
+    inner one, so doing it inside get_full repeats the identical work once per
+    atom: on a protein-sized structure, hundreds of times over per reflection.
+
+    Cached against the reflection it was resolved for. The caller walks all the
+    scatterers of one reflection before moving to the next, so a single entry
+    hits every time bar the first, and a caller which does not still gets right
+    answers -- just no benefit.
+
+    Mutable and per-instance, as tmp already is. Each thread works through its
+    own fork, so there is nothing shared to race over.
+    */
+    //@{
+    struct resolved_row {
+      std::size_t index;
+      bool conjugate;
+    };
+    mutable std::vector<resolved_row> rows;
+    mutable miller::index<> rows_for;
+    mutable bool rows_valid;
+    //@}
+
   public:
     // Copy constructor
     lookup_based_anisotropic(const lookup_based_anisotropic &lbsc)
       :
-      mi_lookup(lbsc.mi_lookup),
+      mi_lookup(lbsc.mi_lookup),           // shared, not copied
       space_group(lbsc.space_group),
       data(lbsc.data),
       anomalous_flag(lbsc.anomalous_flag),
-      tmp(lbsc.tmp.size())
+      tmp(lbsc.tmp.size()),
+      rows(lbsc.tmp.size()),
+      rows_valid(false)
     {}
 
     lookup_based_anisotropic(
@@ -553,19 +594,22 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       sgtbx::space_group const &space_group,
       bool anomalous_flag)
       :
+      mi_lookup(new lookup_t()),
       space_group(space_group),
       // af::shared is reference counted, so this shares the table the reader
       // built rather than copying it. Copying it row by row doubled both the
       // time and the peak memory of loading a table.
       data(data_.data()),
       anomalous_flag(anomalous_flag),
-      tmp(space_group.n_smx())
+      tmp(space_group.n_smx()),
+      rows(space_group.n_smx()),
+      rows_valid(false)
     {
       SMTBX_ASSERT(data_.rot_mxs().size() <= 1);
       SMTBX_ASSERT(data_.is_expanded());
       const af::shared<cctbx::miller::index<> > &indices = data_.miller_indices();
       for (size_t i = 0; i < data.size(); i++) {
-        mi_lookup[indices[i]] = i;
+        (*mi_lookup)[indices[i]] = i;
       }
     }
     // for testing
@@ -576,9 +620,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       direct::one_scatterer_one_h::isotropic_scatterer_contribution<FloatType> &isc,
       af::shared<cctbx::miller::index<> > const &indices)
       :
+      mi_lookup(new lookup_t()),
       space_group(space_group),
       data(indices.size()*space_group.n_smx()),
-      tmp(space_group.n_smx())
+      tmp(space_group.n_smx()),
+      rows(space_group.n_smx()),
+      rows_valid(false)
     {
       for (size_t i = 0; i < indices.size(); i++) {
         float_type d_star_sq = unit_cell.d_star_sq(indices[i]);
@@ -587,7 +634,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         for (size_t j = 0; j < space_group.n_smx(); j++) {
           size_t d_off = j * indices.size() + i;
           miller::index<> h = indices[i] * space_group.smx(j).r();
-          mi_lookup[h] = d_off;
+          (*mi_lookup)[h] = d_off;
           data[d_off].resize(scatterers.size());
           for (size_t k = 0; k < scatterers.size(); k++) {
             complex_type v = sc.get(k, h);
@@ -607,22 +654,42 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       throw 1;
     }
 
+    /// Find which row each symmetry equivalent of h_ is in; see rows
+    void resolve_rows(miller::index<> const &h_) const {
+      for (std::size_t i = 0; i < space_group.n_smx(); i++) {
+        miller::index<> h = h_ * space_group.smx(i).r();
+        lookup_t::const_iterator l = mi_lookup->find(h);
+        if (l == mi_lookup->end() && !anomalous_flag) {
+          h *= -1;
+          l = mi_lookup->find(h);
+          SMTBX_ASSERT(l != mi_lookup->end())(h.as_string());
+          rows[i].index = l->second;
+          rows[i].conjugate = true;
+        }
+        else {
+          SMTBX_ASSERT(l != mi_lookup->end())(h.as_string());
+          rows[i].index = l->second;
+          rows[i].conjugate = false;
+        }
+      }
+      rows_for = h_;
+      rows_valid = true;
+    }
+
     virtual std::vector<complex_type> const &get_full(std::size_t scatterer_idx,
       miller::index<> const &h_) const
     {
+      /* Resolved once per reflection rather than once per scatterer. Which row
+         holds which symmetry equivalent is a property of the reflection alone,
+         and the caller asks for every scatterer of one reflection before moving
+         on -- see base_fc::compute_.
+       */
+      if (!rows_valid || rows_for != h_) {
+        resolve_rows(h_);
+      }
       for (std::size_t i = 0; i < space_group.n_smx(); i++) {
-        miller::index<> h = h_ * space_group.smx(i).r();
-        lookup_t::const_iterator l = mi_lookup.find(h);
-        if (l == mi_lookup.end() && !anomalous_flag) {
-          h *= -1;
-          l = mi_lookup.find(h);
-          SMTBX_ASSERT(l != mi_lookup.end())(h.as_string());
-          tmp[i] = std::conj(data[l->second][scatterer_idx]);
-        }
-        else{
-          SMTBX_ASSERT(l != mi_lookup.end())(h.as_string());
-          tmp[i] = data[l->second][scatterer_idx];
-        }
+        complex_type const &v = data[rows[i].index][scatterer_idx];
+        tmp[i] = rows[i].conjugate ? std::conj(v) : v;
       }
       return tmp;
     }
