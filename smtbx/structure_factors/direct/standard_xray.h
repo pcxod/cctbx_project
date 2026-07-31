@@ -1377,22 +1377,39 @@ namespace smtbx { namespace structure_factors { namespace direct {
       */
       /// Turns the observable's elementwise conversion into the by-component
       /// lookup the flattened Jacobian asks for
+      template <class GradFunctor>
       struct grad_of_component {
-        typename observable_type::grad_functor g;
+        GradFunctor g;
         complex_type const *grad_f_calc;
         float_type operator()(int j) const { return g(grad_f_calc[j]); }
       };
+
+      /// Whether Fc is real is settled here, once, so that the loop the
+      /// Jacobian runs is free of the test; c.f. observable_type::grad_functor
+      template <bool f_calc_is_real, class FlattenedJacobianTranspose>
+      void apply_jacobian_(FlattenedJacobianTranspose const &jt,
+                           float_type *w) const
+      {
+        typedef typename observable_type::template
+          grad_functor<f_calc_is_real> functor_t;
+        grad_of_component<functor_t> const c = {
+          observable_type::template grad_of<f_calc_is_real>(
+            parent_t::origin_centric_case, parent_t::f_calc, observable),
+          parent_t::grad_f_calc.begin()
+        };
+        jt.apply_converted(c, w);
+      }
 
       template <class FlattenedJacobianTranspose>
       bool apply_jacobian_to_grad_observable(
         FlattenedJacobianTranspose const &jt, float_type *w) const
       {
-        grad_of_component const c = {
-          observable_type::grad_of(parent_t::origin_centric_case,
-            parent_t::f_calc, observable),
-          parent_t::grad_f_calc.begin()
-        };
-        jt.apply_converted(c, w);
+        if (parent_t::f_calc.imag() == 0) {
+          apply_jacobian_<true>(jt, w);
+        }
+        else {
+          apply_jacobian_<false>(jt, w);
+        }
         return true;
       }
 
@@ -1628,16 +1645,27 @@ namespace smtbx { namespace structure_factors { namespace direct {
       optimisation: skipping the imaginary term when it is zero is what keeps
       the origin-centric case free of a signed zero it would otherwise pick up.
       */
+      /** Whether Fc is real is a property of the reflection, not of the
+          component, so it is a template argument rather than a member: the
+          caller settles it once and the loop body has no test left in it. A
+          real Fc leaves a single multiply, which vectorises; the test would
+          have stopped that whatever the branch predictor made of it.
+       */
+      template <bool f_calc_is_real>
       struct grad_functor {
         bool origin_centric_case;
         complex_type f_calc;
 
         float_type operator()(complex_type const &g) const {
+          if (f_calc_is_real) {
+            /* The imaginary term is f_calc.imag()*g.imag() with the first
+               factor zero, so the general expression below reduces to this
+               whether or not the reflection is origin centric.
+             */
+            return 2 * f_calc.real() * g.real();
+          }
           if (!origin_centric_case) {
             return 2 * (f_calc.real()*g.real() + f_calc.imag()*g.imag());
-          }
-          if (f_calc.imag() == 0) {
-            return 2 * f_calc.real() * g.real();
           }
           float_type grad = f_calc.real() * g.real();
           if (g.imag()) {
@@ -1647,11 +1675,12 @@ namespace smtbx { namespace structure_factors { namespace direct {
         }
       };
 
-      static grad_functor grad_of(bool origin_centric_case,
-                                  complex_type const &f_calc,
-                                  float_type)
+      template <bool f_calc_is_real>
+      static grad_functor<f_calc_is_real> grad_of(bool origin_centric_case,
+                                                  complex_type const &f_calc,
+                                                  float_type)
       {
-        grad_functor f = { origin_centric_case, f_calc };
+        grad_functor<f_calc_is_real> f = { origin_centric_case, f_calc };
         return f;
       }
 
@@ -1672,7 +1701,22 @@ namespace smtbx { namespace structure_factors { namespace direct {
 
         if (!compute_grad) return;
 
-        grad_functor const g = grad_of(origin_centric_case, f_calc, observable);
+        // settled once, so that neither loop below carries the test
+        if (f_calc.imag() == 0) {
+          fill(grad_of<true>(origin_centric_case, f_calc, observable),
+               grad_f_calc, grad_observable);
+        }
+        else {
+          fill(grad_of<false>(origin_centric_case, f_calc, observable),
+               grad_f_calc, grad_observable);
+        }
+      }
+
+      template <class GradFunctor>
+      static void fill(GradFunctor const &g,
+                       af::const_ref<complex_type> const &grad_f_calc,
+                       af::ref<float_type> const &grad_observable)
+      {
         for (int j=0; j < grad_f_calc.size(); ++j) {
           grad_observable[j] = g(grad_f_calc[j]);
         }
@@ -1687,14 +1731,15 @@ namespace smtbx { namespace structure_factors { namespace direct {
       typedef std::complex<float_type> complex_type;
 
       /// \copydoc modulus_squared::grad_functor
+      template <bool f_calc_is_real>
       struct grad_functor {
-        bool origin_centric_case, f_calc_is_real;
+        bool origin_centric_case;
         complex_type f_calc;
         /// 1/|Fc|, hoisted here because it is the same for every component
         float_type observable_inverse;
 
         float_type operator()(complex_type const &g) const {
-          if (origin_centric_case && f_calc_is_real) {
+          if (f_calc_is_real && origin_centric_case) {
             return f_calc.real() > 0 ? g.real() : -g.real();
           }
           if (!origin_centric_case) {
@@ -1709,17 +1754,17 @@ namespace smtbx { namespace structure_factors { namespace direct {
         }
       };
 
-      static grad_functor grad_of(bool origin_centric_case,
-                                  complex_type const &f_calc,
-                                  float_type observable)
+      template <bool f_calc_is_real>
+      static grad_functor<f_calc_is_real> grad_of(bool origin_centric_case,
+                                                  complex_type const &f_calc,
+                                                  float_type observable)
       {
-        bool const real = f_calc.imag() == 0;
         /* The branch which needs no division is also the one where the
            observable may be zero, so the reciprocal is only formed where it
            will be used.
          */
-        grad_functor f = { origin_centric_case, real, f_calc,
-          (origin_centric_case && real) ? 0 : 1/observable };
+        grad_functor<f_calc_is_real> f = { origin_centric_case, f_calc,
+          (origin_centric_case && f_calc_is_real) ? 0 : 1/observable };
         return f;
       }
 
@@ -1740,7 +1785,22 @@ namespace smtbx { namespace structure_factors { namespace direct {
 
         if (!compute_grad) return;
 
-        grad_functor const g = grad_of(origin_centric_case, f_calc, observable);
+        // settled once, so that neither loop below carries the test
+        if (f_calc.imag() == 0) {
+          fill(grad_of<true>(origin_centric_case, f_calc, observable),
+               grad_f_calc, grad_observable);
+        }
+        else {
+          fill(grad_of<false>(origin_centric_case, f_calc, observable),
+               grad_f_calc, grad_observable);
+        }
+      }
+
+      template <class GradFunctor>
+      static void fill(GradFunctor const &g,
+                       af::const_ref<complex_type> const &grad_f_calc,
+                       af::ref<float_type> const &grad_observable)
+      {
         for (int j=0; j < grad_f_calc.size(); ++j) {
           grad_observable[j] = g(grad_f_calc[j]);
         }
