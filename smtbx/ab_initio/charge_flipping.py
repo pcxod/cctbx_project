@@ -455,7 +455,14 @@ class solving_iterator(object):
       low, high = 0.8, 1.
       if low <= r <= high:
         yield self.solving
-        flipping.restart()
+        # Control only comes back here when solving failed, and the way back
+        # passes through the starting state, which has already given the
+        # flipping iterator a fresh set of random phases. So there is nothing
+        # to restart -- only the delta to guess again. This used to call
+        # flipping.restart(), which no iterator in this module has ever
+        # defined, so the whole c_tot_over_c_flip method raised AttributeError
+        # the first time an attempt failed. It went unnoticed because a
+        # structure that solves on the first attempt never reaches this line.
         delta_needs_initialisation = True
       else:
         if self.yield_during_delta_guessing:
@@ -487,14 +494,21 @@ class solving_iterator(object):
   def _solving(self):
     while True:
       i_attempt = 0
+      # Later attempts get a longer run at it. Held locally and recomputed from
+      # the configured value on each pass: this used to multiply
+      # self.max_solving_iterations in place, so the budget compounded over
+      # every attempt of every pass and never went back down -- a structure
+      # that kept failing could end up being given thousands of iterations per
+      # attempt, and the configured value no longer meant anything.
       while i_attempt < self.max_attempts_to_get_phase_transition:
         i_attempt += 1
+        solving_iterations = self.max_solving_iterations
         if i_attempt > 2:
-          self.max_solving_iterations *= 1.5
+          solving_iterations *= 1.5**(i_attempt - 2)
         self.skewness_evolution = observable_evolution()
         for n, flipping in enumerate(
           itertools.islice(self.flipping_iterator,
-                           0, int(self.max_solving_iterations))):
+                           0, int(solving_iterations))):
           self.iteration_index = n
           if n % self.yield_solving_interval == 0:
             yield self.solving
