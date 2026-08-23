@@ -15,6 +15,7 @@ env_etc.fast_linalg_common_includes = [
 
 def enable_fast_linalg(env):
   if not libtbx.env.has_module('fast_linalg'):
+    print("!!!!!!!!!!!!!!!!!!!! DID NOT FIND FAST_LINALG!!!!!!!!!!!!!!!!!!!!!")
     return
   env_etc.include_registry.append(
     env=env,
