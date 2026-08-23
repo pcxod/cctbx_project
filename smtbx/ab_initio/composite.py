@@ -51,6 +51,25 @@ R1_FUSION_WEIGHT = 0.4
 # suggester reports to a user; the cost is linear in this.
 N_SHORTLIST = 3
 
+# **How far R1 may argue by magnitude, on top of its rank.**
+# `rank_fusion` votes with R1's *position*, which says a candidate is better
+# but not by how much -- so a group whose R1 is a third of the leader's counts
+# exactly the same as one that is a hair better. Measured on the completed COD
+# screen, adding a graded penalty proportional to the relative excess over the
+# best R1 is worth **+0.0097 GOAL, CI [+0.0076, +0.0120]** at margin 2, and it
+# composes additively with COMPLETION_SIGMA=7 (interaction +0.0003, CI
+# [-0.0001, +0.0008]).
+#
+# It is a weight and not a veto: a candidate with a poor R1 is pushed down and
+# can still win on the module's own evidence, which is what
+# `weighted-evidence-not-cutoffs` asks for.
+#
+# **The constant is scale-sensitive.** It was fitted where the fused key is a
+# sum of raw integer ranks; `rank_fusion` divides its key by `n`, so the margin
+# is added to the numerator, before that division, or a margin of 2 here would
+# act n times harder than the 2 that was measured.
+SG_R1_MARGIN = float(os.environ.get("SMTBX_SG_R1_MARGIN", "2"))
+
 
 def _enabled(name, default=True):
   value = os.environ.get(name)
@@ -127,10 +146,21 @@ def rank_fusion(entries, weight=R1_FUSION_WEIGHT):
                enumerate(sorted(scored, key=lambda e: e["r1"])))
   n = float(len(entries))
   unscored_position = len(scored)
+  # Positive R1s only: a zero or negative value is a failed measurement, not a
+  # perfect fit, and dividing by it would hand that candidate the whole margin.
+  positive = [e["r1"] for e in scored if e["r1"] > 0]
+  best_r1 = min(positive) if positive else None
 
   def key(e):
     r1_position = by_r1.get(id(e), unscored_position)
-    return (weight*r1_position + (1.0 - weight)*by_rank[id(e)])/n
+    k = weight*r1_position + (1.0 - weight)*by_rank[id(e)]
+    if SG_R1_MARGIN and best_r1:
+      r = e.get("r1")
+      if r is not None and r > 0:
+        # Relative excess, so the penalty means the same thing whether the
+        # structure refines to 0.05 or to 0.35.
+        k += SG_R1_MARGIN*((r - best_r1)/best_r1)
+    return k/n
 
   return sorted(entries, key=key)
 
