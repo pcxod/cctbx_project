@@ -112,8 +112,8 @@ class mask(object):
     # point on the boundary, and folding there keeps the mask off the atoms
     # the boundary was drawn around. It costs about a fifth of the region
     # volume and the electrons in it, and it cannot be exact where the
-    # boundary is concave, so it measured worse than the default on both
-    # crambin and 1IEE once solvent_d_min was set. Off unless that trade is
+    # boundary is concave, so it measured worse than the default on two
+    # proteins once solvent_d_min was set. Off unless that trade is
     # wanted.
     self.boundary_smearing_inward = False
     # Hold the density inside the void at or above zero. The difference map is
@@ -145,6 +145,20 @@ class mask(object):
     # Never yet judged on a refinement, only on the electron counts it gives,
     # which this module's history says is not enough to conclude from.
     self.bias_correction = False
+    # Give back the solvent that partially occupied atoms wrongly exclude.
+    # around_atoms knows sites and radii and no occupancies, so a quarter
+    # occupancy side chain reaching into what would be solvent excludes bulk
+    # solvent from all of that volume rather than a quarter of it. See
+    # occupancy_weight_map. On by default: judged on held-out reflections over
+    # five structures, best where the correction is large (R_free 0.1922 to
+    # 0.1855) and never worse. A structure with no partial atoms takes the
+    # early return below and is untouched.
+    self.occupancy_weighting = True
+    # How far below one an occupancy has to be before the atom counts as
+    # partial. Refined free variables land a little off exact values, and a
+    # structure where every atom is at 0.999 should behave as though it were
+    # fully occupied.
+    self.occupancy_full_tolerance = 0.01
     self._f_mask = None
     self._masked_diff_map = None
     self.f_000 = None
@@ -189,8 +203,8 @@ class mask(object):
     The region is cut out of the difference map with a hard edge, and a step
     that sharp has a transform which does not decay.
 
-    On its own that turns out to matter little. On crambin |f_mask| holds
-    about 30% of |Fc| in every shell out to 0.54 A, which no disordered
+    On its own that turns out to matter little. On a high-resolution
+    protein |f_mask| holds about 30% of |Fc| in every shell out to 0.54 A, which no disordered
     solvent can do, and it is tempting to read that as the edge - but smearing
     the edge does not remove it. At a width of 1.0 the electron count moves by
     23% and the shell profile by 0.3%. Most of that content comes from the
@@ -211,14 +225,23 @@ class mask(object):
 
     maptbx.smooth_map builds a full box of structure factors from the map, so
     the work goes as the grid and not as the boundary being smoothed. Measured
-    on crambin at a 0.12 A step, 8.3M points, that is 1.4 s for the weight and
+    on a protein at a 0.12 A step, 8.3M points, that is 1.4 s for the weight and
     1.3x the mask stage overall - not free, not a problem.
     """
     # built by assignment rather than as_double() of a comparison, which
     # would drop the 3D accessor the map needs
     hard = self.mask.data.as_double()
     hard.set_selected(hard > 0, 1.)
+    # computed once and added on whichever path returns. Putting it only after
+    # the smearing branch left it unreachable at the default of no smearing,
+    # and the whole correction silently did nothing - four structures came back
+    # bit-identical with it on and off, which is what exposed it.
+    correction = (self.occupancy_weight_map() if self.occupancy_weighting
+                  else None)
     if not self.boundary_smearing:
+      if correction is not None:
+        hard = hard + correction
+        hard.set_selected(hard > 1., 1.)
       return hard
     if not self.solvent_radius:
       raise RuntimeError(
@@ -238,7 +261,101 @@ class mask(object):
       w = w*2. - 1.
       w.set_selected(w < 0, 0.)
       w.set_selected(w > 1., 1.)
+    if correction is not None:
+      w = w + correction
+      w.set_selected(w > 1., 1.)
     return w
+
+  def occupancy_weight_map(self):
+    """ Solvent the region cut wrongly threw away, because atoms are partial.
+
+    cctbx::masks::around_atoms takes sites and radii and **no occupancies**, so
+    a side chain at quarter occupancy excludes bulk solvent from all of the
+    volume it touches instead of a quarter of it. Three quarters of that volume
+    still holds solvent and currently holds none. Afonine et al. (2024) name
+    this as one of the three failings of the flat model, and note that the
+    error does not stay in the solvent: it surfaces as residual density over
+    each conformer, or gets absorbed into wrongly refined occupancies and ADPs.
+
+    The correction is a weight rather than a second region. For a grid point
+    covered only by a disorder group of occupancy q, the solvent weight should
+    be 1 - q, not 0. Groups are taken as the distinct occupancy values present,
+    which for a SHELX model is what PART and its free variable produce anyway,
+    and the weight multiplies over groups so that two overlapping conformers
+    leave (1-q1)(1-q2).
+
+    Returns the amount to be **added** to the hard region, so it is zero
+    wherever a full-occupancy atom sits and wherever the region already counts
+    as solvent. Nothing here can make the weight exceed one; the caller clamps.
+    """
+    xs = self.xray_structure
+    occupancies = flex.double([sc.occupancy for sc in xs.scatterers()])
+    partial = occupancies < 1 - self.occupancy_full_tolerance
+    if partial.count(True) == 0:
+      # flex reshape works in place and answers None, so it is never the last
+      # thing in an expression
+      zero = flex.double(self.mask.data.size(), 0)
+      zero.reshape(self.mask.data.accessor())
+      return zero
+    # the region as it stands: 1 where solvent is already counted
+    hard = self.mask.data.as_double()
+    hard.set_selected(hard > 0, 1.)
+    # distinct occupancies, rounded so that a free variable refined to
+    # 0.2499998 and 0.25 are one group rather than two
+    values = sorted(set(round(q, 3) for q in occupancies.select(partial)))
+
+    def outside(selection):
+      """ 1 where no atom of this selection reaches, 0 where one does.
+
+      Expanded to P1 and given its own radii, exactly as the main mask is
+      built, so that the two regions are drawn on the same footing and can be
+      combined pointwise.
+      """
+      group = xs.select(selection).expand_to_p1()
+      radii = cctbx.masks.vdw_radii(group).atom_radii
+      r = cctbx.masks.around_atoms(
+        unit_cell=group.unit_cell(),
+        space_group_order_z=group.space_group().order_z(),
+        sites_frac=group.sites_frac(),
+        atom_radii=radii,
+        gridding_n_real=self.crystal_gridding.n_real(),
+        solvent_radius=self.solvent_radius,
+        shrink_truncation_radius=self.mask.shrink_truncation_radius
+        ).data.as_double()
+      r.set_selected(r > 0, 1.)
+      return r
+
+    # A full-occupancy atom leaves no solvent behind whatever else overlaps it,
+    # so the correction has to be switched off wherever one reaches. Without
+    # this term every point of the model region untouched by a partial group -
+    # which is most of the protein - would come back as full solvent.
+    if partial.count(False) == 0:
+      free_of_full = flex.double(self.mask.data.size(), 1)
+      free_of_full.reshape(self.mask.data.accessor())
+    else:
+      free_of_full = outside(~partial)
+
+    # Occupancies **add**, they do not multiply. Two alternate conformers of
+    # one side chain at 0.6 and 0.4 are mutually exclusive: their shared volume
+    # is occupied all of the time and must get no solvent back. A product of
+    # (1-q) would hand back 0.4*0.6 = 0.24 of it, and on a structure with half
+    # its atoms in alternates that error compounds - measured at 387% of the
+    # region on one, which is what exposed it. Summing the occupancies and
+    # clamping gives 1 - (0.6+0.4) = 0 there, and still gives 1-q where a lone
+    # partial group sits, which is the case this exists for.
+    covered = flex.double(self.mask.data.size(), 0)
+    covered.reshape(self.mask.data.accessor())
+    for q in values:
+      if q <= 0:
+        continue
+      inside = 1. - outside(
+        flex.bool([round(o, 3) == q for o in occupancies]))
+      covered = covered + q*inside
+    covered.set_selected(covered > 1., 1.)
+    absent = 1. - covered
+    # zero inside full atoms, zero where the region already counts as solvent,
+    # and 1-q in the volume a group of occupancy q took away on its own
+    return free_of_full*absent*(1. - hard)
 
   def _level_and_clamp(self, m, weight, sigma):
     """Put the F(000) level back into the region, and solve for it.
