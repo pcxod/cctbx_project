@@ -152,9 +152,24 @@ SIGMA_REF = float(os.environ.get("COMPLETION_SIGMA_REF", "3.0"))
 # over-addition), and why it should work here, where the model is sparse at
 # exactly the moment the prune runs.
 #
-# Defaults to 0 -- off, byte-identical to the previous behaviour -- until it
-# has been A/B'd on BOTH populations with a null control.
-PRUNE_ADAPT = float(os.environ.get("COMPLETION_PRUNE_ADAPT", "0"))
+# **On by default since 24 August 2026.** The A/B it was waiting for has run:
+# two arms over the same 3,000-structure corpus, same slots, same session,
+# differing in this one variable (verified by diffing the SETTINGS stamps).
+#
+#   solution-bad (n=1,500)   GOAL 0.0380 vs 0.0173 = +0.0207
+#                            95% CI [+0.0140, +0.0280], 31 gained, 0 lost
+#   healthy      (n=1,500)   GOAL +0.0007, CI [+0.0000, +0.0020], spans zero
+#                            1 gained, 0 lost -- inert, which is the condition
+#                            for shipping this rather than disabling the prune
+#   null control             `sg` +0.0000 with ZERO structures changed, both
+#                            populations
+#
+# Count improves nearly ten times as much as recall (+0.0240 against +0.0027),
+# which is the mechanism the stage trace predicted: the prune was deleting
+# correct atoms from models that were already too small, not trimming surplus.
+#
+# Only 1.0 has been measured against 0. The exponent is not tuned.
+PRUNE_ADAPT = float(os.environ.get("COMPLETION_PRUNE_ADAPT", "1.0"))
 PRUNE_ADAPT_CEIL = float(os.environ.get("COMPLETION_PRUNE_ADAPT_CEIL", "4.0"))
 
 # **Whether an original site may lose its place to a better one.**
