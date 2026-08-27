@@ -35,8 +35,13 @@ from __future__ import absolute_import, division, print_function
 import os
 import sys
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE)
+# NOTE: the benchmark copy in `cctbx-work` inserts its own directory on
+# sys.path here so its flat imports resolve when the file is run loosely.
+# Inside the package that hack is not only unnecessary, it is harmful: it
+# would put smtbx/ab_initio at sys.path[0] and make every sibling module
+# (solve, assemble, composite, ...) flat-importable, able to shadow
+# anything of the same name. The two `dual_space` imports below use the
+# package form instead.
 
 # **Default 7.0 as of 22 August 2026**, raised from 3.0. A three-point ladder
 # measured in one session against an identical baseline at 6.0: sigma 7 gives
@@ -51,6 +56,109 @@ SIGMA_CUT = float(os.environ.get("COMPLETION_SIGMA", "7.0"))
 # ones, which cost correctness rather than completeness, so both halves have to
 # be watched together.
 MIN_BOND = float(os.environ.get("COMPLETION_MIN_BOND", "1.0"))
+
+# **An element-aware floor on how close an addition may sit.**
+# `MIN_BOND` is 1.0 A for every element, which is right for organics and far
+# too permissive next to a heavy atom. Measured 25 August over 30 structures
+# with Z >= 41 and 15 with Z <= 17, binning peaks by distance to the tallest
+# peaks in the map:
+#
+#     shell        heavy (Z>=41)          light (Z<=17)
+#     1.2-1.4 A    49 spurious, 9 real    2 spurious, 32 real
+#     1.4-1.6 A     4 spurious, 21 real   0 spurious, 15 real
+#
+# **The same shell is 84% junk beside a heavy atom and 94% real in an organic**,
+# because that is where C-C, C-N and C-O bonds live. A single global cut at
+# 1.4 A would delete the organics' real bonds to remove the heavy structures'
+# ripple; conditioning it on the element makes it nearly free.
+#
+# The radius is `COV_FACTOR * (r_cov(neighbour) + r_cov(C))`, floored at
+# MIN_BOND. Because the covalent sum for carbon is only 1.52 A, half of it is
+# below the existing floor and **organics are untouched by construction** --
+# the rule switches itself on exactly where the radii say the atom is large:
+#
+#     C  0.76 -> 0.76 A -> floored to 1.00   (unchanged)
+#     Br 1.20 -> 0.98 A -> floored to 1.00   (unchanged)
+#     Zr 1.75 -> 1.26 A
+#     Nd 2.01 -> 1.39 A                      (matches the measured 1.4 A)
+#     U  1.96 -> 1.36 A
+#
+# Off by default (0) until it has been A/B'd on both populations.
+COV_FACTOR = float(os.environ.get("COMPLETION_COV_FACTOR", "0"))
+
+# **Batched nearest-image distances.** `candidates()` asks for the distance
+# from each residual peak to every existing atom, and `min_distance` answers one
+# pair at a time -- every symmetry operation against 27 lattice shifts, each a
+# separate call. Profiled at 6.6 s of a 61 s structure over 33,579 calls, and it
+# is the larger half of `descriptor_for` too, via `assemble`.
+#
+# Rewriting it per-call in numpy measured only **1.5x** -- per-call overhead
+# cancels the gain. Batching over ALL sites at once measures **9.4x at n=20,
+# 11.5x at n=50, 13.2x at n=80**, agreeing with the current answer to 1.8e-15 A.
+# The granularity was the whole story; same arithmetic, an order of magnitude
+# apart.
+#
+# **Never use a 2-D `.dot` here.** numpy routes a matrix-matrix product through
+# OpenBLAS, and loading that DLL after this cctbx build's aborts the process
+# with 0xC06D007F -- which reads as a mysterious crash, not as a numpy problem.
+# `einsum` computes the same thing without touching BLAS.
+#
+# Off by default until measured end to end: a 13x microbenchmark is not a 13%
+# pipeline win.
+FAST_DIST = os.environ.get("COMPLETION_FAST_DIST", "0") != "0"
+
+
+def _fast_ctx(uc, sg, sites):
+  """ Precompute the metric tensor, symmetry ops and site array once. """
+  import numpy as np
+  from smtbx.ab_initio.assemble import _SHIFTS
+
+  g = uc.metrical_matrix()
+  G = np.array([[g[0], g[3], g[4]], [g[3], g[1], g[5]], [g[4], g[5], g[2]]])
+  SH = np.array(_SHIFTS, dtype=float)
+  OPS = [(np.array(o.as_double_array()[:9]).reshape(3, 3),
+          np.array(o.as_double_array()[9:])) for o in sg.all_ops()]
+  return G, SH, OPS, np.asarray(list(sites))
+
+
+def _fast_dists(target, ctx):
+  """ Nearest-image distance from `target` to every site, as an array. """
+  import numpy as np
+
+  G, SH, OPS, S = ctx
+  t = np.asarray(target)
+  best = None
+  for R, T in OPS:
+    s = np.einsum("ni,ji->nj", S, R) + T          # never .dot -- see above
+    base = s - np.round(s - t)
+    dv = base[:, None, :] + SH[None, :, :] - t
+    d2 = np.einsum("nsi,ij,nsj->ns", dv, G, dv).min(axis=1)
+    best = d2 if best is None else np.minimum(best, d2)
+  return np.sqrt(best)
+_COV_CACHE = {}
+
+
+def min_bond_to(symbol):
+  """ How close an addition may come to an atom of this element.
+
+  Falls back to MIN_BOND whenever the element is unknown to the table -- an
+  unrecognised label must not silently produce a radius of zero and let ripple
+  straight through.
+  """
+  if COV_FACTOR <= 0:
+    return MIN_BOND
+  key = (symbol or "C").strip().capitalize()
+  if key in _COV_CACHE:
+    return _COV_CACHE[key]
+  try:
+    from cctbx.eltbx import covalent_radii
+    r = covalent_radii.table(key).radius()
+    c = covalent_radii.table("C").radius()
+    out = max(MIN_BOND, COV_FACTOR*(r + c))
+  except Exception:
+    out = MIN_BOND
+  _COV_CACHE[key] = out
+  return out
 MAX_BOND = float(os.environ.get("COMPLETION_MAX_BOND", "2.6"))
 MAX_ROUNDS = int(os.environ.get("COMPLETION_ROUNDS", "5"))
 # **The proposal cut, adapted per structure to how full the model already is.**
@@ -152,24 +260,15 @@ SIGMA_REF = float(os.environ.get("COMPLETION_SIGMA_REF", "3.0"))
 # over-addition), and why it should work here, where the model is sparse at
 # exactly the moment the prune runs.
 #
-# **On by default since 24 August 2026.** The A/B it was waiting for has run:
-# two arms over the same 3,000-structure corpus, same slots, same session,
-# differing in this one variable (verified by diffing the SETTINGS stamps).
-#
-#   solution-bad (n=1,500)   GOAL 0.0380 vs 0.0173 = +0.0207
-#                            95% CI [+0.0140, +0.0280], 31 gained, 0 lost
-#   healthy      (n=1,500)   GOAL +0.0007, CI [+0.0000, +0.0020], spans zero
-#                            1 gained, 0 lost -- inert, which is the condition
-#                            for shipping this rather than disabling the prune
-#   null control             `sg` +0.0000 with ZERO structures changed, both
-#                            populations
-#
-# Count improves nearly ten times as much as recall (+0.0240 against +0.0027),
-# which is the mechanism the stage trace predicted: the prune was deleting
-# correct atoms from models that were already too small, not trimming surplus.
-#
-# Only 1.0 has been measured against 0. The exponent is not tuned.
-PRUNE_ADAPT = float(os.environ.get("COMPLETION_PRUNE_ADAPT", "1.0"))
+# Defaults to 0 -- off, byte-identical to the previous behaviour -- until it
+# has been A/B'd on BOTH populations with a null control.
+# **2.0 from 26 August 2026.** 1.0 against 2.0 over 2,980 paired structures:
+# +0.0060 [+0.0034, +0.0091], 18 gained and **0 lost**, `sg` null perfectly
+# clean. Corpus-wide, reweighted, +0.0014. Note it is **largely subsumed by the
+# branched peak cap** -- run together the pair gains 51 structures where the two
+# alone gain 44 and 18, because in H-O the same structures are rescued twice.
+# It is kept because it never loses one, not because it adds much on top.
+PRUNE_ADAPT = float(os.environ.get("COMPLETION_PRUNE_ADAPT", "2.0"))
 PRUNE_ADAPT_CEIL = float(os.environ.get("COMPLETION_PRUNE_ADAPT_CEIL", "4.0"))
 
 # **Whether an original site may lose its place to a better one.**
@@ -366,7 +465,7 @@ def map_sigma(real):
   return robust
 
 
-def candidates(fft, placed, sites, sigma_cut=SIGMA_CUT):
+def candidates(fft, placed, sites, sigma_cut=SIGMA_CUT, calls=None):
   """ Residual maxima that could be atoms: strong, and at a bonding distance.
 
   Returns [(site, height_in_sigma)], strongest first.
@@ -391,17 +490,28 @@ def candidates(fft, placed, sites, sigma_cut=SIGMA_CUT):
   uc = placed.unit_cell()
   sg = placed.space_group()
 
+  ctx = _fast_ctx(uc, sg, sites) if (FAST_DIST and sites.size()) else None
   out = []
   for site, height in zip(peak_list.sites(), peak_list.heights()):
     if height < sigma_cut*sigma:
       continue
-    # Distance to the nearest existing atom, over symmetry images.
-    best = 1e9
-    for s in sites:
-      dd = min_distance(uc, sg, site, s)
-      if dd < best:
-        best = dd
-    if best < MIN_BOND or best > MAX_BOND:
+    # Distance to the nearest existing atom, over symmetry images. The floor
+    # is that atom's own, so a peak 1.3 A from a neodymium is rejected as the
+    # ripple it is while the same peak 1.3 A from a carbon is kept as the bond
+    # it is.
+    if ctx is not None:
+      ds = _fast_dists(site, ctx)
+      k = int(ds.argmin())
+      best = float(ds[k])
+      best_floor = min_bond_to(calls[k] if calls and k < len(calls) else "C")
+    else:
+      best, best_floor = 1e9, MIN_BOND
+      for k, s in enumerate(sites):
+        dd = min_distance(uc, sg, site, s)
+        if dd < best:
+          best = dd
+          best_floor = min_bond_to(calls[k] if calls and k < len(calls) else "C")
+    if best < best_floor or best > MAX_BOND:
       continue
     # `best` is the distance to the nearest existing atom, and it is worth
     # carrying: MIN_BOND is 1.0 A while no real bond is shorter than about 1.2,
@@ -722,7 +832,7 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
         cut = sigma_cut*max(ADAPT_FLOOR, occ**ADAPT)
       if _round == 0:
         LAST_ADAPT_WANT, LAST_ADAPT_CUT = want, cut
-    found = candidates(fft, placed, sites, cut)
+    found = candidates(fft, placed, sites, cut, calls)
     if not found:
       break
     for site, _sig, _dst in found[:MAX_ADD_PER_ROUND]:
@@ -766,6 +876,115 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
     # larger than it is.
     added = max(0, sites.size() - (n_before - added))
   return sites, calls, added
+
+
+# ---------------------------------------------------------------------------
+# The staged heavy-atom build.
+#
+# **Moved here from `probe_stagebuild.py` on 26 August 2026.** It was written
+# in the probe and measured there; it lives in this module now because it is a
+# completion recipe, and because the pipeline arm that tests it must call the
+# same code the probe measured rather than a second copy of it. The probe
+# imports these names, so there is exactly one implementation.
+
+
+STAGE_ROUNDS = int(os.environ.get("STAGE_ROUNDS", "12"))
+# **A cut for the staged path only.** The staged arms stop early because light
+# atoms in a difference map computed from a heavy-atom-only model do not clear
+# COMPLETION_SIGMA=7 -- measured 25 Aug: precision 1.000 but recall 0.238
+# against the whole peak list's 0.579. They can afford a looser cut precisely
+# because nothing they add is spurious. Lowering COMPLETION_SIGMA instead would
+# move the baseline too and destroy the comparison.
+STAGE_SIGMA = float(os.environ.get("STAGE_SIGMA", "0")) or None
+
+
+def align3(fo, cf, fc):
+  """ Put three Miller arrays on one common index set.
+
+  `common_sets` only pairs two at a time and each pairing can shrink the set,
+  so a single pass leaves the third array misaligned -- and a misaligned
+  subtraction is silent: it produces a map, just not the one intended. Iterated
+  until stable, then asserted.
+  """
+  for _ in range(4):
+    fo, cf = fo.common_sets(cf)
+    fo, fc = fo.common_sets(fc)
+    cf, fc = cf.common_sets(fc)
+  assert fo.indices().size() == cf.indices().size() == fc.indices().size()
+  assert fo.indices().all_eq(cf.indices())
+  assert fo.indices().all_eq(fc.indices())
+  return fo, cf, fc
+
+
+def complete_cf_phase(f_obs, placed, seed_sites, calls, n_peaks, rounds=None):
+  """ Florian's variant: keep the charge-flipping phases, subtract Fc(heavy).
+
+  His rationale, 25 August: *"if we only built a partial model the phases might
+  be worse than the initial set, especially in the case of non centrosymmetric
+  structures"*.
+
+  The sharper form of the same argument: series-termination ripple **is** the
+  truncated Fourier transform of the heavy atom, so subtracting `Fc(heavy)` at
+  the same resolution cutoff with the phases left alone cancels it term by
+  term. Recomputing phases from a one-atom model neither cancels the ripple nor
+  leaves the map honest -- it biases it toward exactly what was placed, and in
+  an acentric structure, where phases are continuous rather than 0 or pi, a
+  single atom is a poor estimator of them.
+
+  `placed` is already the f_calc carrying the charge-flipping phases, so
+  nothing is rephased here: the map is |Fo| with phi_CF, minus the heavy
+  model's calculated contribution.
+  """
+  from cctbx import maptbx
+  from cctbx.array_family import flex
+
+  if rounds is None:
+    rounds = STAGE_ROUNDS
+
+  sites = flex.vec3_double(seed_sites)
+  calls = list(calls)
+  f_here = f_obs.customized_copy(
+    space_group_info=placed.space_group_info()).merge_equivalents().array()
+
+  for _round in range(rounds):
+    model = build_model(placed, sites, calls, None)
+    fc = model.structure_factors(d_min=f_here.d_min(),
+                                 algorithm="direct").f_calc()
+    fo, cf, fc = align3(f_here, placed, fc)
+    # |Fo| carrying the charge-flipping phases, minus what the heavy model
+    # already accounts for.
+    fo_cf = fo.phase_transfer(cf)
+    diff = fo_cf.customized_copy(data=fo_cf.data() - fc.data())
+    fft = diff.fft_map(symmetry_flags=maptbx.use_space_group_symmetry,
+                       resolution_factor=0.5)
+    fft.apply_volume_scaling()
+    found = candidates(fft, placed, sites, STAGE_SIGMA or SIGMA_CUT, calls)
+    if not found:
+      break
+    added = 0
+    for site, _sig, _dst in found[:MAX_ADD_PER_ROUND]:
+      if sites.size() >= n_peaks:
+        break
+      sites.append(site)
+      calls.append("C")
+      added += 1
+    if added == 0:
+      break
+  return sites, calls
+
+
+def heavy_seed(sites, heights, n_seed):
+  """ The `n_seed` tallest peaks: the blind seed the staged build starts from.
+
+  Blind in the sense that matters -- it reads the peak heights, never the
+  deposited coordinates. `n_seed` comes from the expected formula, which a user
+  supplies, the same input the peak budget and the ripple radius already use.
+  """
+  from cctbx.array_family import flex
+
+  n_seed = max(1, min(int(n_seed), sites.size()))
+  order = sorted(range(sites.size()), key=lambda i: -heights[i])
+  return flex.vec3_double([sites[i] for i in sorted(order[:n_seed])])
 
 
 if __name__ == "__main__":
