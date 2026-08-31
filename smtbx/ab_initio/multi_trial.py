@@ -31,6 +31,9 @@ cited there.
 from __future__ import absolute_import, division, print_function
 
 import math
+import os
+
+from six.moves import cStringIO as StringIO
 
 from libtbx import group_args
 from smtbx.ab_initio import charge_flipping
@@ -76,6 +79,11 @@ def solve(f_obs,
           keep_solutions=False,
           loop=None,
           callback=None,
+          # Trials on threads. 1 keeps the shipped serial path exactly;
+          # the default is read from SMTBX_SOLVE_THREADS so the two can be
+          # A/B'd without touching a caller. Only useful because the cctbx
+          # 3D FFT wrappers now release the GIL.
+          n_threads=None,
           verbose=False,
           out=None):
   """ n_trials seeded charge-flipping runs; the best solution found.
@@ -103,6 +111,11 @@ def solve(f_obs,
   if loop is None:
     loop = charge_flipping.loop
 
+  if n_threads is None:
+    try:
+      n_threads = int(os.environ.get('SMTBX_SOLVE_THREADS', '1'))
+    except ValueError:
+      n_threads = 1
   best = None
   best_trial = None
   trials = []
@@ -126,7 +139,10 @@ def solve(f_obs,
   # The extra trials are cheaper than they look: the search stops as soon as a
   # trial is good enough, and supplied starts go first precisely so that a good
   # one ends the run early.
-  for i_trial in range(n_trials + len(supplied)):
+  # **The per-trial computation, lifted out of the loop unchanged.**
+  # Both the serial and the threaded path call this, so the two cannot drift:
+  # what differs between them is only WHEN a trial runs, never what it does.
+  def _compute_trial(i_trial, trial_out):
     seed = first_seed + max(0, i_trial - len(supplied))
     t0 = time.time()
 
@@ -148,7 +164,7 @@ def solve(f_obs,
     user_stopped = False
     error = None
     try:
-      if loop(solving, verbose=verbose, out=out) is False:
+      if loop(solving, verbose=verbose, out=trial_out) is False:
         user_stopped = True
     except Exception as e:
       # One trial failing is not the run failing: seven others may yet solve
@@ -184,6 +200,72 @@ def solve(f_obs,
       # answer was and measure how much the ranking gave away.
       solutions=(solutions if keep_solutions else None),
       f_calc_in_p1=f_calc_in_p1)
+    # `user_stopped` travels with the result: the bookkeeping below reads
+    # it, and it is set inside this function.
+    return result, solutions, user_stopped
+
+  # Charge flipping is ~100% cctbx FFT (measured 30 Aug 2026: 177 cycles x
+  # 1.49 ms accounts for a whole 0.264 s trial), and those transforms now
+  # release the GIL, so trials genuinely run in parallel on threads -- 2.84x
+  # on four. Before that change threading scored 0.97x and this would have
+  # been pointless.
+  #
+  # **The answer must not change.** Serial stops as soon as a trial is good
+  # enough, so simply keeping the best of all n would sometimes return a
+  # BETTER solution than the shipped code -- a different answer, which is not
+  # what a speed-up may do. So the trials are computed concurrently and then
+  # the untouched bookkeeping below walks them in seed order and stops
+  # exactly where it would have stopped. Trials past that point are computed
+  # and discarded; that waste is the price of the parallelism.
+  #
+  # Skipped when `max_seconds` is set or a `callback` may cancel: both decide
+  # on elapsed time or user action mid-run, which cannot be replayed from
+  # finished results.
+  precomputed = None
+  if (n_threads > 1 and max_seconds is None and callback is None
+      and n_trials + len(supplied) > 1):
+    import threading
+    n_all = n_trials + len(supplied)
+    slots = [None]*n_all
+    bufs = [StringIO() for _ in range(n_all)]
+    lock = threading.Lock()
+    nxt = [0]
+
+    def _worker():
+      while True:
+        with lock:
+          i = nxt[0]
+          if i >= n_all:
+            return
+          nxt[0] = i + 1
+        try:
+          slots[i] = _compute_trial(i, bufs[i])
+        except Exception as e:
+          # Mirrors the per-trial error handling inside _compute_trial: one
+          # thread dying must not take the run down.
+          slots[i] = (trial_result(
+            seed=first_seed + max(0, i - len(supplied)), n_solutions=0,
+            had_phase_transition=False, cc_peak_height=None, seconds=0.0,
+            error='%s: %s' % (type(e).__name__, str(e)[:200]),
+            solutions=None, f_calc_in_p1=None), [], False)
+
+    workers = [threading.Thread(target=_worker)
+               for _ in range(min(n_threads, n_all))]
+    for w in workers:
+      w.start()
+    for w in workers:
+      w.join()
+    # Per-trial buffers, replayed in order: threads writing to one `out`
+    # would interleave their lines into nonsense.
+    for b in bufs:
+      out.write(b.getvalue())
+    precomputed = slots
+
+  for i_trial in range(n_trials + len(supplied)):
+    if precomputed is not None:
+      result, solutions, user_stopped = precomputed[i_trial]
+    else:
+      result, solutions, user_stopped = _compute_trial(i_trial, out)
     trials.append(result)
 
     for solution in solutions:

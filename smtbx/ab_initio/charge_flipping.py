@@ -63,6 +63,28 @@ class _array_extension(oop.injector, miller.array):
                                    need_sorting=True):
     """ As per ref. [2] """
     cut = int(weak_reflection_fraction * source.size())
+    if not need_sorting:
+      # **The whole step in one C++ call, with the GIL released.** Driven from
+      # Python this is six flex operations with the GIL held between them, and
+      # it measured 0.150 ms of a 0.78 ms charge-flipping cycle scaling 0.97x
+      # on four threads while the FFT steps around it reached 2.56x and 3.32x.
+      #
+      # Only the unsorted path: sorting first would need the permutation
+      # applied to both arrays, and the hot path (weak_reflection_improved_
+      # iterator) passes need_sorting=False.
+      #
+      # Falls back to the Python below if the extension is older than this --
+      # a missing symbol must not take the solver down.
+      try:
+        return miller.array(self, ab_initio.ext.oszlanyi_suto_phase_transfer(
+          space_group=self.space_group(),
+          miller_indices=self.indices(),
+          f_obs_data=self.data(),
+          source_data=source.data(),
+          cut=cut,
+          delta_varphi=delta_varphi))
+      except AttributeError:
+        pass
     if need_sorting:
       p = self.sort_permutation(by_value="data", reverse=True)
       target = self.select(p)
