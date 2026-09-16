@@ -20,7 +20,7 @@ enough that the answer is known in advance:
   * the weight must never leave [0, 1].
 """
 
-from cctbx import sgtbx, uctbx, xray
+from cctbx import xray
 from cctbx.array_family import flex
 from cctbx.development import random_structure
 from libtbx.test_utils import approx_equal

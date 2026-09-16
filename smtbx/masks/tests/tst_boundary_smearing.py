@@ -7,7 +7,6 @@ touching the low-angle one that carries the physics.
 """
 from __future__ import absolute_import, division, print_function
 
-import math
 
 from cctbx import crystal, uctbx, xray
 from cctbx.array_family import flex

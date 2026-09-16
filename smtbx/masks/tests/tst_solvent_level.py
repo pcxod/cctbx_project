@@ -143,7 +143,7 @@ def exercise_inward_taper():
   assert flex.sum(inward) < flex.sum(symmetric)
   print("\tregion weight: hard %.0f, symmetric %.0f, inward %.0f grid points"
         % (flex.sum(hard), flex.sum(symmetric), flex.sum(inward)))
-  print("	weight outside the region: symmetric %.1f, inward %.1f grid points"
+  print("  weight outside the region: symmetric %.1f, inward %.1f grid points"
         % (leak_sym, leak_in))
 
 
