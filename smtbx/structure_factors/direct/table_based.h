@@ -15,6 +15,78 @@
 
 namespace smtbx { namespace structure_factors { namespace table_based {
 
+#if defined(_WIN32)
+  /** The path as the wide Win32 file APIs want it, or false if it is not UTF-8.
+
+      Boost.Python hands a Python str over as UTF-8, and the narrow fopen and
+      ifstream read that in the process's ANSI code page. A path with anything
+      outside that page -- a folder named in Chinese on a Western Windows --
+      cannot be opened by them at all, whatever bytes it is spelled in. The
+      wide overloads take UTF-16, which holds every path there is.
+
+      Decoded by hand rather than through <windows.h>, which this header would
+      then push, min/max macros and all, into everything that includes it.
+      Bytes that are not UTF-8 are left to the narrow open, so a caller still
+      passing an ANSI-encoded path is served the way it always was.
+   */
+  inline bool utf8_to_wide(const std::string &utf8, std::wstring &wide) {
+    wide.clear();
+    wide.reserve(utf8.size());
+    for (std::size_t i = 0; i < utf8.size();) {
+      const unsigned char c = static_cast<unsigned char>(utf8[i]);
+      unsigned int cp;
+      std::size_t n;
+      if (c < 0x80) { cp = c; n = 1; }
+      else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+      else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+      else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+      else return false;
+      if (i + n > utf8.size()) return false;
+      for (std::size_t k = 1; k < n; k++) {
+        const unsigned char cc = static_cast<unsigned char>(utf8[i + k]);
+        if ((cc & 0xC0) != 0x80) return false;
+        cp = (cp << 6) | (cc & 0x3F);
+      }
+      if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+      if (cp >= 0x10000) {
+        cp -= 0x10000;
+        wide.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
+        wide.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
+      }
+      else {
+        wide.push_back(static_cast<wchar_t>(cp));
+      }
+      i += n;
+    }
+    return true;
+  }
+#endif
+
+  /// fopen that can reach a path outside the ANSI code page on Windows
+  inline std::FILE *open_for_reading(const std::string &name) {
+#if defined(_WIN32)
+    std::wstring wide;
+    if (utf8_to_wide(name, wide)) {
+      return _wfopen(wide.c_str(), L"rb");
+    }
+#endif
+    return std::fopen(name.c_str(), "rb");
+  }
+
+  /// ifstream::open that can reach a path outside the ANSI code page on Windows
+  inline void open_stream(std::ifstream &stream, const std::string &name,
+    std::ios::openmode mode)
+  {
+#if defined(_WIN32)
+    std::wstring wide;
+    if (utf8_to_wide(name, wide)) {
+      stream.open(wide.c_str(), mode);
+      return;
+    }
+#endif
+    stream.open(name.c_str(), mode);
+  }
+
   /** A read-only file handle over C stdio.
 
       std::ifstream reads a .tscb at about 1.3 GB/s on this platform where the
@@ -31,7 +103,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     c_file(const c_file &);
     c_file &operator=(const c_file &);
   public:
-    explicit c_file(const std::string &name) : f_(std::fopen(name.c_str(), "rb")) {}
+    explicit c_file(const std::string &name) : f_(open_for_reading(name)) {}
     ~c_file() { if (f_ != NULL) std::fclose(f_); }
     bool ok() const { return f_ != NULL; }
     bool seek(std::streamoff offset) {
@@ -130,7 +202,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       using namespace std;
     //   typedef cctbx::xray::scatterer_id_5<float_type, fractional<float_type>, 16> scatterer_id_t;
     typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
-      ifstream in_file(file_name.c_str());
+      ifstream in_file;
+      open_stream(in_file, file_name, ios::in);
       string line;
       vector<std::string> toks;
       size_t lc = 0;
@@ -259,13 +332,102 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       }
     }
 
+    /* the marker SCATTERER_IDS named an 8-byte record before 29 July 2026 and a
+    16-byte one after, and the format carries no width. Read at the wrong width
+    the ids are not rejected, they are silently misframed, and the failure
+    surfaces much later as a table that matches no atom.
+
+    The id block is not length-prefixed but everything after it is: the int that
+    follows it is the reflection count and the rest of the file is that many rows
+    of three int indices plus one complex<double> per column. Only the true width
+    divides evenly, so the file states its own format even where the header does
+    not. Leaves the stream where it found it.
+    */
+    static void check_id_record_size(std::ifstream &tsc_file,
+      const std::string &file_name, const std::string &header_str, std::size_t n_columns)
+    {
+      typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
+      const std::size_t current = sizeof(scatterer_id_t), legacy = 8;
+      const std::streamoff id_block_start = tsc_file.tellg();
+      std::size_t width = declared_id_bytes(header_str);
+      if (width == 0) {
+        tsc_file.seekg(0, std::ios::end);
+        const std::streamoff total = tsc_file.tellg();
+        const std::streamoff row_bytes = static_cast<std::streamoff>(
+          3 * sizeof(int) + n_columns * sizeof(std::complex<double>));
+        const std::size_t candidates[2] = { current, legacy };
+        for (int i = 0; i < 2; i++) {
+          const std::streamoff end = id_block_start
+            + static_cast<std::streamoff>(n_columns * candidates[i]);
+          if (end + static_cast<std::streamoff>(sizeof(int)) > total) {
+            continue;
+          }
+          tsc_file.seekg(end);
+          int nr_hkl = 0;
+          tsc_file.read((char *)&nr_hkl, sizeof(int));
+          if (nr_hkl <= 0) {
+            continue;
+          }
+          if (total - end - static_cast<std::streamoff>(sizeof(int))
+              == static_cast<std::streamoff>(nr_hkl) * row_bytes)
+          {
+            width = candidates[i];
+            break;
+          }
+        }
+        tsc_file.clear();
+        tsc_file.seekg(id_block_start);
+      }
+      if (width == sizeof(scatterer_id_t)) {
+        return;
+      }
+      if (width == legacy) {
+        throw SMTBX_ERROR(("'" + file_name + "' holds 8-byte scatterer ids, the format"
+          " written between 12 and 29 July 2026; this build reads the 16-byte format."
+          " Recalculate the table.").c_str());
+      }
+      if (width == 0) {
+        throw SMTBX_ERROR(("cannot determine the scatterer id width of '" + file_name +
+          "': it declares none and its size fits neither known width, so it is"
+          " truncated, damaged or written by an unknown version").c_str());
+      }
+      throw SMTBX_ERROR(("'" + file_name + "' declares an id width this build cannot"
+        " read").c_str());
+    }
+
+    // the width the header declares, or 0 if it declares none
+    static std::size_t declared_id_bytes(const std::string &header_str)
+    {
+      std::vector<std::string> lines;
+      boost::split(lines, header_str, boost::is_any_of("\n"));
+      for (std::size_t i = 0; i < lines.size(); i++) {
+        std::size_t ci = lines[i].find(':');
+        if (ci == std::string::npos) {
+          continue;
+        }
+        std::string key = boost::trim_copy(lines[i].substr(0, ci));
+        if (!boost::iequals(key, "ID_BYTES")) {
+          continue;
+        }
+        try {
+          return boost::lexical_cast<std::size_t>(
+            boost::trim_copy(lines[i].substr(ci + 1)));
+        }
+        catch (const boost::bad_lexical_cast &) {
+          return 0;
+        }
+      }
+      return 0;
+    }
+
     void read_binary(af::shared<xray::scatterer<float_type> > const &scatterers,
       const std::string &file_name)
     {
       using namespace std;
     //   typedef cctbx::xray::scatterer_id_5<float_type, fractional<float_type>, 16> scatterer_id_t;
       typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
-      ifstream tsc_file(file_name.c_str(), ios::binary);
+      ifstream tsc_file;
+      open_stream(tsc_file, file_name, ios::in | ios::binary);
       const size_t charsize = sizeof(char);
       const size_t intsize = sizeof(int);
       const size_t uint64size = sizeof(uint64_t);
@@ -300,6 +462,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       parent_t::covered_ = af::shared<bool>(nr_scat, false);
       if (boost::icontains(header_str, "SCATTERER_IDS")) {
         n_columns = sc_len;
+        check_id_record_size(tsc_file, file_name, header_str, n_columns);
         sc_indices.assign(n_columns, ~0);
         af::shared<int> data(nr_scat);
         for (size_t sci = 0; sci < nr_scat; sci++) {
