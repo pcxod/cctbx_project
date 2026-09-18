@@ -183,7 +183,20 @@ def e_squared_minus_one(f_obs):
     data.set_selected(data < 0, 0.0)
     p1 = p1.customized_copy(data=data)
     p1.setup_binner_counting_sorted(reflections_per_bin=200)
-    norm = p1.amplitude_quasi_normalisations()
+    try:
+      norm = p1.amplitude_quasi_normalisations()
+    except AssertionError:
+      # the interpolation between bin means goes non-positive on small data
+      # sets (a few hundred reflections, three bins); the plain bin mean is
+      # within 0.01 of it where both exist and never fails
+      eps = p1.epsilons().data().as_double()
+      n = flex.double(p1.size(), 0.0)
+      for i in p1.binner().range_used():
+        bsel = p1.binner().selection(i)
+        if bsel.count(True):
+          n.set_selected(bsel, flex.mean(
+            flex.pow2(p1.data().select(bsel)) / eps.select(bsel)))
+      norm = p1.customized_copy(data=flex.sqrt(n))
     sel = norm.data() > 0
     e = p1.data().select(sel)/norm.data().select(sel)
     if e.size() < 20:
