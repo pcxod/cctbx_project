@@ -378,6 +378,8 @@ class solving_iterator(object):
   map_skewness_stability_threshold = 0.01
   polishing_iterations = 5
   min_cc_peak_height = 0.9
+  # a rise of the map skewness below this is noise, not a phase transition
+  min_skewness_at_phase_transition = 1.5
 
   def __init__(self, flipping_iterator, f_obs, **kwds):
     self.flipping_iterator = flipping_iterator
@@ -536,7 +538,9 @@ class solving_iterator(object):
             yield self.solving
           self.skewness_evolution.append(flipping.rho_map.skewness())
           #if flipping.rho_map.skewness() < 3: continue
-          if self.skewness_evolution.had_phase_transition():
+          if (self.skewness_evolution.had_phase_transition()
+              and flipping.rho_map.skewness()
+                  >= self.min_skewness_at_phase_transition):
             self.attempts.append(n)
             yield self.polishing
             break
