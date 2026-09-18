@@ -853,8 +853,14 @@ def candidate_groups(unit_cell, laue_group_info=None, f_calc_in_p1=None,
 
 
 def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
-            max_absence_ratio=DEFAULT_MAX_ABSENCE_RATIO):
+            max_absence_ratio=DEFAULT_MAX_ABSENCE_RATIO, ensure_centric=False):
   """ A ranked shortlist of space groups for a P1 solution.
+
+  The shortlist holds one setting per group: a second setting of the same
+  group with the same absences (Cc and Cn in a C-centred cell) only wastes a
+  slot, and the absence test has already ordered them. With `ensure_centric`,
+  a shortlist without a centrosymmetric group gets the best-ranked one in its
+  last slot -- for heavy-atom structures, whose <|E^2-1|> reads acentric.
 
   Returns a group_args with `suggestions` -- a list of group_args, best first,
   each carrying `space_group_info`, `absence_ratio`, `n_predicted_absent`,
@@ -1401,8 +1407,20 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
         bits.append("centrosymmetry agrees with <|E^2-1|>")
       entry.reason = "; ".join(bits) or "no evidence against it"
 
+  short, seen = [], set()
+  for e in scored:
+    n = e.space_group_info.type().number()
+    if n not in seen:
+      seen.add(n)
+      short.append(e)
+  if ensure_centric and not any(
+      e.space_group_info.group().is_centric() for e in short[:n_suggestions]):
+    c = [e for e in short[n_suggestions:]
+         if e.space_group_info.group().is_centric()]
+    if c:
+      short = short[:n_suggestions - 1] + c[:1] + short[n_suggestions - 1:]
   return group_args(
-    suggestions=scored[:n_suggestions],
+    suggestions=short[:n_suggestions],
     all_candidates=scored,
     refuted=refuted,
     e_sq_minus_one=stat,
