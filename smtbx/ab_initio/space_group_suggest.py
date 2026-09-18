@@ -93,6 +93,21 @@ ALPHA_0_DECIDES_WITHIN = 0.0
 # (P222, Pmmm) predicts nothing to check.
 MIN_ABSENCES_TO_JUDGE = 10
 
+# Below that minimum a class can still refute: a screw axis predicting four
+# axial reflections that come back stronger than the mean is not absent, and
+# frequency alone would otherwise rank P2(1) over P2 on that data.
+STRONG_ABSENCE_MIN = 3
+STRONG_ABSENCE_RATIO = 1.0
+# The merged-file mirror of the same argument: a short axial class that is
+# missing to the last reflection is a screw axis, not a small sample.
+COVERAGE_SURE_MARGIN = 0.9
+
+# Where <|E^2-1|> is a coin flip. Inside this band the shortlist keeps one slot
+# for the other centricity rather than betting everything on the statistic:
+# over 890 COD entries a quarter of the structures fall in it and it holds
+# five in eight of the misclassifications.
+CENTRIC_AMBIGUOUS = (0.78, 0.92)
+
 # A coverage margin below this means the group's predicted absences are no more
 # missing than the file is incomplete anyway -- it explains nothing. Set low
 # because coverage refutation is the weaker claim of the two: absent-from-file
@@ -161,6 +176,12 @@ def e_squared_minus_one(f_obs):
       crystal_symmetry=crystal.symmetry(
         unit_cell=f_obs.unit_cell(),
         space_group_info=sgtbx.space_group_info("P 1")))
+    # Negative intensities arrive as negative amplitudes, which the
+    # normalisation asserts against; clamped to zero so weak data counts as
+    # weak instead of silently losing the statistic.
+    data = p1.data().deep_copy()
+    data.set_selected(data < 0, 0.0)
+    p1 = p1.customized_copy(data=data)
     p1.setup_binner_counting_sorted(reflections_per_bin=200)
     norm = p1.amplitude_quasi_normalisations()
     sel = norm.data() > 0
@@ -1025,7 +1046,9 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
       # once refuted the true group.
       judged_by=("intensity" if n_absent >= MIN_ABSENCES_TO_JUDGE
                  else "coverage" if (coverage is not None
-                                     and n_coverage >= MIN_ABSENCES_TO_JUDGE)
+                                     and (n_coverage >= MIN_ABSENCES_TO_JUDGE
+                                          or (n_coverage >= STRONG_ABSENCE_MIN
+                                              and coverage >= COVERAGE_SURE_MARGIN)))
                  else "nothing"),
       centric_agrees=(None if centric is None
                       else bool(group.is_centric()) == centric),
@@ -1080,6 +1103,14 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
         "the solution's phases do not obey its rotations (phi_sym %.2f, "
         "refuted above %.2f)"
         % (entry.phi_point_group, MAX_POINT_GROUP_DISAGREEMENT))
+      refuted.append(entry)
+      continue
+    if (entry.n_predicted_absent >= STRONG_ABSENCE_MIN
+        and entry.absence_ratio > STRONG_ABSENCE_RATIO):
+      entry.reason = (
+        "its %d predicted absences are stronger than the mean intensity "
+        "(%.1fx), so they are not absent"
+        % (entry.n_predicted_absent, entry.absence_ratio))
       refuted.append(entry)
       continue
     if entry.judged_by == "nothing":
@@ -1413,12 +1444,14 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
     if n not in seen:
       seen.add(n)
       short.append(e)
-  if ensure_centric and not any(
-      e.space_group_info.group().is_centric() for e in short[:n_suggestions]):
-    c = [e for e in short[n_suggestions:]
-         if e.space_group_info.group().is_centric()]
-    if c:
-      short = short[:n_suggestions - 1] + c[:1] + short[n_suggestions - 1:]
+  ambiguous = (stat is not None
+               and CENTRIC_AMBIGUOUS[0] <= stat <= CENTRIC_AMBIGUOUS[1])
+  head = [e.space_group_info.group().is_centric() for e in short[:n_suggestions]]
+  if head and len(set(head)) == 1 and (ambiguous or (ensure_centric and not head[0])):
+    other = [e for e in short[n_suggestions:]
+             if e.space_group_info.group().is_centric() != head[0]]
+    if other:
+      short = short[:n_suggestions - 1] + other[:1] + short[n_suggestions - 1:]
   return group_args(
     suggestions=short[:n_suggestions],
     all_candidates=scored,
