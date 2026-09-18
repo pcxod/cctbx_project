@@ -166,7 +166,7 @@ def rank_fusion(entries, weight=R1_FUSION_WEIGHT):
 
 
 def choose_space_group(f_obs, suggestions, f_calc_in_p1, n_heavy, out=None,
-                       f_calc_in_start=None):
+                       f_calc_in_start=None, n_threads=1):
   """ Solve in each shortlisted group, score it, and order them.
 
   Returns a list of dicts, best first, each with `space_group_info`, `placed`,
@@ -195,7 +195,8 @@ def choose_space_group(f_obs, suggestions, f_calc_in_p1, n_heavy, out=None,
         entry["placed"] = f_calc_in_start
       else:
         entry["placed"] = ab_initio_solve.solve_in(
-          f_obs, info, f_calc_in_p1=f_calc_in_p1, out=out)
+          f_obs, info, f_calc_in_p1=f_calc_in_p1, out=out,
+          n_threads=n_threads)
     except Exception:
       entry["placed"] = None
     if entry["placed"] is not None:

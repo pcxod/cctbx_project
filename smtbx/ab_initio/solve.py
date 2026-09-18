@@ -194,7 +194,7 @@ def _expected_atom_count(f_obs):
 
 
 def solve_in(f_obs, space_group_info, f_calc_in_p1=None, n_trials=4,
-             out=None):
+             out=None, n_threads=1):
   """ Solve again with the chosen symmetry enforced. Falls back to placing.
 
   **This step is worth 37 percentage points and its absence was the single
@@ -228,7 +228,7 @@ def solve_in(f_obs, space_group_info, f_calc_in_p1=None, n_trials=4,
     result = multi_trial.solve(
       f_obs_g, n_trials=n_trials,
       normalisations_for=charge_flipping.amplitude_quasi_normalisations,
-      out=out)
+      out=out, n_threads=n_threads)
     if result.f_calc is not None:
       return result.f_calc
   except Exception as e:

@@ -58,6 +58,21 @@ class trial_result(group_args):
   pass
 
 
+class _abortable(object):
+  """ `solving` whose iteration ends early once `abort()` is true """
+  def __init__(self, solving, abort):
+    self._solving, self._abort = solving, abort
+
+  def __getattr__(self, name):
+    return getattr(self._solving, name)
+
+  def __iter__(self):
+    for flipping in self._solving:
+      if self._abort():
+        return
+      yield flipping
+
+
 def solve(f_obs,
           n_trials=8,
           # 0.20 measured over a uniform sample of the Crystallography Open
@@ -84,6 +99,9 @@ def solve(f_obs,
           # A/B'd without touching a caller. Only useful because the cctbx
           # 3D FFT wrappers now release the GIL.
           n_threads=None,
+          # Polled by the main thread while trials run on threads; True
+          # cuts the running trials short and abandons the rest.
+          stop=None,
           verbose=False,
           out=None):
   """ n_trials seeded charge-flipping runs; the best solution found.
@@ -142,7 +160,7 @@ def solve(f_obs,
   # **The per-trial computation, lifted out of the loop unchanged.**
   # Both the serial and the threaded path call this, so the two cannot drift:
   # what differs between them is only WHEN a trial runs, never what it does.
-  def _compute_trial(i_trial, trial_out):
+  def _compute_trial(i_trial, trial_out, abort=None):
     seed = first_seed + max(0, i_trial - len(supplied))
     t0 = time.time()
 
@@ -164,7 +182,8 @@ def solve(f_obs,
     user_stopped = False
     error = None
     try:
-      if loop(solving, verbose=verbose, out=trial_out) is False:
+      target = solving if abort is None else _abortable(solving, abort)
+      if loop(target, verbose=verbose, out=trial_out) is False:
         user_stopped = True
     except Exception as e:
       # One trial failing is not the run failing: seven others may yet solve
@@ -218,14 +237,15 @@ def solve(f_obs,
   # exactly where it would have stopped. Trials past that point are computed
   # and discarded; that waste is the price of the parallelism.
   #
-  # Skipped when `max_seconds` is set or a `callback` may cancel: both decide
-  # on elapsed time or user action mid-run, which cannot be replayed from
-  # finished results.
+  # `max_seconds`, `stop` and a good-enough trial raise `halt` = (reason,
+  # index): trials not yet started stay None, running ones past the index are
+  # cut short, and the replay stops at the first None with that reason.
+  # Trials are claimed in seed order, so everything before a None is complete.
   precomputed = None
-  if (n_threads > 1 and max_seconds is None and callback is None
-      and n_trials + len(supplied) > 1):
+  n_all = n_trials + len(supplied)
+  halt = [None, n_all]
+  if n_threads > 1 and n_all > 1:
     import threading
-    n_all = n_trials + len(supplied)
     slots = [None]*n_all
     bufs = [StringIO() for _ in range(n_all)]
     lock = threading.Lock()
@@ -235,11 +255,11 @@ def solve(f_obs,
       while True:
         with lock:
           i = nxt[0]
-          if i >= n_all:
+          if i >= n_all or halt[0] is not None:
             return
           nxt[0] = i + 1
         try:
-          slots[i] = _compute_trial(i, bufs[i])
+          slots[i] = _compute_trial(i, bufs[i], abort=lambda: i > halt[1])
         except Exception as e:
           # Mirrors the per-trial error handling inside _compute_trial: one
           # thread dying must not take the run down.
@@ -248,13 +268,26 @@ def solve(f_obs,
             had_phase_transition=False, cc_peak_height=None, seconds=0.0,
             error='%s: %s' % (type(e).__name__, str(e)[:200]),
             solutions=None, f_calc_in_p1=None), [], False)
+        cc = slots[i][0].cc_peak_height
+        if slots[i][2]:
+          halt[:] = "cancelled", -1
+        elif (good_enough_cc_peak_height is not None and cc is not None
+              and cc >= good_enough_cc_peak_height and i < halt[1]):
+          halt[:] = "good_enough", i
 
     workers = [threading.Thread(target=_worker)
                for _ in range(min(n_threads, n_all))]
     for w in workers:
       w.start()
-    for w in workers:
-      w.join()
+    while any(w.is_alive() for w in workers):
+      for w in workers:
+        w.join(0.1)
+      if halt[0] is None:
+        if stop is not None and stop():
+          halt[:] = "cancelled", -1
+        elif (max_seconds is not None
+              and time.time() - t_start >= max_seconds):
+          halt[0] = "out_of_time"
     # Per-trial buffers, replayed in order: threads writing to one `out`
     # would interleave their lines into nonsense.
     for b in bufs:
@@ -263,6 +296,9 @@ def solve(f_obs,
 
   for i_trial in range(n_trials + len(supplied)):
     if precomputed is not None:
+      if precomputed[i_trial] is None:
+        stopped_because = halt[0]
+        break
       result, solutions, user_stopped = precomputed[i_trial]
     else:
       result, solutions, user_stopped = _compute_trial(i_trial, out)
@@ -284,14 +320,16 @@ def solve(f_obs,
     if (best is not None and good_enough_cc_peak_height is not None
         and best[2] >= good_enough_cc_peak_height):
       stopped_because = "good_enough"
-    if (max_seconds is not None and time.time() - t_start >= max_seconds
-        and stopped_because is None):
+    if (max_seconds is not None and precomputed is None
+        and time.time() - t_start >= max_seconds and stopped_because is None):
       # A bound for the interactive case, where a structure that will not solve
       # must not hold the GUI for minutes. Deliberately checked after a whole
       # trial: interrupting one leaves nothing usable behind.
       stopped_because = "out_of_time"
     if stopped_because is not None:
       break
+  if precomputed is not None and stopped_because is None:
+    stopped_because = halt[0]
 
   return group_args(
     f_calc=(best[0] if best else None),
