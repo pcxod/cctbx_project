@@ -63,6 +63,28 @@ class _array_extension(oop.injector, miller.array):
                                    need_sorting=True):
     """ As per ref. [2] """
     cut = int(weak_reflection_fraction * source.size())
+    if not need_sorting:
+      # **The whole step in one C++ call, with the GIL released.** Driven from
+      # Python this is six flex operations with the GIL held between them, and
+      # it measured 0.150 ms of a 0.78 ms charge-flipping cycle scaling 0.97x
+      # on four threads while the FFT steps around it reached 2.56x and 3.32x.
+      #
+      # Only the unsorted path: sorting first would need the permutation
+      # applied to both arrays, and the hot path (weak_reflection_improved_
+      # iterator) passes need_sorting=False.
+      #
+      # Falls back to the Python below if the extension is older than this --
+      # a missing symbol must not take the solver down.
+      try:
+        return miller.array(self, ab_initio.ext.oszlanyi_suto_phase_transfer(
+          space_group=self.space_group(),
+          miller_indices=self.indices(),
+          f_obs_data=self.data(),
+          source_data=source.data(),
+          cut=cut,
+          delta_varphi=delta_varphi))
+      except AttributeError:
+        pass
     if need_sorting:
       p = self.sort_permutation(by_value="data", reverse=True)
       target = self.select(p)
@@ -356,6 +378,8 @@ class solving_iterator(object):
   map_skewness_stability_threshold = 0.01
   polishing_iterations = 5
   min_cc_peak_height = 0.9
+  # a rise of the map skewness below this is noise, not a phase transition
+  min_skewness_at_phase_transition = 1.5
 
   def __init__(self, flipping_iterator, f_obs, **kwds):
     self.flipping_iterator = flipping_iterator
@@ -455,7 +479,14 @@ class solving_iterator(object):
       low, high = 0.8, 1.
       if low <= r <= high:
         yield self.solving
-        flipping.restart()
+        # Control only comes back here when solving failed, and the way back
+        # passes through the starting state, which has already given the
+        # flipping iterator a fresh set of random phases. So there is nothing
+        # to restart -- only the delta to guess again. This used to call
+        # flipping.restart(), which no iterator in this module has ever
+        # defined, so the whole c_tot_over_c_flip method raised AttributeError
+        # the first time an attempt failed. It went unnoticed because a
+        # structure that solves on the first attempt never reaches this line.
         delta_needs_initialisation = True
       else:
         if self.yield_during_delta_guessing:
@@ -487,20 +518,29 @@ class solving_iterator(object):
   def _solving(self):
     while True:
       i_attempt = 0
+      # Later attempts get a longer run at it. Held locally and recomputed from
+      # the configured value on each pass: this used to multiply
+      # self.max_solving_iterations in place, so the budget compounded over
+      # every attempt of every pass and never went back down -- a structure
+      # that kept failing could end up being given thousands of iterations per
+      # attempt, and the configured value no longer meant anything.
       while i_attempt < self.max_attempts_to_get_phase_transition:
         i_attempt += 1
+        solving_iterations = self.max_solving_iterations
         if i_attempt > 2:
-          self.max_solving_iterations *= 1.5
+          solving_iterations *= 1.5**(i_attempt - 2)
         self.skewness_evolution = observable_evolution()
         for n, flipping in enumerate(
           itertools.islice(self.flipping_iterator,
-                           0, int(self.max_solving_iterations))):
+                           0, int(solving_iterations))):
           self.iteration_index = n
           if n % self.yield_solving_interval == 0:
             yield self.solving
           self.skewness_evolution.append(flipping.rho_map.skewness())
           #if flipping.rho_map.skewness() < 3: continue
-          if self.skewness_evolution.had_phase_transition():
+          if (self.skewness_evolution.had_phase_transition()
+              and flipping.rho_map.skewness()
+                  >= self.min_skewness_at_phase_transition):
             self.attempts.append(n)
             yield self.polishing
             break
