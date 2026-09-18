@@ -193,7 +193,7 @@ def _expected_atom_count(f_obs):
     return 20
 
 
-def solve_in(f_obs, space_group_info, f_calc_in_p1=None, n_trials=8,
+def solve_in(f_obs, space_group_info, f_calc_in_p1=None, n_trials=4,
              out=None):
   """ Solve again with the chosen symmetry enforced. Falls back to placing.
 

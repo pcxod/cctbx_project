@@ -300,6 +300,8 @@ class low_density_elimination_iterator(density_modification_iterator):
     return 0.2*flex.mean(rho.select(rho >0))
 
 
+max_shift_refinements = 3
+
 def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
   # The fast correlation map as per cctbx.translation_search.fast_nv1995
   # is computed and its peaks studied.
@@ -345,8 +347,10 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
     map=correlation_map,
     parameters=search_parameters)
   # iterate over the strong peak; for each, shift and symmetrised f_calc
-  for peak in correlation_map_peaks:
-    if peak.height < min_cc_peak_height: break
+  # ponytail: only the first solution is ever used, and each shift refinement
+  # is ~30 ms of Python-driven LBFGS -- 78 per trial was 91 % of a trial
+  for i, peak in enumerate(correlation_map_peaks):
+    if peak.height < min_cc_peak_height or i >= max_shift_refinements: break
     sr = symmetry_search.shift_refinement(
       f_obs, f_calc_in_p1, peak.site)
     yield sr.symmetrised_shifted_sf.f_x, sr.shift, sr.goos.correlation
