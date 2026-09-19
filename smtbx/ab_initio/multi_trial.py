@@ -99,6 +99,11 @@ def solve(f_obs,
           # a solution with a worse R than this may be a symmetric wrong one,
           # so it does not stop the trials early: the R ranking needs them all
           good_r1=0.3,
+          # a best solution worse than this is as often a symmetric wrong one
+          # as a poorly converged right one, so it earns the fallback rounds
+          # too when a time budget bounds them; the lower-R result of the
+          # rounds is returned, never nothing
+          retry_r1=0.4,
           max_seconds=None,
           first_seed=1,
           initial_phases_list=None,
@@ -359,7 +364,8 @@ def solve(f_obs,
     n_trials_run=len(trials),
     stopped_because=stopped_because,
     seconds=time.time() - t_start)
-  if (best is None and fallbacks and stopped_because is None
+  if (fallbacks and stopped_because is None
+      and (best is None or (max_seconds is not None and best[3] > retry_r1))
       and (max_seconds is None or elapsed < 0.5*max_seconds)):
     kw = dict(n_trials=n_trials,
               weak_reflection_fraction=weak_reflection_fraction,
@@ -368,15 +374,15 @@ def solve(f_obs,
               fallbacks=fallbacks[1:],
               yield_solving_interval=yield_solving_interval,
               good_enough_cc_peak_height=good_enough_cc_peak_height,
-              good_r1=good_r1,
+              good_r1=good_r1, retry_r1=retry_r1,
               max_seconds=(None if max_seconds is None
                            else max_seconds - elapsed),
               first_seed=first_seed + len(trials), initial_phases_list=None,
               keep_solutions=keep_solutions, loop=loop, callback=callback,
               n_threads=n_threads, stop=stop, verbose=verbose, out=out)
     kw.update(fallbacks[0])
-    print("No solution in %d trials; retrying with %s" % (
-      len(trials),
+    print("%s in %d trials; retrying with %s" % (
+      "No solution" if best is None else "Best R %.3f" % best[3], len(trials),
           ", ".join("%s=%s" % (k, getattr(v, '__name__', v))
                     for k, v in fallbacks[0].items())), file=out)
     r = solve(f_obs, **kw)
