@@ -86,8 +86,19 @@ def solve(f_obs,
           weak_reflection_fraction=0.2,
           normalisations_for=charge_flipping.amplitude_quasi_normalisations,
           max_solving_iterations=500,
+          # Tried in turn, each a set of overrides for this call, when no trial
+          # reached a phase transition and time remains: the weak-reflection
+          # step and the E normalisation each lose a few structures the other
+          # keeps, and a structure whose trials transition one time in ten
+          # wants more of them, longer; every round starts from fresh seeds.
+          fallbacks=(dict(weak_reflection_fraction=0.3),
+                     dict(normalisations_for=None),
+                     dict(n_trials=16, max_solving_iterations=2000)),
           yield_solving_interval=60,
           good_enough_cc_peak_height=0.99,
+          # a solution with a worse R than this may be a symmetric wrong one,
+          # so it does not stop the trials early: the R ranking needs them all
+          good_r1=0.3,
           max_seconds=None,
           first_seed=1,
           initial_phases_list=None,
@@ -106,8 +117,8 @@ def solve(f_obs,
           out=None):
   """ n_trials seeded charge-flipping runs; the best solution found.
 
-  Returns a group_args with `f_calc`, `shift` and `cc_peak_height` of the
-  winner -- the same triple `solving_iterator.f_calc_solutions` holds, so a
+  Returns a group_args with `f_calc`, `shift`, `cc_peak_height` and `r1` of the
+  winner -- the same tuple `solving_iterator.f_calc_solutions` holds, so a
   caller that used to take `f_calc_solutions[0]` can use this unchanged -- plus
   `trials`, a record of every run, and `n_trials_run`, which is less than
   `n_trials` when the search stopped early. `f_calc` is None if nothing solved.
@@ -211,6 +222,7 @@ def solve(f_obs,
       had_phase_transition=bool(getattr(solving, "had_phase_transition",
                                         False)),
       cc_peak_height=(solutions[0][2] if solutions else None),
+      r1=(solutions[0][3] if solutions else None),
       seconds=time.time() - t0,
       error=error,
       # Off by default: a caller only wants the winner, and holding every
@@ -265,14 +277,15 @@ def solve(f_obs,
           # thread dying must not take the run down.
           slots[i] = (trial_result(
             seed=first_seed + max(0, i - len(supplied)), n_solutions=0,
-            had_phase_transition=False, cc_peak_height=None, seconds=0.0,
+            had_phase_transition=False, cc_peak_height=None, r1=None, seconds=0.0,
             error='%s: %s' % (type(e).__name__, str(e)[:200]),
             solutions=None, f_calc_in_p1=None), [], False)
-        cc = slots[i][0].cc_peak_height
+        cc, r1 = slots[i][0].cc_peak_height, slots[i][0].r1
         if slots[i][2]:
           halt[:] = "cancelled", -1
         elif (good_enough_cc_peak_height is not None and cc is not None
-              and cc >= good_enough_cc_peak_height and i < halt[1]):
+              and cc >= good_enough_cc_peak_height and r1 <= good_r1
+              and i < halt[1]):
           halt[:] = "good_enough", i
 
     workers = [threading.Thread(target=_worker)
@@ -305,7 +318,8 @@ def solve(f_obs,
     trials.append(result)
 
     for solution in solutions:
-      if best is None or solution[2] > best[2]:
+      # R separates right from wrong where the correlation peak does not
+      if best is None or solution[3] < best[3]:
         best = solution
         best_trial = result
 
@@ -318,7 +332,7 @@ def solve(f_obs,
     # correlation peak height barely separates right from wrong at all, which
     # is why there is no lower bar: it would stop early on the wrong answer.
     if (best is not None and good_enough_cc_peak_height is not None
-        and best[2] >= good_enough_cc_peak_height):
+        and best[2] >= good_enough_cc_peak_height and best[3] <= good_r1):
       stopped_because = "good_enough"
     if (max_seconds is not None and precomputed is None
         and time.time() - t_start >= max_seconds and stopped_because is None):
@@ -331,10 +345,12 @@ def solve(f_obs,
   if precomputed is not None and stopped_because is None:
     stopped_because = halt[0]
 
-  return group_args(
+  elapsed = time.time() - t_start
+  result = group_args(
     f_calc=(best[0] if best else None),
     shift=(best[1] if best else None),
     cc_peak_height=(best[2] if best else None),
+    r1=(best[3] if best else None),
     # The winning trial's P1 structure factors, for a symmetry search that must
     # not be handed a map the assumed space group has already been imposed on.
     f_calc_in_p1=(best_trial.f_calc_in_p1 if best_trial else None),
@@ -343,6 +359,35 @@ def solve(f_obs,
     n_trials_run=len(trials),
     stopped_because=stopped_because,
     seconds=time.time() - t_start)
+  if (best is None and fallbacks and stopped_because is None
+      and (max_seconds is None or elapsed < 0.5*max_seconds)):
+    kw = dict(n_trials=n_trials,
+              weak_reflection_fraction=weak_reflection_fraction,
+              normalisations_for=normalisations_for,
+              max_solving_iterations=max_solving_iterations,
+              fallbacks=fallbacks[1:],
+              yield_solving_interval=yield_solving_interval,
+              good_enough_cc_peak_height=good_enough_cc_peak_height,
+              good_r1=good_r1,
+              max_seconds=(None if max_seconds is None
+                           else max_seconds - elapsed),
+              first_seed=first_seed + len(trials), initial_phases_list=None,
+              keep_solutions=keep_solutions, loop=loop, callback=callback,
+              n_threads=n_threads, stop=stop, verbose=verbose, out=out)
+    kw.update(fallbacks[0])
+    print("No solution in %d trials; retrying with %s" % (
+      len(trials),
+          ", ".join("%s=%s" % (k, getattr(v, '__name__', v))
+                    for k, v in fallbacks[0].items())), file=out)
+    r = solve(f_obs, **kw)
+    all_trials = trials + r.trials
+    if best is not None and (r.f_calc is None or r.r1 > best[3]):
+      r = result
+    r.trials = all_trials
+    r.n_trials_run = len(r.trials)
+    r.seconds = time.time() - t_start
+    return r
+  return result
 
 
 def show(result, out=None):
@@ -363,7 +408,8 @@ def show(result, out=None):
     print("No solution from %i trial(s) in %.1fs"
           % (result.n_trials_run, result.seconds), file=out)
   else:
-    print("Best of %i trial(s): correlation %.3f in %.1fs%s"
-          % (result.n_trials_run, result.cc_peak_height, result.seconds,
+    print("Best of %i trial(s): correlation %.3f R %.3f in %.1fs%s"
+          % (result.n_trials_run, result.cc_peak_height, result.r1,
+             result.seconds,
              "" if result.stopped_because is None
              else " (stopped: %s)" % result.stopped_because), file=out)

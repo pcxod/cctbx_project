@@ -44,6 +44,10 @@ DEFAULT_RADIUS = 0.7
 # pairs set the scale, so it does not need to be tight -- it needs to exclude
 # non-bonded contacts (>= 2.2 A) and fused-ring short contacts.
 CC_MIN, CC_MAX = 1.25, 1.65
+# P-O, S-O, Si-O and M=O bonds sit in that window too, and one of them in the
+# calibration set inflates the scale by its density ratio. On the curve a C-F
+# pair reads 1.7, Si-O 2.1, P-O 2.3: pairs beyond this are not two light atoms.
+CC_MAX_RATIO = 1.9
 
 # Integrated density is **not** proportional to Z. A heavy atom keeps a larger
 # share of its electrons inside the integration sphere, while a light atom's
@@ -100,14 +104,53 @@ COMMON_ELEMENTS = (
 
 
 def integrated_densities(fft_map, sites_frac, radius=DEFAULT_RADIUS):
-  """ Density summed in a sphere of `radius` about each site. """
+  """ Density summed in a sphere of `radius` (one, or one per site) about
+  each site. """
   from cctbx import maptbx
+  from cctbx.array_family import flex
 
+  data = fft_map.real_map_unpadded()
+  if hasattr(radius, '__len__'):
+    return [maptbx.average_densities(
+      unit_cell=fft_map.unit_cell(), data=data,
+      sites_frac=flex.vec3_double([s]), radius=float(r))[0]
+      for s, r in zip(sites_frac, radius)]
   return maptbx.average_densities(
     unit_cell=fft_map.unit_cell(),
-    data=fft_map.real_map_unpadded(),
+    data=data,
     sites_frac=sites_frac,
     radius=float(radius))
+
+
+def site_radii(xs, lo=DEFAULT_RADIUS, hi=1.2, light_z=10):
+  """ A sphere radius per site for an Fo/Fc electron-count read: half the
+  distance to the nearest modelled neighbour, within [lo, hi], for sites
+  heavier than `light_z`; `lo` for the rest.
+
+  A wrongly typed heavy site refines to the U that mimics the true atom
+  over the data, and inside a small sphere the two densities then agree
+  (a Mn typed Se read 91 % of Se at 0.7 A, 84 % at 1.0 A): the deficit only
+  shows out where the model's broader atom trails off. Light sites keep
+  `lo`: their neighbours sit at 1.2-1.5 A, and a neighbour not yet modelled
+  would bleed into a wider sphere.
+  """
+  from cctbx import crystal
+  from cctbx.eltbx import tiny_pse
+
+  n = xs.scatterers().size()
+  d = [2*hi]*n
+  am = xs.asu_mappings(buffer_thickness=2*hi)
+  for p in crystal.neighbors_fast_pair_generator(am, distance_cutoff=2*hi):
+    d[p.i_seq] = min(d[p.i_seq], p.dist_sq**0.5)
+    d[p.j_seq] = min(d[p.j_seq], p.dist_sq**0.5)
+  out = []
+  for s, di in zip(xs.scatterers(), d):
+    try:
+      z = tiny_pse.table(s.scattering_type.strip().capitalize()).atomic_number()
+    except (RuntimeError, ValueError):
+      z = 0
+    out.append(min(hi, max(lo, 0.5*di)) if z > light_z else lo)
+  return out
 
 
 def carbon_scale(unit_cell, sites_frac, densities, space_group=None):
@@ -147,7 +190,8 @@ def carbon_scale(unit_cell, sites_frac, densities, space_group=None):
         d = unit_cell.length(diff)
         if best is None or d < best:
           best = d
-      if best is not None and CC_MIN <= best <= CC_MAX:
+      lo, hi = sorted((densities[i], densities[j]))
+      if best is not None and CC_MIN <= best <= CC_MAX and hi <= CC_MAX_RATIO*lo:
         paired.append(densities[i])
         paired.append(densities[j])
   if paired.size() < 4:

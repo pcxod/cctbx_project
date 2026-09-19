@@ -150,8 +150,19 @@ class density_modification_iterator(object):
   def __init__(self, **kwds):
     adopt_optional_init_args(self, kwds)
 
-  def start(self, f_obs, phases, f_000=0):
+  def start(self, f_obs, phases, f_000=0, free=None):
+    """ `free`: reflections inside the sphere that were not measured, as
+    the amplitude expected at their resolution or as complex values to carry
+    on from. They take what the map gives them each cycle instead of staying
+    at zero, since an unmeasured low-angle reflection fixed at zero is an
+    error the flips never correct and alone stops the phase transition. """
     self.f_obs = f_obs
+    self.f_free = free if free is not None else f_obs.select(flex.size_t())
+    self.f_calc_free = self.f_free
+    if not self.f_free.is_complex_array():
+      self.f_calc_free = self.f_free.phase_transfer(
+        (2*math.pi)*flex.random_double(self.f_free.size()))
+    self.f_all = None
     self.crystal_gridding = maptbx.crystal_gridding(
       unit_cell=self.f_obs.unit_cell(),
       space_group_info=sgtbx.space_group_info('P1'),
@@ -176,6 +187,10 @@ class density_modification_iterator(object):
     else:
       self.f_obs *= normalisations.data()
       self.f_calc *= normalisations.data()
+    if self.f_free.size():
+      s = flex.mean(normalisations.data())
+      self.f_calc_free = self.f_calc_free.array(
+        data=self.f_calc_free.data()*(1/s if divide else s))
     self.f_000 = 0
     self.compute_electron_density_map()
 
@@ -202,9 +217,10 @@ class density_modification_iterator(object):
   def compute_electron_density_map(self):
     """ Compute the electron density from the structure factors self.f_calc
     and the 000 component self.f_000, scaling by the unit cell volume """
-    self.rho_map = miller.fft_map(self.crystal_gridding,
-                                  self.f_calc,
-                                  self.f_000)
+    f_calc = self.f_calc
+    if self.f_free.size():
+      f_calc = self.f_calc.concatenate(self.f_calc_free)
+    self.rho_map = miller.fft_map(self.crystal_gridding, f_calc, self.f_000)
     self.rho_map.apply_volume_scaling()
 
   def compute_structure_factors(self):
@@ -213,8 +229,22 @@ class density_modification_iterator(object):
     grid points """
     rho = self.rho_map.real_map()
     self._g_000 = flex.sum(rho) * self.fft_scale
-    self._g = self.f_obs.structure_factors_from_map(rho, in_place_fft=True)
-    self._g *= self.fft_scale
+    if not self.f_free.size():
+      self._g = self.f_obs.structure_factors_from_map(rho, in_place_fft=True)
+      self._g *= self.fft_scale
+      return
+    if self.f_all is None:
+      self.f_all = miller.set.concatenate(self.f_obs, self.f_free)
+    g = self.f_all.structure_factors_from_map(rho, in_place_fft=True)
+    g *= self.fft_scale
+    n = self.f_obs.size()
+    self._g = miller.array(self.f_obs, g.data()[:n])
+    # unmeasured amplitudes follow the map but may not outgrow the measured ones
+    gf = g.data()[n:]
+    a = flex.abs(gf)
+    cap = flex.max(self.f_obs.data())
+    a.set_selected(a > cap, cap)
+    self.f_calc_free = miller.array(self.f_free, flex.polar(a, flex.arg(gf)))
 
   def transfer_phase_to_f_obs(self):
     self.f_calc = self.f_obs.phase_transfer(self._g)
@@ -258,9 +288,10 @@ class weak_reflection_improved_iterator(basic_iterator):
     self.delta_varphi = delta_varphi
     self.weak_reflection_fraction = weak_reflection_fraction
 
-  def start(self, f_obs, phases, f_000=0):
+  def start(self, f_obs, phases, f_000=0, **kwds):
     """ sort f_obs by increasing amplitudes once and for all """
-    super(weak_reflection_improved_iterator, self).start(f_obs, phases, f_000)
+    super(weak_reflection_improved_iterator, self).start(
+      f_obs, phases, f_000, **kwds)
     p = self.f_obs.sort_permutation(by_value="data", reverse=True)
     self.f_obs = self.f_obs.select(p)
 
@@ -451,15 +482,39 @@ class solving_iterator(object):
     del self.finished
 
   def _starting(self, f_obs):
+    free = f_obs.complete_set().lone_set(f_obs.map_to_asu()) \
+                .expand_to_p1().map_to_asu().unique_under_symmetry()
     f_obs = f_obs.expand_to_p1() \
                  .merge_equivalents().array() \
                  .discard_sigmas()
+    free = free.lone_set(f_obs)
     if self.normalisations_for is not None:
       self.normalisations = self.normalisations_for(f_obs)
       f_obs /= self.normalisations.data()
+    free = self.expected_amplitudes(f_obs, free)
     while True:
-      self.flipping_iterator.start(f_obs, self.initial_phases_for(f_obs))
+      # both phase sets from the trial's own generator, so a seed reproduces
+      phases = self.initial_phases_for(f_obs)
+      self.flipping_iterator.start(
+        f_obs, phases,
+        free=free.phase_transfer(self.initial_phases_for(free)))
       yield self.guessing_delta
+
+  def expected_amplitudes(self, f_obs, free):
+    """ `free` as an array holding the mean amplitude of `f_obs` in the
+    resolution shell of each reflection, the outermost shells standing in
+    beyond the measured range. """
+    if not free.size():
+      return f_obs.select(flex.size_t())
+    f_obs.setup_binner_counting_sorted(reflections_per_bin=200)
+    binner = f_obs.binner()
+    means = [flex.mean(f_obs.data().select(binner.selection(i)))
+             for i in binner.range_used()]
+    lo, hi = binner.range_used()[0], binner.range_used()[-1]
+    data = flex.double([
+      means[min(max(binner.get_i_bin(s), lo), hi) - lo]
+      for s in free.d_star_sq().data()])
+    return free.array(data=data)
 
   def _finished(self):
     if not self.max_attempts_exceeded:
@@ -579,7 +634,8 @@ class solving_iterator(object):
         constant_rho_c=self.flipping_iterator.delta)
       low_density_elimination.start(f_obs=self.flipping_iterator.f_obs,
                                     phases=self.flipping_iterator.f_calc,
-                                    f_000=0)
+                                    f_000=0,
+                                    free=self.flipping_iterator.f_calc_free)
       for i in range(self.polishing_iterations):
         next(low_density_elimination)
       yield self.evaluating
@@ -595,7 +651,10 @@ class solving_iterator(object):
                                       self.flipping_iterator.f_calc,
                                       self.min_cc_peak_height):
           if cc_peak_height < self.min_cc_peak_height: break
-          self.f_calc_solutions.append((f_calc, shift, cc_peak_height))
+          fo, fc = original_f_obs.common_sets(f_calc)
+          r1 = fo.r1_factor(fc, scale_factor=fo.scale_factor(fc))
+          self.f_calc_solutions.append((f_calc, shift, cc_peak_height, r1))
+        self.f_calc_solutions.sort(key=lambda s: s[3])
         if self.f_calc_solutions: yield self.finished
         else: yield self.starting
       self.max_attempts_exceeded = True

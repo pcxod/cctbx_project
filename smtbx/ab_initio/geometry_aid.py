@@ -164,6 +164,10 @@ def density_likelihood(observed, elements, sigma):
 
   from smtbx.ab_initio import element_assignment
 
+  # below the lightest candidate every element is far away, and the relative
+  # width would hand a noise peak to the heaviest one
+  observed = max(observed, min(element_assignment.expected_density(Z_OF[s])
+                               for s in elements))
   weights = []
   for symbol in elements:
     expected = element_assignment.expected_density(Z_OF[symbol])
