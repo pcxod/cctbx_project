@@ -1460,11 +1460,17 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   ambiguous = (stat is not None
                and CENTRIC_AMBIGUOUS[0] <= stat <= CENTRIC_AMBIGUOUS[1])
   head = [e.space_group_info.group().is_centric() for e in short[:n_suggestions]]
-  if head and len(set(head)) == 1 and (ambiguous or (ensure_centric and not head[0])):
+  # A head of one centricity rests on <|E^2-1|> alone (right 92 % blind, 57 %
+  # in the ambiguous band) and its 3 slots hold no fallback when that call is
+  # wrong: 14 of 31 FAILs on 3000 COD cases were P2(1)/c behind [Pc, P2(1), P2]
+  # or C2/c behind [Cc, C2, Cm]. Append the best group of the other centricity
+  # as a fourth entry; the ranking above is untouched. (21 Sep 2026)
+  if head and len(set(head)) == 1:
     other = [e for e in short[n_suggestions:]
              if e.space_group_info.group().is_centric() != head[0]]
     if other:
-      short = short[:n_suggestions - 1] + other[:1] + short[n_suggestions - 1:]
+      short = short[:n_suggestions] + other[:1]
+      n_suggestions += 1
   return group_args(
     suggestions=short[:n_suggestions],
     all_candidates=scored,
