@@ -34,18 +34,41 @@ from __future__ import absolute_import, division, print_function
 
 from libtbx import group_args
 
-# Space-group frequency among small-molecule structures, most common first, by
-# International Tables number. Counted from the 1986-entry uniform sample of
-# the COD used throughout this work: 14 (P2(1)/c) 792, 2 (P-1) 440, 15 (C2/c)
-# 166, 19 (P2(1)2(1)2(1)) 130, 4 (P2(1)) 91, 61 (Pbca) 70 ...
+# Space-group frequency, most common first, by International Tables number:
+# every group, counted over the 89185 COD entries of the whole-COD pool
+# (14 P2(1)/c 33657, 2 P-1 19564, 15 C2/c 7734, 19 P2(1)2(1)2(1) 6434, 4 P2(1)
+# 4131, 61 Pbca 3460 ... 20 groups never seen close the list in number order).
 #
 # This is a genuinely strong ranker -- it beat every physical figure of merit
 # tested, including triplet phase consistency -- and that is exactly why it is
 # used only to break ties here. A prior this concentrated will confidently name
 # P2(1)/c for a structure that is not P2(1)/c, and the structures where a user
 # most needs help are precisely the unusual ones.
-FREQUENCY_ORDER = (14, 2, 15, 19, 4, 61, 33, 62, 9, 29, 60, 5, 88, 7, 56, 13,
-                   43, 1, 12, 11, 18, 148, 96, 92, 41, 20, 36, 31, 86, 114)
+#
+# The table used to stop after 30 groups, and every group below that tied and
+# fell back to number order -- which lists the pure-rotation groups first, the
+# rarest of each family: P622 above P-62m (2 vs 9 in the COD), P6 above P-6,
+# I4 above I-4 (21 vs 109), F432 above F-43m (1 vs 15). Nine whole-COD misses
+# with no absences to decide on were exactly that (24 Sep 2026).
+FREQUENCY_ORDER = (14, 2, 15, 19, 4, 61, 33, 9, 62, 29, 60, 5, 13, 148, 11,
+                   1, 12, 7, 18, 56, 43, 88, 92, 36, 96, 167, 20, 82, 64,
+                   146, 41, 52, 63, 57, 161, 86, 155, 114, 31, 70, 76, 170,
+                   78, 194, 176, 225, 198, 152, 169, 45, 166, 58, 145, 154,
+                   144, 142, 53, 147, 173, 205, 85, 122, 8, 72, 73, 54, 110,
+                   55, 186, 87, 165, 163, 121, 179, 220, 131, 74, 59, 98,
+                   160, 136, 159, 71, 191, 65, 178, 227, 139, 79, 34, 113,
+                   68, 26, 221, 192, 190, 140, 97, 81, 106, 150, 80, 216,
+                   143, 129, 217, 130, 10, 32, 46, 164, 69, 118, 3, 218, 23,
+                   128, 141, 182, 196, 212, 193, 120, 200, 37, 126, 66, 189,
+                   40, 197, 39, 229, 206, 77, 21, 104, 51, 213, 204, 223,
+                   135, 38, 158, 30, 42, 117, 6, 171, 137, 157, 123, 17, 100,
+                   47, 175, 132, 174, 219, 95, 185, 91, 138, 222, 94, 90, 28,
+                   162, 202, 228, 103, 187, 180, 50, 215, 24, 27, 102, 119,
+                   109, 124, 134, 116, 108, 211, 181, 224, 127, 177, 151,
+                   207, 172, 75, 230, 226, 195, 48, 22, 67, 84, 44, 168, 210,
+                   107, 89, 203, 153, 133, 83, 209, 125, 16, 25, 35, 49, 93,
+                   99, 101, 105, 111, 112, 115, 149, 156, 183, 184, 188, 199,
+                   201, 208, 214)
 
 # <|E^2-1|> is ~0.968 for a centric distribution and ~0.736 for an acentric
 # one; the midpoint is the classical dividing line and, measured blind on the
@@ -97,7 +120,9 @@ MIN_ABSENCES_TO_JUDGE = 10
 # axial reflections that come back stronger than the mean is not absent, and
 # frequency alone would otherwise rank P2(1) over P2 on that data.
 STRONG_ABSENCE_MIN = 3
-STRONG_ABSENCE_RATIO = 1.0
+# Half the mean, not the mean: four 00l reflections at 0.99 of the mean kept
+# P4(2) and P4(2)/n ahead of the true P4/n on 4334605 (24 Sep 2026).
+STRONG_ABSENCE_RATIO = 0.5
 # The merged-file mirror of the same argument: a short axial class that is
 # missing to the last reflection is a screw axis, not a small sample.
 COVERAGE_SURE_MARGIN = 0.9
@@ -115,6 +140,11 @@ CENTRIC_AMBIGUOUS = (0.78, 0.92)
 # inferred rather than known. On the COD dev split the true group's margin
 # averaged 0.84, so nothing near the truth is at risk from this cut.
 MIN_COVERAGE_MARGIN = 0.05
+# A deleted class outranks a measured one only when it is much larger and the
+# measured class is genuinely weak: below that a coverage call would beat a
+# group whose measured absences argue against it (whole-COD, 23 Sep 2026).
+COVERAGE_DOMINANCE_FACTOR = 6
+COVERAGE_DOMINANCE_MAX_RATIO = 0.15
 
 # Decimals the absence ratio is rounded to before candidates are compared on
 # it.
@@ -158,7 +188,7 @@ DEFAULT_MAX_ABSENCE_RATIO = 0.25
 # decides its cost; eight covers every case seen where the truth was in the
 # shortlist at all, and a candidate the file-level evidence has already ranked
 # tenth is not in contention.
-PAIRWISE_RUNOFF_SIZE = 8
+PAIRWISE_RUNOFF_SIZE = 12   # 8 left Pca2(1) at rank 9 outside the contest (24 Sep 2026)
 
 
 def e_squared_minus_one(f_obs):
@@ -508,6 +538,7 @@ def pairwise_absence_winner(f_obs_p1, group_a, group_b, max_ratio=None):
   b = flex.bool(group_b.is_sys_absent(indices))
   a_only, b_only = a & ~b, b & ~a
   n_a, n_b = a_only.count(True), b_only.count(True)
+  MIN_ABSENCES_TO_JUDGE = 5   # a disputed class is small: 0k0 has nine reflections
   if n_a < MIN_ABSENCES_TO_JUDGE and n_b < MIN_ABSENCES_TO_JUDGE:
     return 0
 
@@ -1015,6 +1046,13 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
     number = sgi.type().number()
     coverage, n_coverage = ((None, 0) if reference is None
                             else absence_coverage(reference, group))
+    # The excess missing count of its predicted class (margin * n) is above
+    # the count it can measure: the group is mostly judged by what the file
+    # deleted, like a coverage-judged rival, and is credited and bucketed
+    # like one (evidence_fraction below, absence_bucket further down).
+    coverage_dominant = (coverage is not None
+                         and coverage*n_coverage > COVERAGE_DOMINANCE_FACTOR*n_absent
+                         and ratio < COVERAGE_DOMINANCE_MAX_RATIO)
     entry = group_args(
       space_group_info=sgi,
       absence_ratio=ratio,
@@ -1032,10 +1070,29 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
       # The same quantity on both sides: the fraction of the reflection list
       # this group declares systematically absent. Comparable across the two
       # tests, where the raw counts are not.
+      #
+      # **Both sides add up; one never replaces the other.** A C-centred file
+      # that still carries its measured c-glide class (weak, present) judged
+      # C2/c by intensity on those 77 reflections alone, while C2/m -- judged
+      # by coverage, predicting nothing measurable -- was credited with the
+      # 6000 deleted centring reflections that C2/c explains just as well.
+      # 0.013 against 0.50, and the truth ranked sixth behind C2/m, C2, Cm and
+      # two P groups: 979 C2/c failures on the whole-COD sweep (23 Sep 2026).
+      # Measured weakness and inferred absence are evidence about different
+      # reflection classes of the same group, so a group gets both -- but the
+      # coverage side only when the group's deleted class outweighs its
+      # measured one (`coverage_dominant`, below). A P file with every class
+      # measured has margins at the incompleteness noise (Pbca 0.048, Pmca
+      # 0.051 on 1516332), and crediting whichever scraped over
+      # MIN_COVERAGE_MARGIN put Pmca ahead of the truth.
       evidence_fraction=(
-        n_absent/max(1, f_obs_p1.size()) if n_absent >= MIN_ABSENCES_TO_JUDGE
-        else (n_coverage/max(1, reference[0].size())
-              if reference is not None and n_coverage else 0.0)),
+        (n_absent/max(1, f_obs_p1.size())
+         if n_absent >= MIN_ABSENCES_TO_JUDGE else 0.0)
+        + (n_coverage/max(1, reference[0].size())
+           if (reference is not None and n_coverage
+               and (n_absent < MIN_ABSENCES_TO_JUDGE or coverage_dominant))
+           else 0.0)),
+      coverage_dominant=coverage_dominant,
       # **Which test applies is decided per candidate, not per data set.**
       #
       # The tempting design is a global switch on whether the file looks merged.
@@ -1255,8 +1312,20 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
       # A coarser bucket still separates what it was introduced to separate: a
       # centred group at 0.22 lands in 0.2 against a true group at 0.011 in
       # 0.0, which was the case that motivated bucketing at all.
-      entry.absence_bucket = round(entry.absence_ratio,
-                                   _absence_bucket_decimals())
+      #
+      # **Unless the group's deleted class outweighs its measured one.** A
+      # C-centred file that kept its c-glide class (77 reflections, present at
+      # 0.009) is judged by intensity on that class alone and rounds to 0.01,
+      # while C2/m, judged by coverage on the 6000 deleted centring
+      # reflections that C2/c explains just as well, sits at 0.00 -- and the
+      # bucket is consulted before `evidence_fraction`, so the truth ranked
+      # ninth behind every coverage-judged group: 979 C2/c failures on the
+      # whole-COD sweep (23 Sep 2026). Such a group is mostly judged by what
+      # the file deleted, so it is bucketed like its coverage-judged rivals and
+      # the tie falls through to `evidence_fraction`, where it wins.
+      entry.absence_bucket = (0.0 if entry.coverage_dominant
+                              else round(entry.absence_ratio,
+                                         _absence_bucket_decimals()))
     else:
       entry.absence_bucket = 0.0
 
@@ -1356,7 +1425,14 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
             -e.evidence_fraction,
             e.frequency_rank)
 
-  if disputed:
+  # <|E^2-1|> keeps its say when alpha_0 disagrees and the statistic itself is
+  # decisive: over 2324 whole-COD reruns the two disagreed on 1620 and the
+  # statistic was right on 1462 (90 %). Dropping the centricity key on every
+  # dispute let a one-glide Pmcm at 1 % outrank Pbca at 3 % on 91 of 104 Pbca
+  # misses; keeping it inside CENTRIC_AMBIGUOUS demoted P212121 behind Pmmm
+  # on 11 of 47 passing cases, so the key is dropped only there (24 Sep 2026).
+  if disputed and stat is not None and (
+      CENTRIC_AMBIGUOUS[0] <= stat <= CENTRIC_AMBIGUOUS[1]):
     scored.sort(key=order)
   else:
     scored.sort(key=lambda e: ((0 if e.centric_agrees is not False else 1),)
@@ -1385,13 +1461,35 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   # because a candidate the file-level evidence has already put tenth is not in
   # contention. Stable: `sorted` keeps the existing order among equal scores, so
   # a contest that says nothing changes nothing.
-  if discriminating and len(scored) > 1:
-    leaders = scored[:PAIRWISE_RUNOFF_SIZE]
-    wins = copeland_scores(f_obs_p1, leaders, max_ratio=max_absence_ratio)
-    order_of = dict((id(e), i) for i, e in enumerate(leaders))
-    leaders = sorted(leaders,
-                     key=lambda e: (-wins[order_of[id(e)]], order_of[id(e)]))
-    scored = leaders + scored[PAIRWISE_RUNOFF_SIZE:]
+  # A complete file with leaky measured absences (0.02-0.06 of the mean) runs the
+  # contest too: the bucket sort put Pbmm over Pbca and P2(1) over P2(1)/c in the
+  # whole-COD misses (24 Sep 2026). Not when a leader's class is missing from the
+  # file altogether: that group is right by coverage and cannot win a pairwise test.
+  # The contest reaches every absence *pattern* among the first
+  # PAIRWISE_RUNOFF_SIZE, not only the first that many entries: a centric group
+  # and its acentric twin (Pbcm/Pbc2(1)) predict the same absences, and with the
+  # centricity key dropped the twins interleave and fill the slots -- Pbca sat
+  # 13th behind six such pairs on 7127095 (24 Sep 2026). The representative of
+  # a pattern outside the slots joins the contest; entries inside keep their
+  # order among equals.
+  sig = lambda e: (e.n_predicted_absent, e.n_coverage_absent,
+                   round(e.absence_ratio, 9))
+  sigs, first = [], {}
+  for e in scored:
+    if sig(e) not in first:
+      first[sig(e)] = e
+      if len(sigs) < PAIRWISE_RUNOFF_SIZE:
+        sigs.append(sig(e))
+  top = scored[:PAIRWISE_RUNOFF_SIZE]
+  top += [first[g] for g in sigs if not any(first[g] is e for e in top)]
+  measured = (any(e.judged_by == "intensity" for e in top)
+              and not any(e.judged_by == "coverage" and e.n_predicted_absent < 5 for e in top))
+  if (discriminating or measured) and len(scored) > 1:
+    reps = [first[g] for g in sigs]
+    wins = dict(zip(sigs, copeland_scores(f_obs_p1, reps, max_ratio=max_absence_ratio)))
+    order_of = dict((id(e), i) for i, e in enumerate(top))
+    leaders = sorted(top, key=lambda e: (-wins[sig(e)], order_of[id(e)]))
+    scored = leaders + [e for e in scored if id(e) not in order_of]
 
   # **Alpha fills the shortlist, it does not lead it.**
   #
@@ -1465,12 +1563,27 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   # wrong: 14 of 31 FAILs on 3000 COD cases were P2(1)/c behind [Pc, P2(1), P2]
   # or C2/c behind [Cc, C2, Cm]. Append the best group of the other centricity
   # as a fourth entry; the ranking above is untouched. (21 Sep 2026)
+  # The partner with the same absences as a head entry (Pna2(1) beside Pnma) goes
+  # in whatever the head looks like: on 395 solved files the pick was right 7
+  # times, the partner 40 times, and a further suggestion costs one trial. A
+  # mixed head is no evidence against the partner -- Pna2(1) sat 13th behind
+  # [Pnam, P2(1)2(1)2(1), Pnmm] with Pnam's own absences (24 Sep 2026).
+  centric_of = lambda e: e.space_group_info.group().is_centric()
+  same = lambda a, b: (a.n_predicted_absent == b.n_predicted_absent
+                       and a.n_coverage_absent == b.n_coverage_absent
+                       and abs(a.absence_ratio - b.absence_ratio) < 1e-9)
+  rest = short[n_suggestions:]
+  extra = []
+  for h in short[:n_suggestions]:
+    twin = [e for e in rest if centric_of(e) != centric_of(h) and same(e, h)]
+    if twin and twin[0] not in extra:
+      extra.append(twin[0])
   if head and len(set(head)) == 1:
-    other = [e for e in short[n_suggestions:]
-             if e.space_group_info.group().is_centric() != head[0]]
-    if other:
-      short = short[:n_suggestions] + other[:1]
-      n_suggestions += 1
+    other = [e for e in rest if centric_of(e) != head[0]]
+    if other and other[0] not in extra:
+      extra.insert(0, other[0])
+  short = short[:n_suggestions] + extra
+  n_suggestions += len(extra)
   return group_args(
     suggestions=short[:n_suggestions],
     all_candidates=scored,
