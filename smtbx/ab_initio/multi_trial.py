@@ -91,9 +91,17 @@ def solve(f_obs,
           # step and the E normalisation each lose a few structures the other
           # keeps, and a structure whose trials transition one time in ten
           # wants more of them, longer; every round starts from fresh seeds.
-          fallbacks=(dict(weak_reflection_fraction=0.3),
+          fallbacks=(# first: a map that flipped but whose symmetrisation peak
+                     # stays just under 0.9 (0.82-0.87 measured on the whole-COD
+                     # no-solution set, 24 Sep 2026) needs no new physics, only
+                     # a lower bar; the R ranking and the caller judge the model,
+                     # no solution at all is worse - and as the last round it
+                     # was the one the 120 s budget cut most often
+                     dict(min_cc_peak_height=0.75),
+                     dict(weak_reflection_fraction=0.3),
                      dict(normalisations_for=None),
-                     dict(n_trials=16, max_solving_iterations=2000)),
+                     dict(d_min=0.9, max_solving_iterations=2000),
+                     dict(n_trials=16, max_solving_iterations=5000)),
           yield_solving_interval=60,
           good_enough_cc_peak_height=0.99,
           # a solution with a worse R than this may be a symmetric wrong one,
@@ -119,7 +127,16 @@ def solve(f_obs,
           # cuts the running trials short and abandons the rest.
           stop=None,
           verbose=False,
-          out=None):
+          out=None,
+          # data cut to this resolution before solving: a fallback for a
+          # structure whose full data set will not flip (24 Sep 2026)
+          d_min=None,
+          # the solving iterator's threshold for a symmetrisation peak to be
+          # a solution; None keeps its own (0.9)
+          min_cc_peak_height=None,
+          # the first call's settings, so that every fallback round overrides
+          # those and not the previous round's (24 Sep 2026)
+          _base=None):
   """ n_trials seeded charge-flipping runs; the best solution found.
 
   Returns a group_args with `f_calc`, `shift`, `cc_peak_height` and `r1` of the
@@ -144,6 +161,8 @@ def solve(f_obs,
     out = sys.stdout
   if loop is None:
     loop = charge_flipping.loop
+  if d_min is not None and d_min > f_obs.d_min():
+    f_obs = f_obs.resolution_filter(d_min=d_min)
 
   if n_threads is None:
     try:
@@ -193,7 +212,9 @@ def solve(f_obs,
       # are exactly what this loop is taking over, and leaving them switched on
       # would mean each trial silently doing up to 25 runs and reporting one.
       max_attempts_to_get_phase_transition=1,
-      max_attempts_to_get_sharp_correlation_map=1)
+      max_attempts_to_get_sharp_correlation_map=1,
+      **({} if min_cc_peak_height is None
+         else dict(min_cc_peak_height=min_cc_peak_height)))
 
     user_stopped = False
     error = None
@@ -367,11 +388,14 @@ def solve(f_obs,
   if (fallbacks and stopped_because is None
       and (best is None or (max_seconds is not None and best[3] > retry_r1))
       and (max_seconds is None or elapsed < 0.5*max_seconds)):
-    kw = dict(n_trials=n_trials,
-              weak_reflection_fraction=weak_reflection_fraction,
-              normalisations_for=normalisations_for,
-              max_solving_iterations=max_solving_iterations,
-              fallbacks=fallbacks[1:],
+    if _base is None:
+      _base = dict(n_trials=n_trials,
+                   weak_reflection_fraction=weak_reflection_fraction,
+                   normalisations_for=normalisations_for,
+                   max_solving_iterations=max_solving_iterations, d_min=d_min,
+                   min_cc_peak_height=min_cc_peak_height)
+    kw = dict(_base,
+              fallbacks=fallbacks[1:], _base=_base,
               yield_solving_interval=yield_solving_interval,
               good_enough_cc_peak_height=good_enough_cc_peak_height,
               good_r1=good_r1, retry_r1=retry_r1,
