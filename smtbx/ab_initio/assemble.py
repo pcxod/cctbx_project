@@ -84,6 +84,7 @@ def assemble(unit_cell, space_group, sites_frac, max_sites=200):
   placed[0] = tuple(sites_frac[0])
   remaining = set(range(1, n))
   max_gap = 0.0
+  seen = {}  # (i, j) -> _nearest_image: placed[i] never moves once set
 
   while remaining:
     # The shortest link from anything placed to anything not yet placed.
@@ -93,7 +94,9 @@ def assemble(unit_cell, space_group, sites_frac, max_sites=200):
       for i in range(n):
         if placed[i] is None:
           continue
-        d, site = _nearest_image(unit_cell, placed[i], moving, space_group)
+        if (i, j) not in seen:
+          seen[i, j] = _nearest_image(unit_cell, placed[i], moving, space_group)
+        d, site = seen[i, j]
         if best is None or d < best[0]:
           best = (d, j, site)
       # Bonded contacts are ~1.2-1.6 A; nothing will beat that, so stop
