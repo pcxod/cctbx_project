@@ -287,6 +287,30 @@ def absence_ratio(f_obs_p1, space_group):
   return mean_absent/mean_rest, n_absent
 
 
+PSEUDO_CENTRING_SHARE = 0.10
+
+def pseudo_centring(f_obs_p1, symbol):
+  """ Share of the reflections a lattice centring forbids that are in the file
+  at I/sigma > 3, or 0 when there are under MIN_ABSENCES_TO_JUDGE of them or
+  no sigmas. Significance, unlike `absence_ratio`, because pseudo-centring
+  leaves the class weak on average but widely observed. """
+  from cctbx import sgtbx
+  from cctbx.array_family import flex
+  if symbol == "P" or f_obs_p1.sigmas() is None:
+    return 0.0
+  try:
+    absent = flex.bool(sgtbx.space_group("%s 1" % symbol).is_sys_absent(
+      f_obs_p1.indices()))
+  except Exception:
+    return 0.0
+  if absent.count(True) < MIN_ABSENCES_TO_JUDGE:
+    return 0.0
+  d, s = f_obs_p1.data().select(absent), f_obs_p1.sigmas().select(absent)
+  # I/sigma(I) = F/(2 sigma(F))
+  lim = 3.0 if f_obs_p1.is_xray_intensity_array() else 6.0
+  return (d > lim*s).count(True)/absent.count(True)
+
+
 # Observations per unique reflection, above which a file is taken to have
 # measured its absences rather than merged them away. Redundancy 1.0 means one
 # observation each: the systematically absent classes are simply not in the
@@ -1582,6 +1606,17 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
     other = [e for e in rest if centric_of(e) != head[0]]
     if other and other[0] not in extra:
       extra.insert(0, other[0])
+  # Pseudo-centring: a head of centred groups whose forbidden class is in the
+  # file and significant is a heavy-atom substructure, not centring -- 42
+  # P2(1)/c on the 10k COD gate sat behind [C2/m, C2, Cm] with 17-76 % of the
+  # A/I class over 3 sigma, while that class is missing from 1362 of 1385
+  # genuinely centred COD files. Append the best primitive group (4 Oct 2026).
+  lattice = lambda e: e.space_group_info.group().conventional_centring_type_symbol()
+  if (short[:n_suggestions] and "P" not in [lattice(e) for e in short[:n_suggestions]]
+      and pseudo_centring(f_obs_p1, lattice(short[0])) > PSEUDO_CENTRING_SHARE):
+    prim = [e for e in rest if lattice(e) == "P"]
+    if prim and prim[0] not in extra:
+      extra.insert(0, prim[0])
   short = short[:n_suggestions] + extra
   n_suggestions += len(extra)
   return group_args(
