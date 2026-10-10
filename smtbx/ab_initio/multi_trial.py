@@ -111,7 +111,7 @@ def solve(f_obs,
           # as a poorly converged right one, so it earns the fallback rounds
           # too when a time budget bounds them; the lower-R result of the
           # rounds is returned, never nothing
-          retry_r1=0.4,
+          retry_r1=0.3,
           max_seconds=None,
           first_seed=1,
           initial_phases_list=None,
