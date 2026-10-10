@@ -9,9 +9,124 @@
 #include <cctbx/miller/lookup_utils.h>
 #include <cctbx/xray/scatterer_lookup.h>
 #include <fstream>
+#include <cstdio>
+#include <set>
 #include <stdint.h>
 
 namespace smtbx { namespace structure_factors { namespace table_based {
+
+#if defined(_WIN32)
+  /** The path as the wide Win32 file APIs want it, or false if it is not UTF-8.
+
+      Boost.Python hands a Python str over as UTF-8, and the narrow fopen and
+      ifstream read that in the process's ANSI code page. A path with anything
+      outside that page -- a folder named in Chinese on a Western Windows --
+      cannot be opened by them at all, whatever bytes it is spelled in. The
+      wide overloads take UTF-16, which holds every path there is.
+
+      Decoded by hand rather than through <windows.h>, which this header would
+      then push, min/max macros and all, into everything that includes it.
+      Bytes that are not UTF-8 are left to the narrow open, so a caller still
+      passing an ANSI-encoded path is served the way it always was.
+   */
+  inline bool utf8_to_wide(const std::string &utf8, std::wstring &wide) {
+    wide.clear();
+    wide.reserve(utf8.size());
+    for (std::size_t i = 0; i < utf8.size();) {
+      const unsigned char c = static_cast<unsigned char>(utf8[i]);
+      unsigned int cp;
+      std::size_t n;
+      if (c < 0x80) { cp = c; n = 1; }
+      else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
+      else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
+      else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
+      else return false;
+      if (i + n > utf8.size()) return false;
+      for (std::size_t k = 1; k < n; k++) {
+        const unsigned char cc = static_cast<unsigned char>(utf8[i + k]);
+        if ((cc & 0xC0) != 0x80) return false;
+        cp = (cp << 6) | (cc & 0x3F);
+      }
+      if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
+      if (cp >= 0x10000) {
+        cp -= 0x10000;
+        wide.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
+        wide.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
+      }
+      else {
+        wide.push_back(static_cast<wchar_t>(cp));
+      }
+      i += n;
+    }
+    return true;
+  }
+#endif
+
+  /// fopen that can reach a path outside the ANSI code page on Windows
+  inline std::FILE *open_for_reading(const std::string &name) {
+#if defined(_WIN32)
+    std::wstring wide;
+    if (utf8_to_wide(name, wide)) {
+      return _wfopen(wide.c_str(), L"rb");
+    }
+#endif
+    return std::fopen(name.c_str(), "rb");
+  }
+
+  /// ifstream::open that can reach a path outside the ANSI code page on Windows
+  inline void open_stream(std::ifstream &stream, const std::string &name,
+    std::ios::openmode mode)
+  {
+#if defined(_WIN32)
+    std::wstring wide;
+    if (utf8_to_wide(name, wide)) {
+      stream.open(wide.c_str(), mode);
+      return;
+    }
+#endif
+    stream.open(name.c_str(), mode);
+  }
+
+  /** A read-only file handle over C stdio.
+
+      std::ifstream reads a .tscb at about 1.3 GB/s on this platform where the
+      same bytes through fread go at 2.9, measured on a real 3.5 GB table with
+      both arms returning identical data. Chunking the ifstream does not help,
+      so it is the stream itself and not the per-call overhead. A protein table
+      is measured in gigabytes, so this is worth a handle of its own.
+
+      fread is portable; only the 64-bit seek needs platform code, because
+      fseek takes a long and that is 32 bits on Windows.
+   */
+  class c_file {
+    std::FILE *f_;
+    c_file(const c_file &);
+    c_file &operator=(const c_file &);
+  public:
+    explicit c_file(const std::string &name) : f_(open_for_reading(name)) {}
+    ~c_file() { if (f_ != NULL) std::fclose(f_); }
+    bool ok() const { return f_ != NULL; }
+    bool seek(std::streamoff offset) {
+#if defined(_WIN32)
+      return _fseeki64(f_, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+      return fseeko(f_, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+    }
+    /// false means a short read, which every caller treats as a malformed table
+    bool read(void *dst, std::size_t bytes) {
+      return std::fread(dst, 1, bytes, f_) == bytes;
+    }
+    /// step over bytes without moving them; used for rows nobody will ask for
+    bool skip(std::streamoff bytes) {
+#if defined(_WIN32)
+      return _fseeki64(f_, static_cast<__int64>(bytes), SEEK_CUR) == 0;
+#else
+      return fseeko(f_, static_cast<off_t>(bytes), SEEK_CUR) == 0;
+#endif
+    }
+  };
+
 
   template <typename FloatType>
   class table_data {
@@ -78,6 +193,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
   private:
     typedef table_data<FloatType> parent_t;
     const uctbx::unit_cell& u_cell;
+    // empty means keep everything; otherwise rows outside it are skipped
+    std::set<cctbx::miller::index<>, cctbx::miller::fast_less_than<> > wanted_;
 
     void read(af::shared<xray::scatterer<float_type> > const& scatterers,
       const std::string &file_name)
@@ -85,7 +202,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       using namespace std;
     //   typedef cctbx::xray::scatterer_id_5<float_type, fractional<float_type>, 16> scatterer_id_t;
     typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
-      ifstream in_file(file_name.c_str());
+      ifstream in_file;
+      open_stream(in_file, file_name, ios::in);
       string line;
       vector<std::string> toks;
       size_t lc = 0;
@@ -214,13 +332,102 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       }
     }
 
+    /* the marker SCATTERER_IDS named an 8-byte record before 29 July 2026 and a
+    16-byte one after, and the format carries no width. Read at the wrong width
+    the ids are not rejected, they are silently misframed, and the failure
+    surfaces much later as a table that matches no atom.
+
+    The id block is not length-prefixed but everything after it is: the int that
+    follows it is the reflection count and the rest of the file is that many rows
+    of three int indices plus one complex<double> per column. Only the true width
+    divides evenly, so the file states its own format even where the header does
+    not. Leaves the stream where it found it.
+    */
+    static void check_id_record_size(std::ifstream &tsc_file,
+      const std::string &file_name, const std::string &header_str, std::size_t n_columns)
+    {
+      typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
+      const std::size_t current = sizeof(scatterer_id_t), legacy = 8;
+      const std::streamoff id_block_start = tsc_file.tellg();
+      std::size_t width = declared_id_bytes(header_str);
+      if (width == 0) {
+        tsc_file.seekg(0, std::ios::end);
+        const std::streamoff total = tsc_file.tellg();
+        const std::streamoff row_bytes = static_cast<std::streamoff>(
+          3 * sizeof(int) + n_columns * sizeof(std::complex<double>));
+        const std::size_t candidates[2] = { current, legacy };
+        for (int i = 0; i < 2; i++) {
+          const std::streamoff end = id_block_start
+            + static_cast<std::streamoff>(n_columns * candidates[i]);
+          if (end + static_cast<std::streamoff>(sizeof(int)) > total) {
+            continue;
+          }
+          tsc_file.seekg(end);
+          int nr_hkl = 0;
+          tsc_file.read((char *)&nr_hkl, sizeof(int));
+          if (nr_hkl <= 0) {
+            continue;
+          }
+          if (total - end - static_cast<std::streamoff>(sizeof(int))
+              == static_cast<std::streamoff>(nr_hkl) * row_bytes)
+          {
+            width = candidates[i];
+            break;
+          }
+        }
+        tsc_file.clear();
+        tsc_file.seekg(id_block_start);
+      }
+      if (width == sizeof(scatterer_id_t)) {
+        return;
+      }
+      if (width == legacy) {
+        throw SMTBX_ERROR(("'" + file_name + "' holds 8-byte scatterer ids, the format"
+          " written between 12 and 29 July 2026; this build reads the 16-byte format."
+          " Recalculate the table.").c_str());
+      }
+      if (width == 0) {
+        throw SMTBX_ERROR(("cannot determine the scatterer id width of '" + file_name +
+          "': it declares none and its size fits neither known width, so it is"
+          " truncated, damaged or written by an unknown version").c_str());
+      }
+      throw SMTBX_ERROR(("'" + file_name + "' declares an id width this build cannot"
+        " read").c_str());
+    }
+
+    // the width the header declares, or 0 if it declares none
+    static std::size_t declared_id_bytes(const std::string &header_str)
+    {
+      std::vector<std::string> lines;
+      boost::split(lines, header_str, boost::is_any_of("\n"));
+      for (std::size_t i = 0; i < lines.size(); i++) {
+        std::size_t ci = lines[i].find(':');
+        if (ci == std::string::npos) {
+          continue;
+        }
+        std::string key = boost::trim_copy(lines[i].substr(0, ci));
+        if (!boost::iequals(key, "ID_BYTES")) {
+          continue;
+        }
+        try {
+          return boost::lexical_cast<std::size_t>(
+            boost::trim_copy(lines[i].substr(ci + 1)));
+        }
+        catch (const boost::bad_lexical_cast &) {
+          return 0;
+        }
+      }
+      return 0;
+    }
+
     void read_binary(af::shared<xray::scatterer<float_type> > const &scatterers,
       const std::string &file_name)
     {
       using namespace std;
     //   typedef cctbx::xray::scatterer_id_5<float_type, fractional<float_type>, 16> scatterer_id_t;
       typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
-      ifstream tsc_file(file_name.c_str(), ios::binary);
+      ifstream tsc_file;
+      open_stream(tsc_file, file_name, ios::in | ios::binary);
       const size_t charsize = sizeof(char);
       const size_t intsize = sizeof(int);
       const size_t uint64size = sizeof(uint64_t);
@@ -255,6 +462,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       parent_t::covered_ = af::shared<bool>(nr_scat, false);
       if (boost::icontains(header_str, "SCATTERER_IDS")) {
         n_columns = sc_len;
+        check_id_record_size(tsc_file, file_name, header_str, n_columns);
         sc_indices.assign(n_columns, ~0);
         af::shared<int> data(nr_scat);
         for (size_t sci = 0; sci < nr_scat; sci++) {
@@ -297,6 +505,20 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       //read number of indices in tscb file
       int nr_hkl[1] = { 0 };
       tsc_file.read((char*)&nr_hkl, intsize);
+
+      // Everything above is a few kilobytes; everything below is the table, and
+      // for a protein that is gigabytes - 22 GB for an 8,566-atom structure.
+      // std::ifstream moves those bytes at about 1.3 GB/s while the same reads
+      // through C stdio go at 2.9, measured on a real 3.5 GB table with both
+      // arms returning identical data. Chunking the ifstream does not help, so
+      // it is the stream itself and not the per-call overhead.
+      //
+      // The header keeps the stream because scatterer_id_t is constructed from
+      // an istream; only the payload changes hands.
+      const std::streamoff payload_start = tsc_file.tellg();
+      c_file payload(file_name);
+      SMTBX_ASSERT(payload.ok());
+      SMTBX_ASSERT(payload.seek(payload_start));
       //read indices and scattering factors row by row
       int index[3] = { 0,0,0 };
       // a row of the file is as wide as the table, a row of the model as wide
@@ -317,21 +539,32 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           }
         }
       }
+      // With a filter the kept count is not known in advance, so rows are
+      // appended and the oversized reserve above is trimmed at the end.
+      const bool filtering = !wanted_.empty();
+      const std::streamoff row_bytes =
+        static_cast<std::streamoff>(n_columns * complex_doublesize);
+      std::size_t kept = 0;
       for (int run = 0; run < *nr_hkl; run++) {
-        tsc_file.read((char*)&index, 3*intsize);
+        SMTBX_ASSERT(payload.read(&index, 3*intsize));
         cctbx::miller::index<> mi(index[0], index[1], index[2]);
+        if (filtering && wanted_.find(mi) == wanted_.end()) {
+          // never asked for: step over the row instead of storing it
+          SMTBX_ASSERT(payload.skip(row_bytes));
+          continue;
+        }
         parent_t::miller_indices_.push_back(mi);
         // an atom the table misses keeps a zero here and is served elsewhere
-        vector<complex_type> &target = parent_t::data_[run];
+        vector<complex_type> &target = parent_t::data_[kept++];
         target.assign(nr_scat, complex_type(0));
         if (scatterers_are_in_file_order) {
-          tsc_file.read((char*)target.data(), nr_scat * complex_doublesize);
+          SMTBX_ASSERT(payload.read(target.data(), nr_scat * complex_doublesize));
         }
         else {
           // A read per scatterer spends more in stream bookkeeping than it
           // moves, and a table holds one row per reflection: take the row in one
           // read and put the scatterers in their places afterwards.
-          tsc_file.read((char*)&buffer[0], n_columns * complex_doublesize);
+          SMTBX_ASSERT(payload.read(&buffer[0], n_columns * complex_doublesize));
           for (size_t i = 0; i < n_columns; i++) {
             if (sc_indices[i] != ~0) {
               target[sc_indices[i]] = buffer[i];
@@ -339,16 +572,54 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           }
         }
       }
+      if (filtering) {
+        parent_t::data_.resize(kept);
+      }
       tsc_file.close();
       SMTBX_ASSERT(!tsc_file.bad());
     }
 
   public:
+    /** wanted: the Miller indices this table will ever be asked for, or empty
+        to keep every row as before.
+
+        A .tscb is generated over the whole index box of the reflection FILE so
+        that SHEL and OMIT cannot invalidate it, and a box holds far more than
+        the measurement inside it - for 1IEE, 958,467 rows against 72,347
+        measured reflections. Every row is loaded and only 7.5% of them can ever
+        be reached through get(), which cost 48 GB of resident memory.
+
+        The caller passes the indices it will ask for; +-h is added here rather
+        than left to the caller, because a binary table is always expanded and
+        may store the opposite Friedel half to the one the data lists - which is
+        exactly what 1IEE does, table h -81..0 against data h 0..81. Forgetting
+        that closure would drop every row the refinement needs.
+     */
     table_reader(const uctbx::unit_cell& u_cell,
       af::shared<xray::scatterer<float_type> > const &scatterers,
-      const std::string &file_name)
+      const std::string &file_name,
+      sgtbx::space_group const &space_group,
+      af::shared<cctbx::miller::index<> > const &wanted =
+        af::shared<cctbx::miller::index<> >())
       : u_cell(u_cell)
     {
+      // The rows that must survive are NOT the wanted indices, nor those closed
+      // under +-h. lookup_based_anisotropic::resolve_rows() walks h * R for every
+      // rotation of the space group and asserts each one is present, falling back
+      // to -h only when the data are not anomalous. So the closure is the full
+      // ORBIT of every wanted index, plus Friedel mates.
+      //
+      // Getting this wrong is not a slow answer but a dead one: filtering to +-h
+      // alone dropped (0,1,-4) on 1IEE, in P 4(3) 2(1) 2, and the first build_up
+      // asserted. The expansion belongs here, next to the reader, and not in any
+      // caller - a caller cannot be expected to know resolve_rows() exists.
+      for (std::size_t i = 0; i < wanted.size(); i++) {
+        for (std::size_t j = 0; j < space_group.n_smx(); j++) {
+          cctbx::miller::index<> h = wanted[i] * space_group.smx(j).r();
+          wanted_.insert(h);
+          wanted_.insert(cctbx::miller::index<>(-h[0], -h[1], -h[2]));
+        }
+      }
       if(file_name.find(".tscb")!=std::string::npos){
         read_binary(scatterers, file_name);
       }
@@ -841,10 +1112,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         af::shared< xray::scatterer<FloatType> > const &scatterers,
         std::string const &file_name,
         sgtbx::space_group const &space_group,
-        bool anomalous_flag)
+        bool anomalous_flag,
+        af::shared<cctbx::miller::index<> > const &wanted =
+          af::shared<cctbx::miller::index<> >())
     {
       return build_impl(u_cell, scatterers, file_name, space_group,
-        anomalous_flag, 0);
+        anomalous_flag, 0, wanted);
     }
 
     static direct::one_scatterer_one_h::scatterer_contribution<FloatType> *
@@ -854,10 +1127,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         std::string const &file_name,
         sgtbx::space_group const &space_group,
         bool anomalous_flag,
-        xray::scattering_type_registry const &scattering_type_registry)
+        xray::scattering_type_registry const &scattering_type_registry,
+        af::shared<cctbx::miller::index<> > const &wanted =
+          af::shared<cctbx::miller::index<> >())
     {
       return build_impl(u_cell, scatterers, file_name, space_group,
-        anomalous_flag, &scattering_type_registry);
+        anomalous_flag, &scattering_type_registry, wanted);
     }
 
     static direct::one_scatterer_one_h::scatterer_contribution<FloatType> *
@@ -867,9 +1142,11 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         std::string const &file_name,
         sgtbx::space_group const &space_group,
         bool anomalous_flag,
-        xray::scattering_type_registry const *scattering_type_registry)
+        xray::scattering_type_registry const *scattering_type_registry,
+        af::shared<cctbx::miller::index<> > const &wanted =
+          af::shared<cctbx::miller::index<> >())
     {
-      table_reader<FloatType> data(u_cell, scatterers, file_name);
+      table_reader<FloatType> data(u_cell, scatterers, file_name, space_group, wanted);
       if(!data.use_AD()){
         anomalous_flag = false;
       }
