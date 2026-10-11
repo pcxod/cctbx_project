@@ -329,9 +329,10 @@ class reparametrisation(ext.reparametrisation):
     return occ
 
   def add_new_site_parameter(self, i_scatterer, symm_op=None):
-    if i_scatterer in self.shared_sites:
-      return self.shared_sites[i_scatterer]
-    s = self.asu_scatterer_parameters[i_scatterer].site
+    # an EXYZ follower shares its reference's parameter; a symmetry copy of it
+    # still needs symm_op below
+    s = self.shared_sites.get(i_scatterer,
+                              self.asu_scatterer_parameters[i_scatterer].site)
     if s is None:
       site_symm = self.site_symmetry_table_.get(i_scatterer)
       sc = self.structure.scatterers()[i_scatterer]
