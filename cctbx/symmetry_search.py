@@ -150,7 +150,9 @@ class structure_factor_symmetry(object):
       if t.count(0) > 1: continue
       unique_denominators = list(dict(
         [ (r.denominator(), 1) for r in t if r.numerator() != 0 ]).keys())
-      assert len(unique_denominators) in (0, 1)
+      # ponytail: mixed denominators (1/2,1/3,0) are a spurious peak, not a
+      # centring; skip it instead of aborting the whole search
+      if len(unique_denominators) > 1: continue
       if len(unique_denominators) == 1:
         den = unique_denominators[0]
         num = [ r.numerator() for r in t ]
