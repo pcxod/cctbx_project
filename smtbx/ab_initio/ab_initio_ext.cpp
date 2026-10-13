@@ -8,7 +8,10 @@
 #include <scitbx/array_family/accessors/c_grid_padded.h>
 #include <scitbx/array_family/accessors/flex_grid.h>
 
+#include <boost/python/init.hpp>
+
 #include <smtbx/ab_initio/density_modification.h>
+#include <smtbx/ab_initio/charge_flipping_cycle.h>
 #include <cctbx/miller/phase_transfer.h>
 #include <smtbx/error.h>
 
@@ -100,9 +103,35 @@ namespace smtbx { namespace ab_initio { namespace boost_python {
     }
   };
 
+  void charge_flipping_cycle_run(charge_flipping_cycle& self, double delta) {
+    gil_release nogil;
+    self.run(delta);
+  }
+
   void init_module() {
     density_modification_wrapper<double, af::c_grid_padded<3> >::wrap();
     density_modification_wrapper<double, af::flex_grid<> >::wrap();
+    using namespace boost::python;
+    typedef charge_flipping_cycle wt;
+    class_<wt>("charge_flipping_cycle", no_init)
+      .def(init<af::tiny<int, 3> const&,
+                af::const_ref<cctbx::miller::index<> > const&,
+                af::const_ref<double> const&,
+                af::const_ref<cctbx::miller::index<> > const&,
+                double, double, std::size_t, double>(
+           (arg("n_real"), arg("indices_obs"), arg("f_obs"),
+            arg("indices_free"), arg("fft_scale"), arg("volume_scale"),
+            arg("cut"), arg("delta_varphi"))))
+      .def("load", &wt::load)
+      .def("run", charge_flipping_cycle_run)
+      .def("sigma", &wt::sigma)
+      .def("skewness", &wt::skewness)
+      .def("f_calc", &wt::f_calc)
+      .def("f_calc_free", &wt::f_calc_free)
+      .def("g_obs", &wt::g_obs)
+      .def("f_000", &wt::f_000)
+      .def("g_000", &wt::g_000)
+      ;
   }
 
 }}} // namespace smtbx::ab_initio::boost_python

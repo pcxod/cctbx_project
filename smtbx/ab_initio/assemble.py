@@ -74,6 +74,7 @@ def assemble(unit_cell, space_group, sites_frac, max_sites=200):
   truncated to the strongest, because assembling several hundred noise peaks
   costs more than it informs.
   """
+  import numpy as np
   from scitbx.array_family import flex
 
   n = min(sites_frac.size(), max_sites)
@@ -84,31 +85,40 @@ def assemble(unit_cell, space_group, sites_frac, max_sites=200):
   placed[0] = tuple(sites_frac[0])
   remaining = set(range(1, n))
   max_gap = 0.0
-  seen = {}  # (i, j) -> _nearest_image: placed[i] never moves once set
-
+  # _nearest_image for the newest placed atom against every unplaced one in
+  # one array pass; cm/ci/cs hold, per unplaced j, the nearest placed image
+  # with ties going to the lowest i, so the scan below picks what the
+  # pairwise loop picked (op, then shift, then i, then j in set order)
+  ops = space_group.all_ops()
+  img = np.array([[op * tuple(sites_frac[j]) for op in ops] for j in range(n)])
+  sh = np.array(_SHIFTS, float)
+  o = unit_cell.orthogonalization_matrix()
+  cm, ci, cs = np.full(n, np.inf), np.full(n, n), np.zeros((n, 3))
+  p = 0
   while remaining:
-    # The shortest link from anything placed to anything not yet placed.
-    best = None
-    for j in remaining:
-      moving = tuple(sites_frac[j])
-      for i in range(n):
-        if placed[i] is None:
-          continue
-        if (i, j) not in seen:
-          seen[i, j] = _nearest_image(unit_cell, placed[i], moving, space_group)
-        d, site = seen[i, j]
-        if best is None or d < best[0]:
-          best = (d, j, site)
-      # Bonded contacts are ~1.2-1.6 A; nothing will beat that, so stop
-      # scanning once such a link is found. Without this the search is
-      # O(n^2) per placement and O(n^3) overall, which is minutes for a
-      # 200-peak list rather than seconds.
-      if best is not None and best[0] < 1.2:
-        break
-    d, j, site = best
-    placed[j] = site
+    js = np.array(sorted(remaining))
+    t = np.array(placed[p])
+    cand = (img[js] - np.round(img[js] - t))[:, :, None, :] + sh
+    dv = t - cand
+    x = o[0]*dv[..., 0] + o[1]*dv[..., 1] + o[2]*dv[..., 2]
+    y = o[3]*dv[..., 0] + o[4]*dv[..., 1] + o[5]*dv[..., 2]
+    z = o[6]*dv[..., 0] + o[7]*dv[..., 1] + o[8]*dv[..., 2]
+    d = np.sqrt(x*x + y*y + z*z).reshape(len(js), -1)
+    k = d.argmin(axis=1)
+    d = d[np.arange(len(js)), k]
+    up = (d < cm[js]) | ((d == cm[js]) & (p < ci[js]))
+    cm[js[up]], ci[js[up]] = d[up], p
+    cs[js[up]] = cand.reshape(len(js), -1, 3)[np.arange(len(js)), k][up]
+    # Bonded contacts are ~1.2-1.6 A; nothing will beat that, so the scan
+    # stops at the first such link, as the pairwise loop did
+    order = list(remaining)
+    m = cm[order]
+    s = np.flatnonzero(m < 1.2)
+    j = order[int(m[:s[0] + 1].argmin() if len(s) else m.argmin())]
+    placed[j] = tuple(float(v) for v in cs[j])
     remaining.discard(j)
-    max_gap = max(max_gap, d)
+    max_gap = max(max_gap, float(cm[j]))
+    p = j
 
   out = flex.vec3_double(len(placed))
   for i, site in enumerate(placed):

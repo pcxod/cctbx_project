@@ -51,6 +51,16 @@ class shift_refinement(object):
     self.f_obs = f_obs
     self.fc_in_p1 = fc_in_p1
     self.initial_shift = initial_shift
+    # what symmetrised_shifted_structure_factors and its misfit build without
+    # depending on the shift (the P1 f_calc map, F^2, multiplicities) is built
+    # once here, not on every L-BFGS evaluation; the same arithmetic
+    assert f_obs.unit_cell().is_similar_to(fc_in_p1.unit_cell())
+    assert f_obs.is_xray_amplitude_array() or f_obs.is_xray_intensity_array()
+    self._f_c_map = miller.f_calc_map(fc_in_p1.indices(), fc_in_p1.data(),
+                                      f_obs.anomalous_flag())
+    self._f_o_sq = (f_obs.f_as_f_sq() if f_obs.is_xray_amplitude_array()
+                    else f_obs).data()
+    self._mult = f_obs.multiplicities().data().as_double()
     self.x = flex.double(self.initial_shift)
     self.initial_goos = None
     scitbx.lbfgs.run(self,
@@ -58,14 +68,14 @@ class shift_refinement(object):
                        traditional_convergence_test_eps=0.01))
     self.shift = mat.col(self.x)
     del self.x
+    self.f_x = miller.array(f_obs, self.f_x)
 
   def compute_functional_and_gradients(self):
-    sssf = symmetrised_shifted_structure_factors(self.f_obs,
-                                                 self.fc_in_p1,
-                                                 tuple(self.x),
-                                                 compute_gradient=True)
-    self.symmetrised_shifted_sf = sssf
-    goos = sssf.misfit(self.f_obs)
+    s = ext.symmetrised_shifted_structure_factors(
+      self.f_obs.space_group(), self.f_obs.indices(), self._f_c_map,
+      tuple(self.x), True)
+    self.f_x = s.f_x
+    goos = ls_with_scale_and_bias(s.f_x, s.grad_f_x, self._f_o_sq, self._mult)
     if self.initial_goos is None:
       self.initial_goos = goos
     self.goos = goos

@@ -78,6 +78,13 @@ class Model(object):
     if meta.get("out_activation") != "softmax":
       raise ValueError("only a softmax output is supported, got %s"
                        % meta.get("out_activation"))
+    # The PCA projection is the whole cost of the classifier, and the c_only
+    # model was trained on all-carbon environments: 746 of its 42042 columns
+    # are nonzero, so only those are multiplied. The gather costs more than it
+    # saves on a dense model (full: 49049 of 49686).
+    j = np.flatnonzero(np.any(self.components != 0, axis=0))
+    self._cols = ((j, self.mean[j], np.ascontiguousarray(self.components[:, j].T))
+                  if len(j) < self.n_features//2 else ())
 
   def probabilities(self, descriptors):
     """ (n_atoms, n_classes) class probabilities for a descriptor block. """
@@ -91,7 +98,8 @@ class Model(object):
         "descriptor has %d features, the model expects %d -- these come from "
         "different SOAP hyperparameters, and the result would be meaningless "
         "rather than merely worse" % (x.shape[1], self.n_features))
-    x = (x - self.mean).dot(self.components.T)
+    c = self._cols
+    x = (x[:, c[0]] - c[1]).dot(c[2]) if c else (x - self.mean).dot(self.components.T)
     if self.whiten_scale is not None:
       x = x/self.whiten_scale
     for w, b in self.layers[:-1]:

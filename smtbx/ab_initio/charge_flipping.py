@@ -42,6 +42,7 @@ from cctbx.array_family import flex
 from cctbx import sgtbx
 from cctbx import miller
 from cctbx import maptbx
+from cctbx import crystal
 from cctbx import translation_search
 from cctbx import symmetry_search
 
@@ -302,6 +303,92 @@ class weak_reflection_improved_iterator(basic_iterator):
       self.weak_reflection_fraction,
       need_sorting=False)
 
+  # The whole cycle in one C++ call over a persistent map (ext.
+  # charge_flipping_cycle), the same bits as the steps above. f_calc,
+  # f_calc_free, _g, _g_000 and f_000 come out of it only when read; rho_map
+  # answers sigma() and skewness() from it and builds the fft_map for anything
+  # else. Anything that recomputes the map (normalise) ends the fused run with
+  # what the caller changed kept, and the next cycle starts a new one.
+  _cf_attributes = ('f_calc', 'f_calc_free', '_g', '_g_000', 'f_000')
+
+  def _cf_lazy(self):
+    # without a free set f_calc_free is the empty set start() made, not C++'s
+    if self.f_free.size(): return self._cf_attributes
+    return self._cf_attributes[:1] + self._cf_attributes[2:]
+
+  def __getattr__(self, k):
+    d = self.__dict__
+    if k not in self._cf_attributes or not d.get('_cf_live'):
+      raise AttributeError(k)
+    c = d['_cf']
+    if k == 'f_calc': v = miller.array(d['f_obs'], c.f_calc())
+    elif k == 'f_calc_free': v = miller.array(d['f_free'], c.f_calc_free())
+    elif k == '_g': v = miller.array(d['f_obs'], c.g_obs())
+    elif k == 'f_000': v = c.f_000()
+    else: v = c.g_000()
+    d[k] = v
+    return v
+
+  def compute_electron_density_map(self):
+    d = self.__dict__
+    if d.get('_cf_live'):
+      for k in self._cf_lazy(): getattr(self, k)
+      d['_cf_live'] = False
+      d['_cf_n'] += 1
+    super(weak_reflection_improved_iterator,
+          self).compute_electron_density_map()
+
+  def __next__(self):
+    d = self.__dict__
+    if not d.get('_cf_live'):
+      d['_cf'] = ab_initio.ext.charge_flipping_cycle(
+        n_real=self.crystal_gridding.n_real(),
+        indices_obs=self.f_obs.indices(),
+        f_obs=self.f_obs.data(),
+        indices_free=self.f_free.indices(),
+        fft_scale=self.fft_scale,
+        volume_scale=1/self.f_obs.unit_cell().volume(),
+        cut=int(self.weak_reflection_fraction*self.f_obs.size()),
+        delta_varphi=self.delta_varphi)
+      d['_cf'].load(self.rho_map.real_map())
+      d['_cf_live'] = True
+      d.setdefault('_cf_n', 0)
+    d['_cf'].run(self.delta)
+    d['_cf_n'] += 1
+    for k in self._cf_lazy(): d.pop(k, None)
+    self.rho_map = _fused_rho_map(self)
+    return self
+
+
+class _fused_rho_map(object):
+  """ rho_map of weak_reflection_improved_iterator after a fused cycle """
+
+  def __init__(self, it):
+    self.it, self.n, self.m = it, it._cf_n, None
+
+  def _check(self):
+    if not self.it.__dict__.get('_cf_live') or self.it._cf_n != self.n:
+      raise RuntimeError('fused rho_map read after its cycle')
+
+  def sigma(self):
+    self._check()
+    return self.it._cf.sigma()
+
+  def skewness(self):
+    self._check()
+    return self.it._cf.skewness()
+
+  def __getattr__(self, k):
+    if k.startswith('__'): raise AttributeError(k)
+    if self.m is None:
+      self._check()
+      it = self.it
+      f = it.f_calc
+      if it.f_free.size(): f = f.concatenate(it.f_calc_free)
+      self.m = miller.fft_map(it.crystal_gridding, f, it.f_000)
+      self.m.apply_volume_scaling()
+    return getattr(self.m, k)
+
 
 class low_density_elimination_iterator(density_modification_iterator):
   """ A method related to charge flipping.
@@ -332,6 +419,12 @@ class low_density_elimination_iterator(density_modification_iterator):
 
 
 max_shift_refinements = 3
+
+# crystal_gridding.tags() builds the symmetry tags of the whole grid (0.01-0.11
+# s) and was rebuilt on every call although it depends only on the gridding and
+# the space group. peak_list writes into the tag array it is given, so one
+# pristine copy is kept and each search gets a fresh copy of it
+_tags_cache = {}
 
 def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
   # The fast correlation map as per cctbx.translation_search.fast_nv1995
@@ -366,7 +459,7 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
                        unit_cell=f_calc_in_p1.unit_cell(),
                        positive_iso_level=0.8)
 
-  search_parameters = maptbx.peak_search_parameters(
+  p = maptbx.peak_search_parameters(
     peak_search_level=1,
     peak_cutoff=0.5,
     interpolate=True,
@@ -374,9 +467,30 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
     general_positions_only=False,
     min_cross_distance=f_obs.d_min()/2)
   ## The correlation map is not a miller.fft_map, just a 3D flex.double
-  correlation_map_peaks = crystal_gridding.tags().peak_search(
-    map=correlation_map,
-    parameters=search_parameters)
+  # crystal_gridding_tags.peak_search with the tag array taken from the cache
+  key = (tuple(crystal_gridding.n_real()),
+         crystal_gridding.space_group_info().type().hall_symbol())
+  tags = _tags_cache.get(key)
+  if tags is None:
+    if len(_tags_cache) > 8: _tags_cache.clear()
+    tags = _tags_cache[key] = \
+      crystal_gridding.tags().tags().tag_array().deep_copy()
+  grid_peaks = maptbx.peak_list(
+    data=correlation_map, tags=tags.deep_copy(),
+    peak_search_level=p.peak_search_level(), max_peaks=p.max_peaks(),
+    peak_cutoff=p.peak_cutoff(), interpolate=p.interpolate())
+  correlation_map_peaks = maptbx.peak_cluster_analysis(
+    peak_list=grid_peaks,
+    special_position_settings=crystal.special_position_settings(
+      crystal_symmetry=crystal_gridding.crystal_symmetry(),
+      min_distance_sym_equiv=p.min_distance_sym_equiv()),
+    general_positions_only=p.general_positions_only(),
+    effective_resolution=p.effective_resolution(),
+    significant_height_fraction=p.significant_height_fraction(),
+    cluster_height_fraction=p.cluster_height_fraction(),
+    min_cross_distance=p.min_cross_distance(),
+    max_clusters=p.max_clusters(),
+    min_cubicle_edge=p.min_cubicle_edge())
   # iterate over the strong peak; for each, shift and symmetrised f_calc
   # ponytail: only the first solution is ever used, and each shift refinement
   # is ~30 ms of Python-driven LBFGS -- 78 per trial was 91 % of a trial
@@ -384,7 +498,7 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
     if peak.height < min_cc_peak_height or i >= max_shift_refinements: break
     sr = symmetry_search.shift_refinement(
       f_obs, f_calc_in_p1, peak.site)
-    yield sr.symmetrised_shifted_sf.f_x, sr.shift, sr.goos.correlation
+    yield sr.f_x, sr.shift, sr.goos.correlation
 
 
 def amplitude_quasi_normalisations(f_obs):
