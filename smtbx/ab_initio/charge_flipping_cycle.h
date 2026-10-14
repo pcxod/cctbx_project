@@ -1,6 +1,95 @@
 #ifndef SMTBX_AB_INITIO_CHARGE_FLIPPING_CYCLE_H
 #define SMTBX_AB_INITIO_CHARGE_FLIPPING_CYCLE_H
 
+#include <cmath>
+#include <cstddef>
+
+/* The line transforms run four lines at a time: scitbx fftpack instantiated
+   on a four-double lane type, every lane the scalar operation sequence of one
+   line, so the same roundings (no FMA: SSE2/AVX have none, and the portable
+   loops must not be contracted). x64 gets two SSE2 registers, the baseline;
+   AVX only where the build asks for it (libtbx configure
+   --msvc_arch_flag=AVX|AVX2, which defines __AVX__), never on gcc/clang,
+   whose __m256d loads assume 32-byte alignment that af::shared does not give.
+   The std overloads must be declared before fftpack is first included: its
+   templates name std::sqrt etc. qualified.
+ */
+#if defined(_MSC_VER)
+#define SMTBX_CF_FI __forceinline
+#else
+#define SMTBX_CF_FI inline __attribute__((always_inline))
+#endif
+#if defined(_MSC_VER) && defined(__AVX__)
+#define SMTBX_CF_AVX
+#include <immintrin.h>
+#elif defined(_M_X64) || defined(__x86_64__)
+#define SMTBX_CF_X64
+#include <emmintrin.h>
+#endif
+namespace smtbx { namespace ab_initio { namespace cf_lanes {
+#if defined(SMTBX_CF_AVX)
+  // the vector is the member, so MSVC keeps it in a register; d is the view
+  // the gathers and scatters use
+  struct L {
+    union { __m256d v; double d[4]; };
+    SMTBX_CF_FI L() : v(_mm256_setzero_pd()) {}
+    SMTBX_CF_FI L(__m256d x) : v(x) {}
+    template <class T> SMTBX_CF_FI L(T x) : v(_mm256_set1_pd((double)x)) {}
+    SMTBX_CF_FI L& operator+=(const L& b) { v = _mm256_add_pd(v, b.v); return *this; }
+    SMTBX_CF_FI L& operator-=(const L& b) { v = _mm256_sub_pd(v, b.v); return *this; }
+    SMTBX_CF_FI L& operator*=(const L& b) { v = _mm256_mul_pd(v, b.v); return *this; }
+  };
+  SMTBX_CF_FI L operator+(const L& a, const L& b) { return L(_mm256_add_pd(a.v, b.v)); }
+  SMTBX_CF_FI L operator-(const L& a, const L& b) { return L(_mm256_sub_pd(a.v, b.v)); }
+  SMTBX_CF_FI L operator*(const L& a, const L& b) { return L(_mm256_mul_pd(a.v, b.v)); }
+  SMTBX_CF_FI L operator/(const L& a, const L& b) { return L(_mm256_div_pd(a.v, b.v)); }
+  SMTBX_CF_FI L operator-(const L& a) { return L(_mm256_xor_pd(a.v, _mm256_set1_pd(-0.0))); }
+  // the whole vector at once: four lane stores and then a vector load would
+  // stall store forwarding on every point
+  SMTBX_CF_FI L lset(double a, double b, double c, double d) { return L(_mm256_set_pd(d, c, b, a)); }
+#elif defined(SMTBX_CF_X64)
+  struct L {
+    union { struct { __m128d a, b; }; double d[4]; };
+    SMTBX_CF_FI L() : a(_mm_setzero_pd()), b(_mm_setzero_pd()) {}
+    SMTBX_CF_FI L(__m128d x, __m128d y) : a(x), b(y) {}
+    template <class T> SMTBX_CF_FI L(T x) : a(_mm_set1_pd((double)x)), b(a) {}
+    SMTBX_CF_FI L& operator+=(const L& o) { a = _mm_add_pd(a, o.a); b = _mm_add_pd(b, o.b); return *this; }
+    SMTBX_CF_FI L& operator-=(const L& o) { a = _mm_sub_pd(a, o.a); b = _mm_sub_pd(b, o.b); return *this; }
+    SMTBX_CF_FI L& operator*=(const L& o) { a = _mm_mul_pd(a, o.a); b = _mm_mul_pd(b, o.b); return *this; }
+  };
+  SMTBX_CF_FI L operator+(const L& x, const L& y) { return L(_mm_add_pd(x.a, y.a), _mm_add_pd(x.b, y.b)); }
+  SMTBX_CF_FI L operator-(const L& x, const L& y) { return L(_mm_sub_pd(x.a, y.a), _mm_sub_pd(x.b, y.b)); }
+  SMTBX_CF_FI L operator*(const L& x, const L& y) { return L(_mm_mul_pd(x.a, y.a), _mm_mul_pd(x.b, y.b)); }
+  SMTBX_CF_FI L operator/(const L& x, const L& y) { return L(_mm_div_pd(x.a, y.a), _mm_div_pd(x.b, y.b)); }
+  SMTBX_CF_FI L operator-(const L& x) { __m128d s = _mm_set1_pd(-0.0); return L(_mm_xor_pd(x.a, s), _mm_xor_pd(x.b, s)); }
+  SMTBX_CF_FI L lset(double a, double b, double c, double d) { return L(_mm_set_pd(b, a), _mm_set_pd(d, c)); }
+#else
+  struct L {
+    double d[4];
+    L() : d{0, 0, 0, 0} {}
+    template <class T> L(T x) { for (int i = 0; i < 4; i++) d[i] = (double)x; }
+    L& operator+=(const L& b) { for (int i = 0; i < 4; i++) d[i] += b.d[i]; return *this; }
+    L& operator-=(const L& b) { for (int i = 0; i < 4; i++) d[i] -= b.d[i]; return *this; }
+    L& operator*=(const L& b) { for (int i = 0; i < 4; i++) d[i] *= b.d[i]; return *this; }
+  };
+  inline L operator+(const L& a, const L& b) { L r; for (int i = 0; i < 4; i++) r.d[i] = a.d[i] + b.d[i]; return r; }
+  inline L operator-(const L& a, const L& b) { L r; for (int i = 0; i < 4; i++) r.d[i] = a.d[i] - b.d[i]; return r; }
+  inline L operator*(const L& a, const L& b) { L r; for (int i = 0; i < 4; i++) r.d[i] = a.d[i]*b.d[i]; return r; }
+  inline L operator/(const L& a, const L& b) { L r; for (int i = 0; i < 4; i++) r.d[i] = a.d[i]/b.d[i]; return r; }
+  inline L operator-(const L& a) { L r; for (int i = 0; i < 4; i++) r.d[i] = -a.d[i]; return r; }
+  inline L lset(double a, double b, double c, double d) { L r; r.d[0] = a; r.d[1] = b; r.d[2] = c; r.d[3] = d; return r; }
+#endif
+  struct LC { L re, im; };
+}}} // namespace smtbx::ab_initio::cf_lanes
+
+// fftpack calls these only on twiddles and constants, equal in all lanes
+namespace std {
+  inline smtbx::ab_initio::cf_lanes::L sqrt(const smtbx::ab_initio::cf_lanes::L& a) { return std::sqrt(a.d[0]); }
+  inline smtbx::ab_initio::cf_lanes::L cos(const smtbx::ab_initio::cf_lanes::L& a) { return std::cos(a.d[0]); }
+  inline smtbx::ab_initio::cf_lanes::L sin(const smtbx::ab_initio::cf_lanes::L& a) { return std::sin(a.d[0]); }
+  inline smtbx::ab_initio::cf_lanes::L atan(const smtbx::ab_initio::cf_lanes::L& a) { return std::atan(a.d[0]); }
+}
+
 #include <scitbx/fftpack/complex_to_complex.h>
 #include <scitbx/fftpack/real_to_complex.h>
 #include <scitbx/array_family/shared.h>
@@ -49,8 +138,9 @@ namespace smtbx { namespace ab_initio {
       SMTBX_ASSERT(h_obs.size() == f_obs.size());
       SMTBX_ASSERT(cut <= f_obs.size());
       int ss = 2*std::max(std::max(n0, n1), nzc);
-      seq.assign(ss, 0.0); scr.assign(ss, 0.0);
+      seq.assign(ss, L(0)); scr.assign(ss, L(0));
       map.assign((std::size_t)n0*n1*m2, 0.0);
+      zrow.assign(m2, 0.0);
       cap = no ? *std::max_element(fo.begin(), fo.end()) : 0;
       // trig_table[0] of structure_factors::to_map: -two_pi * 0 / t_den = -0.0
       double a0 = -(2*3.14159265358979323846)*0/12;
@@ -93,19 +183,32 @@ namespace smtbx { namespace ab_initio {
       // columns it reads
       double s = 0;
       for (int ix = 0; ix < n0; ix++) {
-        for (int iy = 0; iy < n1; iy++) {
-          double* r = row(ix, iy);
-          for (int k = 0; k < m2; k++) {
-            double v = r[k] < delta ? -r[k] : r[k];
-            r[k] = v; s += v;
+        for (int iy0 = 0; iy0 < n1; iy0 += B) {
+          int cnt = std::min<int>(B, n1 - iy0);
+          for (int iy = iy0; iy < iy0 + cnt; iy++) {
+            double* r = row(ix, iy);
+#if defined(SMTBX_CF_X64) || defined(SMTBX_CF_AVX)
+            // branchless (the signs are random, a branch mispredicts half the
+            // time): set the sign bit where r < delta; m2 is even
+            const __m128d dl = _mm_set1_pd(delta), sg = _mm_set1_pd(-0.0);
+            for (int k = 0; k < m2; k += 2) {
+              __m128d x = _mm_loadu_pd(r + k);
+              _mm_storeu_pd(r + k, _mm_xor_pd(x, _mm_and_pd(_mm_cmplt_pd(x, dl), sg)));
+            }
+            for (int k = 0; k < m2; k++) s += r[k];
+#else
+            for (int k = 0; k < m2; k++) {
+              double v = r[k] < delta ? -r[k] : r[k];
+              r[k] = v; s += v;
+            }
+#endif
           }
-          fz.forward(r, &scr[0]);
+          ztr(ix, iy0, cnt, true);
         }
-        for (std::size_t a = 0; a < zl.size(); a++) ytr(ix, zl[a], true);
+        ytr(ix, true);
       }
       g000_ = s*fft_scale_;
-      for (std::size_t a = 0; a < zl.size(); a++)
-        for (std::size_t b = 0; b < yl[a].size(); b++) xtr(yl[a][b], zl[a], true);
+      for (std::size_t a = 0; a < zl.size(); a++) xtr(a, true);
       cd const* c = cmap();
       for (int i = 0; i < no + nf; i++) {
         cd v = cj[i] ? std::conj(c[off[i]]) : c[off[i]];
@@ -164,9 +267,12 @@ namespace smtbx { namespace ab_initio {
     std::size_t cut_;
     double fft_scale_, vscale, dphi, cap, f000_, g000_, mean, sigma_, skew;
     bool have_skew;
-    scitbx::fftpack::complex_to_complex<double> fx, fy;
-    scitbx::fftpack::real_to_complex<double> fz;
-    std::vector<double> map, fo, seq, scr;
+    typedef cf_lanes::L L;
+    enum { B = 4 };
+    scitbx::fftpack::complex_to_complex<L, cf_lanes::LC> fx, fy;
+    scitbx::fftpack::real_to_complex<L, cf_lanes::LC> fz;
+    std::vector<double> map, fo, zrow;
+    std::vector<L> seq, scr;
     // from_map offsets (complex units); to_map offsets of -h, +h (-1: outside)
     std::vector<long long> off, om, op;
     std::vector<char> cj;
@@ -182,20 +288,58 @@ namespace smtbx { namespace ab_initio {
       return ((long long)i0*n1 + i1)*nzc + i2;
     }
 
-    void ytr(int ix, int iz, bool fwd) {
-      double* s = &seq[0];
-      for (int iy = 0; iy < n1; iy++) { double* r = row(ix, iy) + 2*iz; s[2*iy] = r[0]; s[2*iy + 1] = r[1]; }
-      if (fwd) fy.transform(scitbx::fftpack::select_sign<scitbx::fftpack::forward_tag>(), s, &scr[0]);
-      else fy.transform(scitbx::fftpack::select_sign<scitbx::fftpack::backward_tag>(), s, &scr[0]);
-      for (int iy = 0; iy < n1; iy++) { double* r = row(ix, iy) + 2*iz; r[0] = s[2*iy]; r[1] = s[2*iy + 1]; }
+    // cnt <= B complex lines of n points, point j of line l at q[l] + j*st;
+    // unused lanes read a zero pair
+    void tr(scitbx::fftpack::complex_to_complex<L, cf_lanes::LC>& F, int n,
+            int cnt, double* const* q, std::size_t st, bool fwd) {
+      static const double z2[2] = {0, 0};
+      const double* p[B];
+      std::size_t sl[B];
+      for (int l = 0; l < B; l++) { p[l] = l < cnt ? q[l] : z2; sl[l] = l < cnt ? st : 0; }
+      L* s = &seq[0];
+      for (int j = 0; j < n; j++) {
+        const double *a = p[0] + j*sl[0], *b = p[1] + j*sl[1], *c = p[2] + j*sl[2], *d = p[3] + j*sl[3];
+        s[2*j] = cf_lanes::lset(a[0], b[0], c[0], d[0]);
+        s[2*j + 1] = cf_lanes::lset(a[1], b[1], c[1], d[1]);
+      }
+      if (fwd) F.transform(scitbx::fftpack::select_sign<scitbx::fftpack::forward_tag>(), s, &scr[0]);
+      else F.transform(scitbx::fftpack::select_sign<scitbx::fftpack::backward_tag>(), s, &scr[0]);
+      for (int j = 0; j < n; j++)
+        for (int l = 0; l < cnt; l++) { q[l][j*st] = s[2*j].d[l]; q[l][j*st + 1] = s[2*j + 1].d[l]; }
     }
 
-    void xtr(int iy, int iz, bool fwd) {
-      double* s = &seq[0];
-      for (int ix = 0; ix < n0; ix++) { double* r = row(ix, iy) + 2*iz; s[2*ix] = r[0]; s[2*ix + 1] = r[1]; }
-      if (fwd) fx.transform(scitbx::fftpack::select_sign<scitbx::fftpack::forward_tag>(), s, &scr[0]);
-      else fx.transform(scitbx::fftpack::select_sign<scitbx::fftpack::backward_tag>(), s, &scr[0]);
-      for (int ix = 0; ix < n0; ix++) { double* r = row(ix, iy) + 2*iz; r[0] = s[2*ix]; r[1] = s[2*ix + 1]; }
+    // y lines of plane ix, B planes iz at a time
+    void ytr(int ix, bool fwd) {
+      double* q[B];
+      for (std::size_t a = 0; a < zl.size(); a += B) {
+        int cnt = (int)std::min<std::size_t>(B, zl.size() - a);
+        for (int l = 0; l < cnt; l++) q[l] = row(ix, 0) + 2*zl[a + l];
+        tr(fy, n1, cnt, q, m2, fwd);
+      }
+    }
+
+    // x lines of plane zl[a], B columns at a time
+    void xtr(std::size_t a, bool fwd) {
+      double* q[B];
+      for (std::size_t b = 0; b < yl[a].size(); b += B) {
+        int cnt = (int)std::min<std::size_t>(B, yl[a].size() - b);
+        for (int l = 0; l < cnt; l++) q[l] = row(0, yl[a][b + l]) + 2*zl[a];
+        tr(fx, n0, cnt, q, (std::size_t)n1*m2, fwd);
+      }
+    }
+
+    // z on rows iy0..iy0+cnt-1 of plane ix, the whole padded row in and out
+    void ztr(int ix, int iy0, int cnt, bool fwd) {
+      const double* p[B];
+      for (int l = 0; l < B; l++) p[l] = l < cnt ? row(ix, iy0 + l) : &zrow[0];
+      L* s = &seq[0];
+      for (int k = 0; k < m2; k++) s[k] = cf_lanes::lset(p[0][k], p[1][k], p[2][k], p[3][k]);
+      if (fwd) fz.forward(s, &scr[0]);
+      else fz.backward(s, &scr[0]);
+      for (int l = 0; l < cnt; l++) {
+        double* r = row(ix, iy0 + l);
+        for (int k = 0; k < m2; k++) r[k] = s[k].d[l];
+      }
     }
 
     // fft_map: to_map into a zeroed map, F000, backward FFT, volume scaling,
@@ -209,23 +353,24 @@ namespace smtbx { namespace ab_initio {
         if (op[i] >= 0) c[op[i]] += std::conj(term);
       }
       c[0] = cd(f000_);
-      for (std::size_t a = 0; a < zl.size(); a++) {
-        for (std::size_t b = 0; b < yl[a].size(); b++) xtr(yl[a][b], zl[a], false);
-        for (int ix = 0; ix < n0; ix++) ytr(ix, zl[a], false);
-      }
+      for (std::size_t a = 0; a < zl.size(); a++) xtr(a, false);
+      for (int ix = 0; ix < n0; ix++) ytr(ix, false);
       // counts as double: exact below 2^53, the same quotients as size_t
       double n = 0, m2s = 0;
-      for (int i = 0; i < n0; i++) for (int j = 0; j < n1; j++) {
-        double* r = row(i, j);
-        fz.backward(r, &scr[0]);
-        for (int k = 0; k < m2; k++) r[k] *= vscale;
-        int k = 0;
-        if (n == 0) { n = 1; mean = r[0]; k = 1; }
-        for (; k < n2; k++) {
-          n += 1;
-          double x = r[k], delta = x - mean;
-          mean += delta/n;
-          m2s += delta*(x - mean);
+      for (int i = 0; i < n0; i++) for (int j0 = 0; j0 < n1; j0 += B) {
+        int cnt = std::min<int>(B, n1 - j0);
+        ztr(i, j0, cnt, false);
+        for (int j = j0; j < j0 + cnt; j++) {
+          double* r = row(i, j);
+          for (int k = 0; k < m2; k++) r[k] *= vscale;
+          int k = 0;
+          if (n == 0) { n = 1; mean = r[0]; k = 1; }
+          for (; k < n2; k++) {
+            n += 1;
+            double x = r[k], delta = x - mean;
+            mean += delta/n;
+            m2s += delta*(x - mean);
+          }
         }
       }
       sigma_ = std::sqrt(m2s/n);
