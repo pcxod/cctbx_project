@@ -20,7 +20,9 @@ w = site multiplicity / group order for atoms on special positions (1 otherwise)
 """
 from __future__ import absolute_import, division, print_function
 
+import concurrent.futures
 import math
+import os
 from fractions import Fraction
 
 import numpy as np
@@ -674,11 +676,12 @@ class calculator(object):
   table: a form_factor_table replacing the WK1995 f0 by aspherical f_j(S R) for each operation R.
   """
 
-  def __init__(self, h, m, n_x4=32, table=None):
+  def __init__(self, h, m, n_x4=32, table=None, threads=None):
     self.h = np.asarray(h, dtype=float).reshape(-1, 3)
     self.m = np.asarray(m, dtype=float).ravel()
     self.n_x4 = n_x4
     self.table, self._table_f = table, {}
+    self.threads = threads   # None: one per CPU, capped by the atom count and a 2 GB working set
 
   def table_indices(self, ssg):
     """The rows a NoSpherA2 table needs for these reflections (-hkl_scale TABLE_SCALE): round(TABLE_SCALE S R)
@@ -731,27 +734,36 @@ class calculator(object):
         uw = ux if uw is None else uw + ux
       pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
                   1.0 / at.crenel[1] if at.crenel else 1.0))
-    for iop, op in enumerate(xs.ssg.ops):
-      hp = self.h.dot(op.r) + np.outer(self.m, op.m)
-      mp = op.eps * self.m
+    ops = []
+    for op in xs.ssg.ops:
       sp = s_vec.dot(op.r)
-      ph0 = self.h.dot(op.t) + self.m * op.tau
-      q6 = np.column_stack([sp[:, 0] ** 2, sp[:, 1] ** 2, sp[:, 2] ** 2,
-                            2 * sp[:, 0] * sp[:, 1], 2 * sp[:, 0] * sp[:, 2], 2 * sp[:, 1] * sp[:, 2]])
-      for ia, at in enumerate(xs.atoms):
-        x4, wt, sin_t, cos_t, disp, p, uw, dp_docc = pre[ia]
-        e = np.exp(1j * TWO_PI * (sp.dot(disp.T) + np.outer(mp, x4)))                # (N,K)
+      ops.append((self.h.dot(op.r) + np.outer(self.m, op.m), op.eps * self.m, sp, self.h.dot(op.t) + self.m * op.tau,
+                  np.column_stack([sp[:, 0] ** 2, sp[:, 1] ** 2, sp[:, 2] ** 2,
+                                   2 * sp[:, 0] * sp[:, 1], 2 * sp[:, 0] * sp[:, 2], 2 * sp[:, 1] * sp[:, 2]])))
+
+    def atom_sum(ia):
+      """One atom's share of F over every operation; it touches only its own gradient blocks."""
+      at = xs.atoms[ia]
+      x4, wt, sin_t, cos_t, disp, p, uw, dp_docc = pre[ia]
+      pw = wt * p      # node weights go into the K-vectors, not onto the (N, K) block
+      out = np.zeros(nref, dtype=complex)
+      th, e = np.empty((nref, len(x4))), np.empty((nref, len(x4)), dtype=complex)
+      for iop, (hp, mp, sp, ph0, q6) in enumerate(ops):
+        np.dot(sp, disp.T, out=th)
+        th += np.outer(mp, x4)
+        th *= TWO_PI
+        np.cos(th, out=e.real)   # 1.5x faster than exp(1j th) on (17754, 32), the same bits
+        np.sin(th, out=e.imag)
         if uw is not None:
           e *= np.exp(-TWO_PI_SQ * q6.dot(uw.T))
-        e *= wt
         if at.u_star is None:
           t0 = np.exp(-TWO_PI_SQ * at.u_iso * s_sq)
         else:
           t0 = np.exp(-TWO_PI_SQ * q6.dot(at.u_star))
         f_at = ff[at.scattering_type] if tab is None else tab[iop][:, ia]
         base = at.site_weight * f_at * t0 * np.exp(1j * TWO_PI * (ph0 + hp.dot(at.site)))
-        c = base * e.dot(p)
-        f_calc += c
+        c = base * e.dot(pw)
+        out += c
         if gradients:
           gr = grads[ia]
           gr["site"] += (1j * TWO_PI) * c[:, None] * hp
@@ -759,19 +771,32 @@ class calculator(object):
             gr["adp"][:, 0] += c * (-TWO_PI_SQ * s_sq)
           else:
             gr["adp"] += c[:, None] * (-TWO_PI_SQ * q6)
-          gr["occ"] += base * e.sum(axis=1) * dp_docc
-          ps, pc = e.dot((p * sin_t).T), e.dot((p * cos_t).T)                         # (N, n_max)
+          gr["occ"] += base * e.dot(wt) * dp_docc
+          ps, pc = e.dot((pw * sin_t).T), e.dot((pw * cos_t).T)                       # (N, n_max)
           for n in range(at.n_harmonics):
             gr["a"][:, n, :] += (1j * TWO_PI) * (base * ps[:, n])[:, None] * sp
             gr["b"][:, n, :] += (1j * TWO_PI) * (base * pc[:, n])[:, None] * sp
           if len(at.occ_sin):
-            es, ec = e.dot(sin_t.T), e.dot(cos_t.T)
+            es, ec = e.dot((wt * sin_t).T), e.dot((wt * cos_t).T)
             for n in range(len(at.occ_sin)):
               gr["os"][:, n] += base * es[:, n]
               gr["oc"][:, n] += base * ec[:, n]
           for n in range(len(at.u_sin)):
             gr["us"][:, n, :] += (base * ps[:, n])[:, None] * (-TWO_PI_SQ * q6)
             gr["uc"][:, n, :] += (base * pc[:, n])[:, None] * (-TWO_PI_SQ * q6)
+      return out
+
+    # numpy's ufuncs and dots release the GIL, so atoms run in threads; summed in atom order, so the result does
+    # not depend on the thread count. About 40 bytes per (reflection, node) per thread are live at once.
+    n_threads = max(1, min(self.threads or os.cpu_count() or 1, len(xs.atoms),
+                           int(2e9 // (40 * nref * max(len(p[0]) for p in pre)))))
+    if n_threads == 1:
+      for ia in range(len(xs.atoms)):
+        f_calc += atom_sum(ia)
+    else:
+      with concurrent.futures.ThreadPoolExecutor(n_threads) as ex:
+        for c in ex.map(atom_sum, range(len(xs.atoms))):
+          f_calc += c
     f_sq = np.abs(f_calc) ** 2
     if not gradients:
       return f_calc, xs.scale * f_sq, None
@@ -782,10 +807,14 @@ class calculator(object):
                         ("uc", "adp_waves")):
         if flags[flag]:
           cols.append(gr[key].reshape(nref, -1))
-    d_fsq = (2 * xs.scale * np.real(np.conj(f_calc)[:, None] * np.concatenate(cols, axis=1))
-             if cols else np.zeros((nref, 0)))
+    # d|F|^2/dp = 2 Re(F* dF/dp), block by block into one real array: no (N, n_params) complex temporary
+    d_fsq = np.empty((nref, sum(c.shape[1] for c in cols) + int(flags["scale"])))
+    fr, fi, j = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None], 0
+    for c in cols:
+      d_fsq[:, j:j + c.shape[1]] = fr * c.real + fi * c.imag
+      j += c.shape[1]
     if flags["scale"]:
-      d_fsq = np.concatenate([d_fsq, f_sq[:, None]], axis=1)
+      d_fsq[:, j] = f_sq
     return f_calc, xs.scale * f_sq, d_fsq
 
 
@@ -855,10 +884,8 @@ def _atom_map(at, op, flags):
   return t
 
 
-def reduction(xs, flags=None):
-  """Z (n_params, n_free), orthonormal columns: the parameter directions superspace site symmetry allows;
-  refine moves p = p0 + Z xi."""
-  flags = _flags(flags)
+def _reduction_blocks(xs, flags):
+  """The diagonal blocks of reduction(): one per atom, then the scale."""
   blocks = []
   for at in xs.atoms:
     n = sum(len(get()) for _, _, get, _ in _blocks(at, flags))
@@ -869,13 +896,33 @@ def reduction(xs, flags=None):
     blocks.append(vt[rank:].T)
   if flags["scale"]:
     blocks.append(np.eye(1))
-  rows = sum(b.shape[0] for b in blocks)
-  z = np.zeros((rows, sum(b.shape[1] for b in blocks)))
+  return blocks
+
+
+def _block_diag(blocks):
+  z = np.zeros((sum(b.shape[0] for b in blocks), sum(b.shape[1] for b in blocks)))
   i = j = 0
   for b in blocks:
     z[i:i + b.shape[0], j:j + b.shape[1]] = b
     i, j = i + b.shape[0], j + b.shape[1]
   return z
+
+
+def _times_blocks(a, blocks):
+  """a Z for the block-diagonal Z, block by block: the dense (N, n) x (n, n_free) product with a Z that is mostly
+  zeros (the identity for atoms in general positions) was the largest serial cost of an LM cycle."""
+  out = np.empty((a.shape[0], sum(b.shape[1] for b in blocks)))
+  i = j = 0
+  for b in blocks:
+    out[:, j:j + b.shape[1]] = a[:, i:i + b.shape[0]].dot(b)
+    i, j = i + b.shape[0], j + b.shape[1]
+  return out
+
+
+def reduction(xs, flags=None):
+  """Z (n_params, n_free), orthonormal columns: the parameter directions superspace site symmetry allows;
+  refine moves p = p0 + Z xi."""
+  return _block_diag(_reduction_blocks(xs, _flags(flags)))
 
 
 def _blocks(at, flags):
@@ -959,7 +1006,8 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
   (a rotation of every (A_n, B_n) pair together) from running away.
   """
   flags = _flags(flags)
-  z = reduction(xs, flags)          # superspace site symmetry: the free directions
+  zb = _reduction_blocks(xs, flags)
+  z = _block_diag(zb)               # superspace site symmetry: the free directions
   if flags["modulation"]:
     p_before = get_parameters(xs, flags)
     seed_amplitudes(xs)
@@ -975,7 +1023,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
   for cycle in range(cycles):
     _, fc_sq, d = calc.compute(xs, flags, gradients=True)
     r = sw * (f_obs_sq - fc_sq)
-    j = (sw[:, None] * d).dot(z)
+    j = _times_blocks(sw[:, None] * d, zb)
     jtj = j.T.dot(j)
     jtr = j.T.dot(r)
     p0 = get_parameters(xs, flags)
@@ -1031,14 +1079,20 @@ def de_wolff_section(xs, h, m, f_obs_sq=None, label=None, axis=0, half_width=1.0
   h, m = np.asarray(h), np.asarray(m)
   keys = {}
   for k in range(len(m)):
-    for op in xs.ssg.ops:
+    for iop, op in enumerate(xs.ssg.ops):
       hp = np.rint(h[k].dot(op.r) + m[k] * op.m).astype(int)
       for sgn in (1, -1):
-        keys.setdefault(tuple(sgn * hp) + (int(sgn * op.eps * m[k]),), k)
+        keys.setdefault(tuple(sgn * hp) + (int(sgn * op.eps * m[k]),), (k, iop, sgn))
   hh = np.array([key[:3] for key in keys])
   mm = np.array([key[3] for key in keys])
-  src = np.array(list(keys.values()))
-  fc, _, _ = calculator(hh, mm, n_x4_quad, table).compute(xs)
+  src, iop, sgn = np.array(list(keys.values())).T
+  # only the measured reflections and their Friedel mates are computed (Friedel's law fails with f''); every image
+  # follows from F(H g) = exp(-2 pi i H.T_g) F(H)
+  f2, _, _ = calculator(np.vstack([h, -h]), np.concatenate([m, -m]), n_x4_quad, table).compute(xs)
+  t = np.array([op.t for op in xs.ssg.ops])
+  tau = np.array([op.tau for op in xs.ssg.ops])
+  ht = np.einsum("ij,ij->i", h[src], t[iop]) + m[src] * tau[iop]
+  fc = np.where(sgn > 0, f2[src] * np.exp(-2j * math.pi * ht), f2[len(m) + src] * np.exp(2j * math.pi * ht))
   afc = np.abs(fc)
   phase = np.where(afc > 1e-6 * afc.max(), fc / np.maximum(afc, 1e-30), 0)
   if kind == "calc" or f_obs_sq is None:
@@ -1054,16 +1108,15 @@ def de_wolff_section(xs, h, m, f_obs_sq=None, label=None, axis=0, half_width=1.0
     x4b = x4 - at.displacement(x4b).dot(xs.q)
   u = at.displacement(x4b)
   b = np.exp(-2j * math.pi * mm[:, None] * x4[None, :]) * f[:, None]
-  if not follow:
-    a = np.exp(-2j * math.pi * (hh.dot(at.site)[:, None] + hh[:, axis][:, None] * s[None, :]))
-    rho = np.real(b.T.dot(a))
-  else:
+  # the point (site + offset along the axis) splits into a row factor and an axis factor shared by every row
+  if follow:
     perp = np.ones(3)
     perp[axis] = 0
-    rho = np.empty((n_x4, n_x))
-    for i in range(n_x4):
-      a = np.exp(-2j * math.pi * (hh.dot(at.site + perp * u[i])[:, None] + hh[:, axis][:, None] * s[None, :]))
-      rho[i] = np.real(b[:, i].dot(a))
+    b *= np.exp(-2j * math.pi * hh.dot((at.site + perp * u).T))
+  else:
+    b *= np.exp(-2j * math.pi * hh.dot(at.site))[:, None]
+  a = np.exp(-2j * math.pi * hh[:, axis][:, None] * s[None, :])
+  rho = np.real(b.T.dot(a))
   return s * length, x4, rho / xs.unit_cell.volume(), u[:, axis] * length
 
 
