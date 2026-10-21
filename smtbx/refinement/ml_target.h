@@ -73,6 +73,7 @@
 #include <cctbx/xray/targets/common_results.h>
 #include <cctbx/xray/targets/mlf.h>
 
+#include <smtbx/error.h>
 #include <scitbx/array_family/ref.h>
 #include <scitbx/array_family/shared.h>
 #include <scitbx/math/bessel.h>
@@ -238,7 +239,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
     /* Into F^2 space; see the header comment for why this is exact.
 
        The division is by the *calculated* intensity, and a reflection the
-       model puts at zero makes it enormous: measured on jaca_A14, 193 of 6819
+       model puts at zero makes it enormous: measured on a small molecule, 193 of 6819
        reflections have |Fc|^2 below 1e-6 and the smallest is 6e-31, which
        turned the largest weight into 6e29 and the objective into 2.5e22
        against least squares' 4e-3.
@@ -303,6 +304,19 @@ namespace smtbx { namespace refinement { namespace least_squares {
     /* Twenty nodes: the integrand is smooth and unimodal in one variable, so
        this resolves it well beyond the precision carried elsewhere, at a cost
        of twenty Bessel evaluations per reflection.
+
+       Do not trim the rule to make the intensity target cheaper. The outer
+       weights look negligible - 2e-13 at the ends - but the weight is not the
+       contribution: the Rice density spans many orders of magnitude across the
+       nodes, and where the measurement is weak, sigma is comparable to Io and
+       every inner node falls at a negative true intensity and is skipped. The
+       outer nodes are then the only ones left, which is precisely the case
+       this target exists to handle.
+
+       Measured over 4000 random (Io, sigma, Fc, alpha, beta) with sigma/Io
+       from 0.01 to 1, worst relative error in dT/d|Fc| against the full rule:
+       18 nodes 0.71, 16 nodes 2.0, 14 nodes 6.5. One node off each end is
+       already a 71% error in the gradient the refinement follows.
      */
     inline int n_nodes() { return 20; }
 
@@ -340,7 +354,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
       what vanishes at the answer.
    */
   template <typename FloatType>
-  bool mli_d_target_d_modulus_fc(
+  bool mli_target_and_d_modulus_fc(
     FloatType fo_sq,
     FloatType sigma_fo_sq,
     FloatType observable,
@@ -349,8 +363,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
     FloatType scale_factor,
     FloatType epsilon,
     bool centric,
+    FloatType &target_value,
     FloatType &d_target)
   {
+    target_value = 0;
     d_target = 0;
     if (scale_factor <= 0) scale_factor = 1;
     if (alpha <= 0 || beta <= 1e-3 || observable <= 0 || sigma_fo_sq <= 0) {
@@ -409,9 +425,32 @@ namespace smtbx { namespace refinement { namespace least_squares {
     if (sum <= 0) {
       return false;
     }
-    // T = -ln sum, so dT/d|Fc| = -(sum of P dlnP)/(sum of P)
+    /* T = -ln sum, so dT/d|Fc| = -(sum of P dlnP)/(sum of P). The largest
+       log-density was factored out of every term above, so it comes back into
+       the value here; it cancels out of the ratio the derivative is.
+     */
+    target_value = -(ln_max + std::log(sum));
     d_target = -sum_d/sum;
     return true;
+  }
+
+  /// The gradient alone, for callers with no use for the target value.
+  template <typename FloatType>
+  bool mli_d_target_d_modulus_fc(
+    FloatType fo_sq,
+    FloatType sigma_fo_sq,
+    FloatType observable,
+    FloatType alpha,
+    FloatType beta,
+    FloatType scale_factor,
+    FloatType epsilon,
+    bool centric,
+    FloatType &d_target)
+  {
+    FloatType value_not_wanted;
+    return mli_target_and_d_modulus_fc(
+      fo_sq, sigma_fo_sq, observable, alpha, beta, scale_factor, epsilon,
+      centric, value_not_wanted, d_target);
   }
 
   /// The effective observation and weight for the intensity target, in F^2.
@@ -456,6 +495,124 @@ namespace smtbx { namespace refinement { namespace least_squares {
     w_eff = w_amplitude/(4*observable);
     yo_eff = 2*modulus_fc*yo_amplitude - observable;
     return true;
+  }
+
+  /// -ln L for one reflection, under whichever target is in force.
+  /** The quantity the refinement is minimising, per reflection. Reporting goes
+      through here rather than through a second implementation so that a
+      log-likelihood shown to the user cannot drift away from the target being
+      optimised.
+
+      \return false for a reflection the target cannot use, whose contribution
+              is then zero rather than undefined.
+   */
+  template <typename FloatType>
+  bool ml_target_value(
+    FloatType fo_sq,
+    FloatType sigma_fo_sq,
+    FloatType observable,
+    FloatType alpha,
+    FloatType beta,
+    FloatType scale_factor,
+    FloatType epsilon,
+    bool centric,
+    bool intensity,
+    FloatType &value)
+  {
+    value = 0;
+    if (intensity) {
+      FloatType d_not_wanted;
+      return mli_target_and_d_modulus_fc(
+        fo_sq, sigma_fo_sq, observable, alpha, beta, scale_factor, epsilon,
+        centric, value, d_not_wanted);
+    }
+    /* mlf::target_one_h returns 0 for a reflection it refuses, which is
+       indistinguishable from a genuine zero, so the guards are repeated here
+       to say which happened. They are the same ones, deliberately.
+     */
+    if (alpha <= 0 || beta <= 1e-3 || fo_sq <= 0 || observable <= 0
+        || epsilon <= 0) {
+      return false;
+    }
+    value = cctbx::xray::targets::mlf::target_one_h(
+      std::sqrt(fo_sq), std::sqrt(observable), alpha, beta,
+      scale_factor > 0 ? scale_factor : FloatType(1), epsilon, centric);
+    return true;
+  }
+
+  /// Summed -ln L over the working and the free reflections, and their counts.
+  /** The free sum is the log free likelihood, LL_free, which Tickle (2007)
+      argues should replace R_free as the statistic against which weighting
+      parameters are chosen: it is the same functional the refinement optimises,
+      evaluated on data the refinement never saw.
+
+      Counts accompany the sums because the two sets differ in size by an order
+      of magnitude and only the mean per reflection is comparable between them.
+
+      Reference: Tickle (2007) Acta Cryst. D63, 1274-1281.
+   */
+  template <typename FloatType>
+  struct ml_log_likelihood_result {
+    FloatType work, free;
+    std::size_t n_work, n_free, n_skipped;
+    ml_log_likelihood_result()
+      : work(0), free(0), n_work(0), n_free(0), n_skipped(0)
+    {}
+    /// Mean -ln L per working reflection, or zero if there are none.
+    FloatType work_per_reflection() const {
+      return n_work ? work/static_cast<FloatType>(n_work) : FloatType(0);
+    }
+    /// Mean -ln L per free reflection, or zero if there are none.
+    FloatType free_per_reflection() const {
+      return n_free ? free/static_cast<FloatType>(n_free) : FloatType(0);
+    }
+  };
+
+  /** \param free_only evaluate the free reflections alone, leaving the working
+        sums zero. The free set is a tenth of the data, and for the intensity
+        target each reflection costs a twenty-node quadrature, so a caller that
+        only wants LL_free should say so: measured across eight structures,
+        computing both sums cost 12-21% of an MLI cycle and the free half of it
+        about a tenth of that. Ignored when no free set was given, since then
+        there is nothing to restrict to.
+   */
+  template <typename FloatType>
+  ml_log_likelihood_result<FloatType> ml_log_likelihood(
+    scitbx::af::const_ref<FloatType> const &fo_sq,
+    scitbx::af::const_ref<FloatType> const &sigma_fo_sq,
+    scitbx::af::const_ref<FloatType> const &observables,
+    ml_data<FloatType> const &ml,
+    bool free_only = false)
+  {
+    ml_log_likelihood_result<FloatType> result;
+    SMTBX_ASSERT(ml.active());
+    SMTBX_ASSERT(ml.is_consistent_with(fo_sq.size()));
+    SMTBX_ASSERT(sigma_fo_sq.size() == fo_sq.size());
+    SMTBX_ASSERT(observables.size() == fo_sq.size());
+    bool const skip_work = free_only && ml.free_flags.size() != 0;
+    for (std::size_t i = 0; i < fo_sq.size(); i++) {
+      if (skip_work && !ml.is_free(i)) {
+        continue;
+      }
+      FloatType value;
+      if (!ml_target_value(fo_sq[i], sigma_fo_sq[i], observables[i],
+                           ml.alpha[i], ml.beta[i], ml.scale_factor(),
+                           ml.epsilon[i], ml.centric[i], ml.is_intensity(),
+                           value))
+      {
+        result.n_skipped++;
+        continue;
+      }
+      if (ml.is_free(i)) {
+        result.free += value;
+        result.n_free++;
+      }
+      else {
+        result.work += value;
+        result.n_work++;
+      }
+    }
+    return result;
   }
 
 }}}
