@@ -563,6 +563,101 @@ def _form_factors(types, stol):
   return out
 
 
+TABLE_SCALE = 100000   # NoSpherA2 -hkl_scale: table rows are round(TABLE_SCALE * S), S = h + m q
+
+
+_ID_DECODE = 16.0 / 2147483647   # scatterer_id_big: fractional coordinate = int32 * 16 / INT32_MAX
+
+
+def _id_from_hex(token):
+  """(x, y, z, data, Z) of a scatterer id printed as two uint64, (x | y << 32) and (z | data << 32 | Z << 48)."""
+  a, b = int(token[:16], 16), int(token[16:32], 16)
+  s32 = lambda v: (v & 0xffffffff) - ((v & 0x80000000) << 1)
+  data = (b >> 32) & 0xffff
+  return (s32(a) * _ID_DECODE, s32(a >> 32) * _ID_DECODE, s32(b) * _ID_DECODE, data - ((data & 0x8000) << 1),
+          (b >> 48) & 0xff)
+
+
+def read_tsc(path):
+  """(scatterers, indices (N, 3) int, f (N, n) complex, AD flag) of a NoSpherA2 text .tsc or binary .tscb.
+  scatterers: (n, 5) array of scatterer ids (x, y, z, data = PART, Z), or a list of labels for a label table."""
+  raw = open(path, "rb").read()
+  if raw.startswith((b"TITLE:", b"SCATTERERS:", b"SCATTERER_IDS:")):
+    head, _, body = raw.decode().partition("DATA:")
+    scat, ad = [], False
+    for line in head.splitlines():
+      if line.startswith("SCATTERER_IDS:"):
+        scat = np.array([_id_from_hex(t) for t in line.split()[1:]])
+      elif line.startswith("SCATTERERS:"):
+        scat = line.split()[1:]
+      elif line.startswith("AD:"):
+        ad = "TRUE" in line.upper()
+    v = np.array(body.replace(",", " ").split(), dtype=float).reshape(-1, 3 + 2 * len(scat))
+    return scat, np.rint(v[:, :3]).astype(np.int64), v[:, 3::2] + 1j * v[:, 4::2], ad
+  i4 = lambda o: int(np.frombuffer(raw, "<i4", 1, o)[0])
+  o = 4 + i4(0)
+  n = i4(o)
+  if b"SCATTERER_IDS" in raw[4:o]:
+    rec = np.frombuffer(raw, np.dtype([("x", "<i4", 3), ("data", "<i2"), ("z", "u1"), ("res", "u1")]), n, o + 4)
+    scat = np.column_stack([rec["x"] * _ID_DECODE, rec["data"], rec["z"]])
+    o += 4 + 16 * n
+  else:   # labels: n is the byte size of the space-separated payload
+    scat = raw[o + 4:o + 4 + n].decode().split()
+    o += 4 + n
+  rec = np.frombuffer(raw, np.dtype([("h", "<i4", 3), ("f", "<c16", len(scat))]), i4(o), o + 4)
+  return scat, rec["h"].astype(np.int64), rec["f"].copy(), False
+
+
+class form_factor_table(object):
+  """Aspherical f_j(S) from a NoSpherA2 table computed with -hkl_scale `scale` on calculator.table_indices: the
+  density moves rigidly with its atom along x4. Columns are matched to atoms by scatterer id. A row missing for S
+  is taken from -S as f(S)* (real density), unless the table carries f', f'' (AD: TRUE)."""
+
+  def __init__(self, path, scale=TABLE_SCALE):
+    self.path, self.scale = path, scale
+    self.ids, idx, self.f, self.ad = read_tsc(path)
+    if not isinstance(self.ids, np.ndarray):
+      raise ValueError("%s names its scatterers by label; satellite tables are matched by scatterer id" % path)
+    self.row = {tuple(k): i for i, k in enumerate(idx.tolist())}
+
+  def columns(self, xs, tolerance=0.5):
+    """The column of each atom: the id of the same element nearest the average site modulo lattice translations,
+    within `tolerance` A (refinement moves the sites off the ids); the PART of an atom carrying `part` decides
+    between ids that are both that close."""
+    from cctbx.eltbx import tiny_pse
+    o = np.array(xs.unit_cell.orthogonalization_matrix()).reshape(3, 3)
+    cols = []
+    for at in xs.atoms:
+      z = tiny_pse.table(at.scattering_type.rstrip("+-0123456789")).atomic_number()
+      d = np.asarray(at.site) - self.ids[:, :3]
+      dist = np.where(self.ids[:, 4] == z, np.linalg.norm((d - np.rint(d)).dot(o.T), axis=1), np.inf)
+      near = dist <= tolerance
+      if not near.any():
+        raise ValueError("%s has no scatterer id for %s within %.1f A: recompute it for this model"
+                         % (self.path, at.label, tolerance))
+      if near.sum() > 1 and getattr(at, "part", None) is not None and (near & (self.ids[:, 3] == at.part)).any():
+        dist[self.ids[:, 3] != at.part] = np.inf
+      cols.append(int(np.argmin(dist)))
+    if len(set(cols)) < len(cols):
+      raise ValueError("%s: two atoms take the same scatterer id" % self.path)
+    return cols
+
+  def lookup(self, s, cols):
+    """(N, len(cols)) complex form factors at the fractional reciprocal vectors s (N, 3), columns from columns()."""
+    rows, conj = np.empty(len(s), dtype=int), np.zeros(len(s), dtype=bool)
+    for i, k in enumerate(np.rint(self.scale * np.asarray(s)).astype(np.int64).tolist()):
+      r = self.row.get(tuple(k))
+      if r is None and not self.ad:
+        r, conj[i] = self.row.get((-k[0], -k[1], -k[2])), True
+      if r is None:
+        raise ValueError("%s has no row for S = %s: recompute it for this q and reflection list"
+                         % (self.path, np.round(np.array(k) / float(self.scale), 5)))
+      rows[i] = r
+    f = self.f[np.ix_(rows, cols)]
+    f[conj] = np.conj(f[conj])
+    return f
+
+
 def _sum_waves(sin_c, cos_c, sin_t, cos_t):
   """sum_n s_n sin_t[n] + c_n cos_t[n] for coefficient arrays (n, ...) and node tables (n, K) -> (K, ...)."""
   n = len(sin_c)
@@ -576,12 +671,23 @@ class calculator(object):
   u_star 6); occupancy (1); displacive waves A, B (3 per harmonic each); occupancy waves sin, cos (1 per
   harmonic each); ADP waves sin, cos (6 per harmonic each). Then the scale. flags: 'site', 'adp', 'occupancy',
   'modulation', 'occ_waves', 'adp_waves', 'scale'; all True except 'occupancy'.
+  table: a form_factor_table replacing the WK1995 f0 by aspherical f_j(S R) for each operation R.
   """
 
-  def __init__(self, h, m, n_x4=32):
+  def __init__(self, h, m, n_x4=32, table=None):
     self.h = np.asarray(h, dtype=float).reshape(-1, 3)
     self.m = np.asarray(m, dtype=float).ravel()
     self.n_x4 = n_x4
+    self.table, self._table_f = table, {}
+
+  def table_indices(self, ssg):
+    """The rows a NoSpherA2 table needs for these reflections (-hkl_scale TABLE_SCALE): round(TABLE_SCALE S R)
+    for every S = h + m q and operation R, one of each +- pair. They depend on q and the point group only."""
+    s = self.h + np.outer(self.m, ssg.q)
+    keys = np.vstack([np.rint(TABLE_SCALE * s.dot(op.r)) for op in ssg.ops]).astype(np.int64)
+    keys = keys[np.any(keys != 0, axis=1)]
+    first = keys[np.arange(len(keys)), np.argmax(keys != 0, axis=1)]
+    return np.unique(keys * np.sign(first)[:, None], axis=0)
 
   def compute(self, xs, flags=None, gradients=False):
     flags = _flags(flags)
@@ -590,8 +696,18 @@ class calculator(object):
     g6 = xs.unit_cell.reciprocal_metrical_matrix()
     g = np.array([[g6[0], g6[3], g6[4]], [g6[3], g6[1], g6[5]], [g6[4], g6[5], g6[2]]])
     s_sq = np.einsum("ni,ij,nj->n", s_vec, g, s_vec)
-    f0 = _form_factors([a.scattering_type for a in xs.atoms], np.sqrt(s_sq) / 2)
-    ff = {t: f + complex(*xs.dispersion.get(t, (0.0, 0.0))) for t, f in f0.items()}
+    tab = None
+    if self.table is None:
+      f0 = _form_factors([a.scattering_type for a in xs.atoms], np.sqrt(s_sq) / 2)
+      ff = {t: f + complex(*xs.dispersion.get(t, (0.0, 0.0))) for t, f in f0.items()}
+    else:
+      key = (tuple(q), tuple(op.xyz for op in xs.ssg.ops), tuple(a.label for a in xs.atoms))
+      if key not in self._table_f:
+        cols = self.table.columns(xs)
+        self._table_f = {key: [self.table.lookup(s_vec.dot(op.r), cols) for op in xs.ssg.ops]}
+      disp = 0.0 if self.table.ad else np.array([complex(*xs.dispersion.get(a.scattering_type, (0.0, 0.0)))
+                                                 for a in xs.atoms])
+      tab = [f + disp for f in self._table_f[key]]
     nref = self.h.shape[0]
     f_calc = np.zeros(nref, dtype=complex)
     grads = []
@@ -615,7 +731,7 @@ class calculator(object):
         uw = ux if uw is None else uw + ux
       pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
                   1.0 / at.crenel[1] if at.crenel else 1.0))
-    for op in xs.ssg.ops:
+    for iop, op in enumerate(xs.ssg.ops):
       hp = self.h.dot(op.r) + np.outer(self.m, op.m)
       mp = op.eps * self.m
       sp = s_vec.dot(op.r)
@@ -632,7 +748,8 @@ class calculator(object):
           t0 = np.exp(-TWO_PI_SQ * at.u_iso * s_sq)
         else:
           t0 = np.exp(-TWO_PI_SQ * q6.dot(at.u_star))
-        base = at.site_weight * ff[at.scattering_type] * t0 * np.exp(1j * TWO_PI * (ph0 + hp.dot(at.site)))
+        f_at = ff[at.scattering_type] if tab is None else tab[iop][:, ia]
+        base = at.site_weight * f_at * t0 * np.exp(1j * TWO_PI * (ph0 + hp.dot(at.site)))
         c = base * e.dot(p)
         f_calc += c
         if gradients:
@@ -833,8 +950,10 @@ def seed_amplitudes(xs, size_angstrom=0.01, seed=0):
       at.b = rng.uniform(-1, 1, at.b.shape) * size_angstrom / abc
 
 
-def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True):
+def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True,
+           table=None):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
+  table: a form_factor_table for aspherical form factors (IAM without).
 
   The x4 origin of a wave is free unless an eps = -1 operation fixes it; the damping keeps that direction
   (a rotation of every (A_n, B_n) pair together) from running away.
@@ -846,7 +965,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
     seed_amplitudes(xs)
     set_parameters(xs, flags, p_before + z.dot(z.T.dot(get_parameters(xs, flags) - p_before)))
   f_obs_sq = np.asarray(f_obs_sq, dtype=float)
-  calc = calculator(h, m, n_x4)
+  calc = calculator(h, m, n_x4, table)
   w = 1.0 / np.maximum(np.asarray(sigmas, dtype=float), 1e-12) ** 2
   sw = np.sqrt(w)
   history = []
@@ -899,7 +1018,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
 # ---------------------------------------------------------------------------
 
 def de_wolff_section(xs, h, m, f_obs_sq=None, label=None, axis=0, half_width=1.0, n_x=81, n_x4=80,
-                     kind="obs", n_x4_quad=32, follow=False):
+                     kind="obs", n_x4_quad=32, follow=False, table=None):
   """rho(x_axis, x4) through the average position of atom `label`, the other two coordinates fixed there
   (follow=True: they follow the atom's string instead, so its own peak stays on the section).
 
@@ -919,7 +1038,7 @@ def de_wolff_section(xs, h, m, f_obs_sq=None, label=None, axis=0, half_width=1.0
   hh = np.array([key[:3] for key in keys])
   mm = np.array([key[3] for key in keys])
   src = np.array(list(keys.values()))
-  fc, _, _ = calculator(hh, mm, n_x4_quad).compute(xs)
+  fc, _, _ = calculator(hh, mm, n_x4_quad, table).compute(xs)
   afc = np.abs(fc)
   phase = np.where(afc > 1e-6 * afc.max(), fc / np.maximum(afc, 1e-30), 0)
   if kind == "calc" or f_obs_sq is None:

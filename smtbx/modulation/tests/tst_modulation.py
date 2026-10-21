@@ -290,6 +290,81 @@ def test_recovery():
   assert err < 0.003, err
 
 
+def _write_tsc(path, ids, idx, f, binary):
+  """A NoSpherA2 id table (ids: xray.scatterer_id_big): tscb (header size, header, id count, 16-byte ids, row count,
+  rows) or text."""
+  if binary:
+    head = b"SCATTERER_IDS"
+    rec = np.zeros(len(idx), np.dtype([("h", "<i4", 3), ("f", "<c16", len(ids))]))
+    rec["h"], rec["f"] = idx, f
+    with open(path, "wb") as o:
+      o.write(np.int32(len(head)).tobytes() + head + np.int32(len(ids)).tobytes() + b"".join(i.to_bytes() for i in ids)
+              + np.int32(len(idx)).tobytes() + rec.tobytes())
+  else:
+    with open(path, "w") as o:
+      o.write("TITLE: t\nSYMM: expanded\nSCATTERER_IDS: %s\nDATA:\n" % " ".join(i.to_hex_string() for i in ids))
+      for k, row in zip(idx, f):
+        o.write("%d %d %d %s\n" % (k[0], k[1], k[2], " ".join("%.17e,%.17e" % (v.real, v.imag) for v in row)))
+
+
+def test_aspherical_table():
+  """A table of f0(|S|) exp(2 pi i S.d), a density offset by d from its nucleus (d perpendicular to q, so the wave
+  argument q.x stays), reproduces F and gradients of the IAM structure with the sites moved by d: f_j(S R) per
+  operation, the +-S folding and the scaled rows, from a binary and a text table whose scatterer ids sit 0.002
+  off the sites (refinement moves sites off their ids). f', f'' stay at the nucleus, so they are checked with
+  d = 0."""
+  import os, tempfile
+  from cctbx.eltbx import tiny_pse
+  tmp = tempfile.mkdtemp()
+  worst = 0.0
+  for shift, disp in ((0.01, {}), (0.0, {"Cu": (0.3, 1.2)})):
+    xs = model(n_harmonics=1, amp=0.02)
+    xs.dispersion = disp
+    h, m = reflections(xs, d_min=1.2)
+    d = dict((a.label, np.array([0.0, shift * (k + 1), 0.0])) for k, a in enumerate(xs.atoms))
+    shifted = model(n_harmonics=1, amp=0.02)
+    shifted.dispersion = disp
+    for a in shifted.atoms:
+      a.site = a.site + d[a.label]
+    f_ref, _, d_ref = mod.calculator(h, m).compute(shifted, gradients=True)
+    rows = mod.calculator(h, m).table_indices(xs.ssg)
+    s = rows / float(mod.TABLE_SCALE)
+    g6 = xs.unit_cell.reciprocal_metrical_matrix()
+    g = np.array([[g6[0], g6[3], g6[4]], [g6[3], g6[1], g6[5]], [g6[4], g6[5], g6[2]]])
+    f0 = mod._form_factors([a.scattering_type for a in xs.atoms], np.sqrt(np.einsum("ni,ij,nj->n", s, g, s)) / 2)
+    f = np.array([f0[a.scattering_type] * np.exp(2j * math.pi * s.dot(d[a.label])) for a in xs.atoms]).T
+    folded = len(rows) < len(np.unique(np.vstack([np.rint(mod.TABLE_SCALE * (h + np.outer(m, xs.q)).dot(op.r))
+                                                  for op in xs.ssg.ops]), axis=0))
+    assert folded
+    ids = [xray.scatterer_id_big(a.site[0] + 0.002, a.site[1] - 0.002, a.site[2] + 0.002, 0,
+                                 tiny_pse.table(a.scattering_type).atomic_number(), 0) for a in xs.atoms]
+    assert np.allclose(mod._id_from_hex(ids[1].to_hex_string())[:3], ids[1].get_crd(), atol=1e-9)
+    for binary in (True, False):
+      path = os.path.join(tmp, "t.tscm")
+      _write_tsc(path, ids, rows, f, binary)
+      table = mod.form_factor_table(path)
+      f_tab, _, d_tab = mod.calculator(h, m, table=table).compute(xs, gradients=True)
+      worst = max(worst, np.max(np.abs(f_tab - f_ref)) / np.max(np.abs(f_ref)),
+                  np.max(np.abs(d_tab - d_ref)) / np.max(np.abs(d_ref)))
+  assert worst < 1e-9, worst
+  try:
+    table.lookup(np.array([[0.5, 0.5, 0.5]]), [0])
+  except ValueError:
+    pass
+  else:
+    raise AssertionError("a row the table lacks must be refused")
+  with open(path, "w") as o:
+    o.write("TITLE: t\nSCATTERERS: Cu0\nDATA:\n1 0 0 1.0,0.0\n")
+  try:
+    mod.form_factor_table(path)
+  except ValueError:
+    pass
+  else:
+    raise AssertionError("a label table must be refused")
+  print("  aspherical table (%d rows, +-S folded): F and %d gradients = IAM with moved sites to %.1e, tscb and text"
+        % (len(rows), d_ref.shape[1], worst))
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
@@ -302,6 +377,7 @@ def run():
   test_change_of_basis_invariant()
   test_rank_by_absences()
   test_recovery()
+  test_aspherical_table()
   print("OK")
 
 
