@@ -249,4 +249,9 @@ def read(cif_path, fcf_path=None):
   ext = _col(block, "_refine_ls_extinction_coef")
   if data is not None:
     data["extinction"] = (_col(block, "_refine_ls_extinction_method", ["?"])[0], ext[0] if ext else None)
+    # electrons by name, or by a wavelength no X-ray or neutron source has (0.0197-0.0370 A at 100-300 kV)
+    probe = " ".join(_col(block, k, [""])[0] for k in ("_diffrn_radiation_probe", "_diffrn_radiation_type")).lower()
+    wl = _num(_col(block, "_diffrn_radiation_wavelength", ["?"])[0])
+    data["radiation"] = "electron" if "electron" in probe or (wl is not None and wl < 0.1) else "xray"
+    data["wavelength"] = wl
   return xs, data

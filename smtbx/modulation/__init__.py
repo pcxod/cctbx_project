@@ -544,19 +544,27 @@ class modulated_structure(object):
 # structure factors and gradients
 # ---------------------------------------------------------------------------
 
-def _form_factors(types, stol):
-  """f0(sin(theta)/lambda) per scattering type from the WK1995 gaussians (IT1992 fallback)."""
+def _form_factors(types, stol, radiation="xray"):
+  """f0(sin(theta)/lambda) per scattering type: X-rays from the WK1995 gaussians (IT1992 fallback), electrons from
+  ITC Vol. C 2011 Table 4.3.2.2, cctbx's "electron" table (in A, as Olex2's ED refinement uses it)."""
+  from cctbx.eltbx.e_scattering import ito_vol_c_2011_table_4_3_2_2_entry_as_gaussian as electron
   out = {}
   st = flex.double(np.ascontiguousarray(stol, dtype=float).ravel())
   for t in set(types):
     g = None
     for label in (t, t.rstrip("+-0123456789")):
-      for table in (xray_scattering.wk1995, xray_scattering.it1992):
+      if radiation == "electron":
         try:
-          g = table(label, True).fetch()
-          break
+          g = electron(label, exact=False)
         except Exception:
-          continue
+          g = None
+      else:
+        for table in (xray_scattering.wk1995, xray_scattering.it1992):
+          try:
+            g = table(label, True).fetch()
+            break
+          except Exception:
+            continue
       if g is not None:
         break
     if g is None:
@@ -566,6 +574,7 @@ def _form_factors(types, stol):
 
 
 TABLE_SCALE = 100000   # NoSpherA2 -hkl_scale: table rows are round(TABLE_SCALE * S), S = h + m q
+RADIATIONS = ("xray", "electron")   # kinematical in both; f' and f'' apply to X-rays only
 
 
 _ID_DECODE = 16.0 / 2147483647   # scatterer_id_big: fractional coordinate = int32 * 16 / INT32_MAX
@@ -674,9 +683,12 @@ class calculator(object):
   harmonic each); ADP waves sin, cos (6 per harmonic each). Then the scale. flags: 'site', 'adp', 'occupancy',
   'modulation', 'occ_waves', 'adp_waves', 'scale'; all True except 'occupancy'.
   table: a form_factor_table replacing the WK1995 f0 by aspherical f_j(S R) for each operation R.
+  radiation: "xray" or "electron" (kinematical electron diffraction, ITC electron f0 and no f', f'').
   """
 
-  def __init__(self, h, m, n_x4=32, table=None, threads=None):
+  def __init__(self, h, m, n_x4=32, table=None, threads=None, radiation="xray"):
+    assert radiation in RADIATIONS, radiation
+    self.radiation = radiation
     self.h = np.asarray(h, dtype=float).reshape(-1, 3)
     self.m = np.asarray(m, dtype=float).ravel()
     self.n_x4 = n_x4
@@ -701,15 +713,16 @@ class calculator(object):
     s_sq = np.einsum("ni,ij,nj->n", s_vec, g, s_vec)
     tab = None
     if self.table is None:
-      f0 = _form_factors([a.scattering_type for a in xs.atoms], np.sqrt(s_sq) / 2)
-      ff = {t: f + complex(*xs.dispersion.get(t, (0.0, 0.0))) for t, f in f0.items()}
+      f0 = _form_factors([a.scattering_type for a in xs.atoms], np.sqrt(s_sq) / 2, self.radiation)
+      dispersion = xs.dispersion if self.radiation == "xray" else {}
+      ff = {t: f + complex(*dispersion.get(t, (0.0, 0.0))) for t, f in f0.items()}
     else:
       key = (tuple(q), tuple(op.xyz for op in xs.ssg.ops), tuple(a.label for a in xs.atoms))
       if key not in self._table_f:
         cols = self.table.columns(xs)
         self._table_f = {key: [self.table.lookup(s_vec.dot(op.r), cols) for op in xs.ssg.ops]}
-      disp = 0.0 if self.table.ad else np.array([complex(*xs.dispersion.get(a.scattering_type, (0.0, 0.0)))
-                                                 for a in xs.atoms])
+      disp = 0.0 if self.table.ad or self.radiation == "electron" else np.array(
+        [complex(*xs.dispersion.get(a.scattering_type, (0.0, 0.0))) for a in xs.atoms])
       tab = [f + disp for f in self._table_f[key]]
     nref = self.h.shape[0]
     f_calc = np.zeros(nref, dtype=complex)
@@ -998,9 +1011,9 @@ def seed_amplitudes(xs, size_angstrom=0.01, seed=0):
 
 
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True,
-           table=None):
+           table=None, radiation="xray"):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
-  table: a form_factor_table for aspherical form factors (IAM without).
+  table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
 
   The x4 origin of a wave is free unless an eps = -1 operation fixes it; the damping keeps that direction
   (a rotation of every (A_n, B_n) pair together) from running away.
@@ -1013,7 +1026,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
     seed_amplitudes(xs)
     set_parameters(xs, flags, p_before + z.dot(z.T.dot(get_parameters(xs, flags) - p_before)))
   f_obs_sq = np.asarray(f_obs_sq, dtype=float)
-  calc = calculator(h, m, n_x4, table)
+  calc = calculator(h, m, n_x4, table, radiation=radiation)
   w = 1.0 / np.maximum(np.asarray(sigmas, dtype=float), 1e-12) ** 2
   sw = np.sqrt(w)
   history = []
@@ -1066,7 +1079,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
 # ---------------------------------------------------------------------------
 
 def de_wolff_section(xs, h, m, f_obs_sq=None, label=None, axis=0, half_width=1.0, n_x=81, n_x4=80,
-                     kind="obs", n_x4_quad=32, follow=False, table=None):
+                     kind="obs", n_x4_quad=32, follow=False, table=None, radiation="xray"):
   """rho(x_axis, x4) through the average position of atom `label`, the other two coordinates fixed there
   (follow=True: they follow the atom's string instead, so its own peak stays on the section).
 
@@ -1088,7 +1101,8 @@ def de_wolff_section(xs, h, m, f_obs_sq=None, label=None, axis=0, half_width=1.0
   src, iop, sgn = np.array(list(keys.values())).T
   # only the measured reflections and their Friedel mates are computed (Friedel's law fails with f''); every image
   # follows from F(H g) = exp(-2 pi i H.T_g) F(H)
-  f2, _, _ = calculator(np.vstack([h, -h]), np.concatenate([m, -m]), n_x4_quad, table).compute(xs)
+  f2, _, _ = calculator(np.vstack([h, -h]), np.concatenate([m, -m]), n_x4_quad, table,
+                        radiation=radiation).compute(xs)
   t = np.array([op.t for op in xs.ssg.ops])
   tau = np.array([op.tau for op in xs.ssg.ops])
   ht = np.einsum("ij,ij->i", h[src], t[iop]) + m[src] * tau[iop]

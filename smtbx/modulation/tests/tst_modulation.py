@@ -365,6 +365,45 @@ def test_aspherical_table():
         % (len(rows), d_ref.shape[1], worst))
 
 
+def test_electron():
+  """Kinematical electron diffraction: the main reflections of an unmodulated model equal cctbx's direct structure
+  factors with its "electron" table (f' and f'' are not applied to electrons); gradients = central differences."""
+  xs = model(amp=0.0)
+  xs.dispersion = {"Cu": (0.3, 1.2)}
+  h, m = reflections(xs)
+  sel = m == 0
+  f, _, _ = mod.calculator(h[sel], m[sel], radiation="electron").compute(xs)
+  sc = flex.xray_scatterer([xray.scatterer(a.label, tuple(a.site), a.u_iso, a.occupancy, a.scattering_type)
+                            for a in xs.atoms])
+  xrs = xray.structure(crystal_symmetry=crystal.symmetry(xs.unit_cell, space_group=xs.ssg.basic), scatterers=sc)
+  xrs.scattering_type_registry(table="electron")
+  ms = miller.set(xrs.crystal_symmetry(), flex.miller_index([tuple(int(v) for v in r) for r in h[sel]]),
+                  anomalous_flag=False)
+  fc = ms.structure_factors_from_scatterers(xrs, algorithm="direct").f_calc().data().as_numpy_array()
+  err = np.max(np.abs(f - fc)) / np.max(np.abs(fc))
+  assert err < 1e-6, err
+  xs = model(n_harmonics=1, amp=0.02)
+  h, m = reflections(xs, d_min=1.6)
+  flags = {"site": True, "u_iso": True, "modulation": True, "scale": True}
+  calc = mod.calculator(h, m, radiation="electron")
+  _, _, d = calc.compute(xs, flags, gradients=True)
+  p0 = mod.get_parameters(xs, flags)
+  worst = 0.0
+  for k in range(len(p0)):
+    p = p0.copy(); p[k] += 1e-6
+    mod.set_parameters(xs, flags, p)
+    _, fp, _ = calc.compute(xs)
+    p[k] -= 2e-6
+    mod.set_parameters(xs, flags, p)
+    _, fm, _ = calc.compute(xs)
+    mod.set_parameters(xs, flags, p0)
+    num = (fp - fm) / 2e-6
+    worst = max(worst, np.max(np.abs(num - d[:, k])) / max(np.max(np.abs(num)), np.max(np.abs(d[:, k])), 1e-12))
+  assert worst < 1e-5, worst
+  print("  electrons: main reflections = cctbx direct (electron table) to %.1e, f'' ignored; %d gradients = "
+        "differences to %.1e" % (err, len(p0), worst))
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
@@ -378,6 +417,7 @@ def run():
   test_rank_by_absences()
   test_recovery()
   test_aspherical_table()
+  test_electron()
   print("OK")
 
 
