@@ -27,7 +27,7 @@ from fractions import Fraction
 
 import numpy as np
 
-from cctbx import adptbx, sgtbx, uctbx
+from cctbx import sgtbx, uctbx
 from cctbx.array_family import flex
 from cctbx.eltbx import xray_scattering
 
