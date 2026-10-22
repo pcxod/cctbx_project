@@ -6,6 +6,7 @@ from cctbx import uctbx, xray, sgtbx, crystal
 from smtbx.refinement import constraints
 import smtbx.refinement.constraints.adp
 import smtbx.refinement.constraints.site
+import smtbx.refinement.constraints.rigid
 from scitbx import sparse
 from scitbx import matrix as mat
 from cctbx.array_family import flex
@@ -284,6 +285,40 @@ def exercise_shared_site_symmetry_equivalent():
   reparametrisation.linearise()
   assert approx_equal(copy_1.value, (0.1, -0.2, -0.3), eps=1e-15)
 
+def exercise_rigid_proxy_symmetry_equivalent():
+  # a symmetry copy of a rigid-group atom (e.g. the pivot neighbour of a
+  # riding H across a symmetry element) wraps a proxy, not an asu site: this
+  # dereferenced a null original() before
+  xs = xray.structure(
+    crystal_symmetry=crystal.symmetry(
+      unit_cell=(5, 6, 7),
+      space_group_symbol='hall: P 2x'),
+    scatterers=flex.xray_scatterer((
+      xray.scatterer("C0", site=(0.1, 0.2, 0.3)),
+      xray.scatterer("C1", site=(0.3, 0.2, 0.3)),
+      xray.scatterer("C2", site=(0.1, 0.4, 0.3)),
+    )))
+  for sc in xs.scatterers():
+    sc.flags.set_grad_site(True)
+  connectivity_table = smtbx.utils.connectivity_table(xs)
+  reparametrisation = constraints.reparametrisation(
+    xs, [smtbx.refinement.constraints.rigid.rigid_rotatable_expandable_group(
+      0, (1, 2), True, True)],
+    connectivity_table)
+  g = sgtbx.rt_mx('x,-y,-z')
+  copy_1 = reparametrisation.add_new_site_parameter(1, g)
+  reparametrisation.finalise()
+  reparametrisation.linearise()
+  proxy = copy_1.argument(0)
+  assert approx_equal(copy_1.value, g*proxy.value, eps=1e-15)
+  assert approx_equal(copy_1.value, (0.3, -0.2, -0.3), eps=1e-12)
+  jt = reparametrisation.jacobian_transpose.as_dense_matrix()
+  r = g.r().as_double()
+  for i in range(jt.focus()[0]):
+    for j in range(3):
+      assert approx_equal(jt[i, copy_1.index + j],
+        sum(r[3*j + k]*jt[i, proxy.index + k] for k in range(3)), eps=1e-15)
+
 def exercise_u_iso_proportional_to_pivot_u_eq():
   xs = xray.structure(
     crystal_symmetry=crystal.symmetry(
@@ -452,6 +487,7 @@ def exercise(verbose):
   c_oh_test_case(staggered=True, verbose=verbose).run()
   exercise_symmetry_equivalent()
   exercise_shared_site_symmetry_equivalent()
+  exercise_rigid_proxy_symmetry_equivalent()
 
 def run():
   libtbx.utils.show_times_at_exit()
