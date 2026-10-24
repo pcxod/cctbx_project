@@ -30,6 +30,7 @@ import random
 from cctbx import xray
 from cctbx.array_family import flex
 from scitbx.math import bessel_i1_over_i0
+from libtbx.test_utils import approx_equal
 
 
 def d_target_d_modulus_fcalc(fo, fc, a, b, k, e, centric):
@@ -427,6 +428,139 @@ def exercise_the_accumulator_family_is_chosen_and_enforced():
   print("\tml_target picks the fixed-scale accumulator and refuses the other")
 
 
+def exercise_log_likelihood_against_the_cctbx_target():
+  """ LL_work and LL_free against cctbx.xray.mlf_target_and_gradients.
+
+  An oracle rather than a self-consistency check: a second implementation of
+  the same amplitude target, already bound and already used by mmtbx.
+
+  It pins two conventions as well as the arithmetic. cctbx's target_work() and
+  target_test() are *means* per reflection, not sums, so the comparison is
+  against work_per_reflection(); and r_free_flags true means the test set,
+  which is what ml_data.is_free() also takes it to mean. Getting the second one
+  backwards would swap a large sum with a small one and still look plausible.
+  """
+  from cctbx import crystal, miller
+  from smtbx_refinement_least_squares_ext import ml_data, ml_log_likelihood
+
+  random.seed(3)
+  n = 400
+  cs = crystal.symmetry(unit_cell=(10, 11, 12, 90, 90, 90),
+                        space_group_symbol="P 21 21 21")
+  indices = flex.miller_index()
+  h = 0
+  while indices.size() < n:
+    h += 1
+    indices.append(((h % 7) + 1, (h//7) % 8, (h//56) % 9))
+  ms = miller.set(crystal_symmetry=cs, indices=indices, anomalous_flag=False)
+
+  fc = flex.complex_double(
+    [complex(random.uniform(-30, 30), random.uniform(-30, 30))
+     for _ in range(n)])
+  modulus_fc = flex.abs(fc)
+  fo = flex.double([max(0.5, m*random.uniform(0.7, 1.3)) for m in modulus_fc])
+  alpha = flex.double([random.uniform(0.4, 0.95) for _ in range(n)])
+  beta = flex.double([random.uniform(20, 200) for _ in range(n)])
+  epsilons = ms.epsilons().data().as_double()
+  centric = ms.centric_flags().data()
+  free = flex.bool([random.random() < 0.2 for _ in range(n)])
+
+  ml = ml_data(alpha=alpha, beta=beta, epsilon=epsilons, centric=centric,
+               intensity=False, free_flags=free, scale_factor=1.0)
+  ours = ml_log_likelihood(fo_sq=fo*fo,
+                           sigma_fo_sq=flex.double(n, 0.5),
+                           observables=modulus_fc*modulus_fc, ml_data=ml)
+  oracle = xray.mlf_target_and_gradients(
+    f_obs=fo, r_free_flags=free, f_calc=fc, alpha=alpha, beta=beta,
+    scale_factor=1.0, epsilons=epsilons, centric_flags=centric,
+    compute_gradients=False)
+
+  assert ours.n_skipped == 0, ours.n_skipped
+  assert ours.n_work + ours.n_free == n
+  assert ours.n_free == free.count(True)
+  assert approx_equal(ours.work_per_reflection(), oracle.target_work(), 1e-12)
+  assert approx_equal(ours.free_per_reflection(), oracle.target_test(), 1e-12)
+
+  # free_only is what the per-cycle report calls, so it must give the same free
+  # sum as the full pass and simply not pay for the working one. Worth pinning:
+  # a skip that also skipped free reflections would show up as a plausible
+  # smaller number rather than as an error.
+  only = ml_log_likelihood(fo_sq=fo*fo, sigma_fo_sq=flex.double(n, 0.5),
+                           observables=modulus_fc*modulus_fc, ml_data=ml,
+                           free_only=True)
+  assert only.n_free == ours.n_free, (only.n_free, ours.n_free)
+  assert approx_equal(only.free, ours.free, 1e-12)
+  assert only.n_work == 0 and only.work == 0, (only.n_work, only.work)
+  print("\tLL work and free agree with cctbx's own mlf target, free_only too")
+
+
+def exercise_log_likelihood_reaches_the_driver():
+  """ crystallographic_ls.log_likelihood() after a build, both targets.
+
+  Least squares must answer None rather than raise, since a caller reporting
+  the cycle does not know which target is in force.
+  """
+  from cctbx.development import random_structure
+  from scitbx.lstbx import normal_eqns
+  from smtbx.refinement import least_squares, constraints, sigma_a
+  import smtbx.utils
+
+  if not sigma_a.is_available():
+    print("\tskipped: the alpha/beta estimator is not available here")
+    return
+
+  random.seed(7)
+  xs = random_structure.xray_structure(
+    space_group_symbol="P 21 21 21",
+    elements=["C"]*14 + ["O"]*3, u_iso=0.045, random_u_iso=True)
+  fo_sq = xs.structure_factors(d_min=1.0).f_calc().norm()
+  fo_sq = fo_sq.customized_copy(
+    sigmas=flex.double([max(0.5, 0.04*v) for v in fo_sq.data()]))
+  fo_sq.set_observation_type_xray_intensity()
+  free = fo_sq.generate_r_free_flags(fraction=0.1, max_free=None).data()
+
+  def build(target):
+    xs2 = xs.deep_copy_scatterers()
+    random.seed(11)
+    for sc in xs2.scatterers():
+      sc.site = tuple(c + random.uniform(-0.004, 0.004) for c in sc.site)
+      sc.flags.set_grad_site(True)
+      sc.flags.set_use_u_iso(True)
+      sc.flags.set_grad_u_iso(True)
+    rep = constraints.reparametrisation(
+      structure=xs2, constraints=[],
+      connectivity_table=smtbx.utils.connectivity_table(xs2))
+    engine = (normal_eqns.non_linear_ls_with_fixed_scale_factor_BLAS_2
+              if target else
+              normal_eqns.non_linear_ls_with_separable_scale_factor_BLAS_2)
+    klass = least_squares.crystallographic_ls_class(
+      non_linear_ls_with_separable_scale_factor=engine,
+      n_parameters=rep.n_independents, may_parallelise=False)
+    kwds = dict(weighting_scheme=least_squares.unit_weighting())
+    if target is not None:
+      kwds.update(ml_target=target, ml_free_flags=free,
+                  ml_free_reflections_per_bin=40)
+    ls = klass(fo_sq.as_xray_observations(), rep, **kwds)
+    ls.build_up()
+    return ls.log_likelihood(), ls.r_free()
+
+  ll, rf = build(None)
+  assert ll is None
+  assert rf == (None, 0), rf
+  for target in ("mlf", "mli"):
+    ll, (r, n) = build(target)
+    assert ll is not None, target
+    assert ll.n_free > 0 and ll.n_work > ll.n_free, target
+    for v in (ll.work, ll.free):
+      assert v == v and abs(v) < 1e30, (target, v)
+    # r_free counts every flagged reflection; the likelihood counts only those
+    # its guards let through, so it can only be the smaller of the two
+    assert n == free.count(True), (target, n)
+    assert ll.n_free <= n, (target, ll.n_free, n)
+    assert 0 <= r < 1, (target, r)
+  print("\tlog_likelihood() and r_free() reach the driver for both targets")
+
+
 def run():
   exercise_effective_observation_reproduces_the_gradient()
   exercise_the_weight_is_positive()
@@ -437,6 +571,8 @@ def run():
   exercise_a_refinement_builds_end_to_end()
   exercise_blas_3_gives_the_same_equations()
   exercise_the_accumulator_family_is_chosen_and_enforced()
+  exercise_log_likelihood_against_the_cctbx_target()
+  exercise_log_likelihood_reaches_the_driver()
   print("OK")
 
 

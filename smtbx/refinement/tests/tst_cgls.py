@@ -123,6 +123,86 @@ def exercise_restraints():
     print("\t%-20s step agrees to %.1e" % (label, difference))
 
 
+def exercise_restraint_weight_scale():
+  """ restraints_weight_scale shall reach both solvers, and reach them alike.
+
+  The restraints are applied twice over in this codebase: build_up puts them
+  into the normal equations, and cgls._add_restraints puts them into the
+  linearised problem separately. A multiplier added to one and not the other
+  would leave the direct solver and the conjugate gradients refining different
+  problems, which no existing test would catch because each is self-consistent.
+
+  So this checks both that the knob does something and that it does the same
+  thing on both routes.
+  """
+  from cctbx import geometry_restraints
+  from smtbx.refinement import restraints
+  observations = observations_from(reference_structure())
+
+  bond_proxies = geometry_restraints.shared_bond_simple_proxy()
+  bond_proxies.append(
+    geometry_restraints.bond_simple_proxy(
+      i_seqs=(0, 1), distance_ideal=1.5, weight=10.))
+  bond_proxies.append(
+    geometry_restraints.bond_simple_proxy(
+      i_seqs=(1, 2), distance_ideal=1.5, weight=10.))
+
+  steps = {}
+  for scale in (1.0, 25.0):
+    xs = shaken_structure()
+    ls = least_squares_for(xs, observations, consistent_weighting)
+    ls.restraints_manager = restraints.manager(bond_proxies=bond_proxies)
+    ls.restraints_weight_scale = scale
+    ls.build_up()
+    problem = cgls.linearised_problem(ls, ls.scale_factor())
+    step, iterations = cgls.solve(
+      problem, preconditioner=problem.block_preconditioner(ls),
+      tolerance=1e-10)
+    ls.solve()
+    reference = ls.step()
+    difference = (step - reference).norm()/reference.norm()
+    assert difference < 1e-8, (scale, difference)
+    steps[scale] = reference.deep_copy()
+
+  departure = ((steps[25.0] - steps[1.0]).norm()/steps[1.0].norm())
+  assert departure > 1e-6, departure
+  print("\tthe restraint weight scale reaches both solvers alike (%.1e)"
+        % departure)
+
+
+def exercise_normalisation_per_cycle():
+  """ restraints_normalisation_per_cycle shall recompute, and default off. """
+  from cctbx import geometry_restraints
+  from smtbx.refinement import restraints
+  observations = observations_from(reference_structure())
+  bond_proxies = geometry_restraints.shared_bond_simple_proxy()
+  bond_proxies.append(
+    geometry_restraints.bond_simple_proxy(
+      i_seqs=(0, 1), distance_ideal=1.5, weight=10.))
+
+  seen = {}
+  for per_cycle in (False, True):
+    xs = shaken_structure()
+    ls = least_squares_for(xs, observations, consistent_weighting)
+    ls.restraints_manager = restraints.manager(bond_proxies=bond_proxies)
+    ls.restraints_normalisation_per_cycle = per_cycle
+    factors = []
+    for _ in range(3):
+      ls.build_up()
+      factors.append(ls.restraints_normalisation_factor)
+      ls.solve()
+      ls.step_forward()
+    seen[per_cycle] = factors
+
+  assert len(set(seen[False])) == 1, seen[False]
+  assert len(set(seen[True])) > 1, seen[True]
+  # the first cycle computes it either way, so the two must agree there;
+  # they are separate refinements, so agree to rounding rather than bitwise
+  first_gap = abs(seen[True][0] - seen[False][0])/abs(seen[False][0])
+  assert first_gap < 1e-10, (first_gap, seen[True][0], seen[False][0])
+  print("\tthe normalisation factor is frozen unless asked to be recomputed")
+
+
 def exercise_f_mask():
   """ A solvent mask shall be part of the linearised problem.
 
@@ -780,6 +860,8 @@ def run():
   exercise_step_matches_cholesky()
   exercise_block_preconditioner()
   exercise_restraints()
+  exercise_restraint_weight_scale()
+  exercise_normalisation_per_cycle()
   exercise_f_mask()
   exercise_precomputed_mask_data()
   exercise_matrix_free_matches_stored()

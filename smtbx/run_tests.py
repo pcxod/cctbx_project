@@ -42,6 +42,7 @@ tst_list = [
     # the unstable ones, which run() does not run at all
     "$D/refinement/tests/tst_scipy_minimisers.py",
     "$D/refinement/tests/tst_cgls.py",
+    "$D/modulation/tests/tst_modulation.py",
 ]
 
 # unstable test
