@@ -55,14 +55,6 @@ class _():
     assert fc_sq.is_xray_intensity_array()
     weighting = ext.mainstream_shelx_weighting(a=self.a, b=self.b)
 
-    def mainstream_shelx_weighting_compute_chi_sq(fo_sq, fc_sq, a,b):
-      weighting.a = a
-      weighting.b = b
-      weights = weighting(
-        fo_sq.data(), fo_sq.sigmas(), fc_sq.data(), fo_sq.indices(), scale_factor)
-      return (flex.sum(
-        weights * flex.pow2(fo_sq.data() - scale_factor * fc_sq.data())))
-
     fo_sq = fo_sq.deep_copy()
     fo_sq.data().set_selected(fo_sq.data() < 0, 0)
 
@@ -84,53 +76,58 @@ class _():
     b_step = 0.4 * start_b
 
     # sort data and setup binning by fc/fc_max
-    fc_sq_over_fc_sq_max = fc_sq.data()/flex.max(fc_sq.data())
-    permutation = flex.sort_permutation(fc_sq_over_fc_sq_max)
-    fc_sq_over_fc_sq_max = fc_sq.customized_copy(
-      data=fc_sq_over_fc_sq_max).select(permutation)
-    fc_sq = fc_sq.select(permutation)
-    fo_sq = fo_sq.select(permutation)
+    permutation = flex.sort_permutation(fc_sq.data()/flex.max(fc_sq.data()))
+    k = scale_factor
+    fo = fo_sq.data().select(permutation).as_numpy_array()
+    s = fo_sq.sigmas().select(permutation).as_numpy_array()
+    fc = fc_sq.data().select(permutation).as_numpy_array()
     n_bins = 10
-    bin_max = 0
-    bin_limits = flex.size_t(1, 0)
-    bin_count = flex.size_t()
+    bin_limits = [0] + [int(math.ceil((i+1) * fo.size/n_bins)) for i in range(n_bins)]
+    bin_count = [bin_limits[i+1] - bin_limits[i] for i in range(n_bins)]
+    # per bin what does not depend on a and b: P, sigma^2 and (fo - k fc)^2
+    bins = []
     for i in range(n_bins):
-      bin_limits.append(int(math.ceil((i+1) * fc_sq.size()/n_bins)))
-      bin_count.append(bin_limits[i+1] - bin_limits[i])
+      lo, hi = bin_limits[i], bin_limits[i+1]
+      pb = (np.maximum(fo[lo:hi], 0.) + 2 * k * fc[lo:hi]) / 3.
+      bins.append((pb, s[lo:hi] * s[lo:hi], np.square(fo[lo:hi] - k * fc[lo:hi])))
 
-    n = fo_sq.size()//(fo_sq.size()-n_independent_params)
+    n = fo.size//(fo.size-n_independent_params)
 
-    # search on a 9x9 grid to determine best values of a and b
-    gridding = flex.grid(9,9)
+    # search on a 9x9 grid to determine best values of a and b, each bin as one
+    # numpy block with the operations of weighting_schemes.h compute() in the
+    # same order and a sequential sum (cumsum, as flex.sum, not numpy's
+    # pairwise sum), so the same a and b bit for bit as one C++ call per point
     while (a_step > 1e-4 and b_step > 5e-3):
-      tmp = flex.double(gridding, 0)
-      binned_chi_sq = [tmp.deep_copy() for i in range(n_bins)]
       start_a = max(start_a, 4*a_step) - 4*a_step
       start_b = max(start_b, 4*b_step) - 4*b_step
-      for i_bin in range(n_bins):
-        sel = flex.size_t_range(bin_limits[i_bin], bin_limits[i_bin+1])
-        fc2 = fc_sq.select(sel)
-        fo2 = fo_sq.select(sel)
-        b = start_b
-        for j in range(9):
-          a = start_a
-          b += b_step
-          for k in range(9):
-            a += a_step
-            binned_chi_sq[i_bin][j,k] += mainstream_shelx_weighting_compute_chi_sq(fo2, fc2, a, b)
+      av, bv, a, b = [], [], start_a, start_b
+      for j in range(9):
+        a += a_step
+        b += b_step
+        av.append(a)
+        bv.append(b)
+      av = np.array(av)[:, None, None]
+      bkv = np.array([bb * k for bb in bv])[None, :, None]
+      binned_chi_sq = []
+      for i_bin, (pb, ssq, d2) in enumerate(bins):
+        if bin_count[i_bin] == 0:
+          binned_chi_sq.append(np.zeros((9, 9)))
+          continue
+        w = 1. / ((ssq + np.square(av * pb)) + bkv * pb)
+        binned_chi_sq.append(np.cumsum(w * d2, axis=2)[:, :, -1].T)
       min_variance = 9e9
       j_min, k_min = (0, 0)
       for j in range(9):
-        for k in range(9):
+        for kk in range(9):
           variance = 0
           for i_bin in range(n_bins):
             if bin_count[i_bin] == 0: continue
-            goof = math.sqrt(binned_chi_sq[i_bin][j,k]*n/bin_count[i_bin])
+            goof = math.sqrt(binned_chi_sq[i_bin][j,kk]*n/bin_count[i_bin])
             variance += (goof-1)**2
           min_variance = min(variance, min_variance)
           if variance == min_variance:
             j_min = j
-            k_min = k
+            k_min = kk
       start_a += k_min*a_step
       start_b += j_min*b_step
       if k_min == 8:

@@ -234,7 +234,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
               arg("scatterers"),
               arg("file_name"),
               arg("space_group"),
-              arg("anomalous_flag")),
+              arg("anomalous_flag"),
+              arg("wanted") = af::shared<cctbx::miller::index<> >()),
             return_value_policy<manage_new_object>())
           .staticmethod("build")
           .def("build_with_fallback", &wt::build_with_fallback,
@@ -243,7 +244,10 @@ namespace smtbx { namespace structure_factors { namespace direct {
               arg("file_name"),
               arg("space_group"),
               arg("anomalous_flag"),
-              arg("scattering_type_registry")),
+              arg("scattering_type_registry"),
+              // the Miller indices this table will ever be asked for; empty keeps
+              // every row, which is what it did before
+              arg("wanted") = af::shared<cctbx::miller::index<> >()),
             return_value_policy<manage_new_object>())
           .staticmethod("build_with_fallback")
           .def("build_lookup_based_for_tests", &wt::build_lookup_based_for_tests,

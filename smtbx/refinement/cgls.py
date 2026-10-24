@@ -254,6 +254,9 @@ class linearised_problem(object):
     factor = ls.restraints_normalisation_factor
     if factor is None:
       factor = 1
+    # and the user's multiplier on top, or CGLS and the direct solver would
+    # answer differently for the same refinement
+    factor *= getattr(ls, 'restraints_weight_scale', 1.0)
     # non_linear_ls::add_equations negates the right hand side by default, so
     # what build_up puts into the normal equations for a restraint is
     # -w delta G. The residual is stored negated here to say the same thing,

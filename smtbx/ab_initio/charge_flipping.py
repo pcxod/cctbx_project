@@ -42,6 +42,7 @@ from cctbx.array_family import flex
 from cctbx import sgtbx
 from cctbx import miller
 from cctbx import maptbx
+from cctbx import crystal
 from cctbx import translation_search
 from cctbx import symmetry_search
 
@@ -63,6 +64,28 @@ class _array_extension(oop.injector, miller.array):
                                    need_sorting=True):
     """ As per ref. [2] """
     cut = int(weak_reflection_fraction * source.size())
+    if not need_sorting:
+      # **The whole step in one C++ call, with the GIL released.** Driven from
+      # Python this is six flex operations with the GIL held between them, and
+      # it measured 0.150 ms of a 0.78 ms charge-flipping cycle scaling 0.97x
+      # on four threads while the FFT steps around it reached 2.56x and 3.32x.
+      #
+      # Only the unsorted path: sorting first would need the permutation
+      # applied to both arrays, and the hot path (weak_reflection_improved_
+      # iterator) passes need_sorting=False.
+      #
+      # Falls back to the Python below if the extension is older than this --
+      # a missing symbol must not take the solver down.
+      try:
+        return miller.array(self, ab_initio.ext.oszlanyi_suto_phase_transfer(
+          space_group=self.space_group(),
+          miller_indices=self.indices(),
+          f_obs_data=self.data(),
+          source_data=source.data(),
+          cut=cut,
+          delta_varphi=delta_varphi))
+      except AttributeError:
+        pass
     if need_sorting:
       p = self.sort_permutation(by_value="data", reverse=True)
       target = self.select(p)
@@ -128,8 +151,19 @@ class density_modification_iterator(object):
   def __init__(self, **kwds):
     adopt_optional_init_args(self, kwds)
 
-  def start(self, f_obs, phases, f_000=0):
+  def start(self, f_obs, phases, f_000=0, free=None):
+    """ `free`: reflections inside the sphere that were not measured, as
+    the amplitude expected at their resolution or as complex values to carry
+    on from. They take what the map gives them each cycle instead of staying
+    at zero, since an unmeasured low-angle reflection fixed at zero is an
+    error the flips never correct and alone stops the phase transition. """
     self.f_obs = f_obs
+    self.f_free = free if free is not None else f_obs.select(flex.size_t())
+    self.f_calc_free = self.f_free
+    if not self.f_free.is_complex_array():
+      self.f_calc_free = self.f_free.phase_transfer(
+        (2*math.pi)*flex.random_double(self.f_free.size()))
+    self.f_all = None
     self.crystal_gridding = maptbx.crystal_gridding(
       unit_cell=self.f_obs.unit_cell(),
       space_group_info=sgtbx.space_group_info('P1'),
@@ -154,6 +188,10 @@ class density_modification_iterator(object):
     else:
       self.f_obs *= normalisations.data()
       self.f_calc *= normalisations.data()
+    if self.f_free.size():
+      s = flex.mean(normalisations.data())
+      self.f_calc_free = self.f_calc_free.array(
+        data=self.f_calc_free.data()*(1/s if divide else s))
     self.f_000 = 0
     self.compute_electron_density_map()
 
@@ -180,9 +218,10 @@ class density_modification_iterator(object):
   def compute_electron_density_map(self):
     """ Compute the electron density from the structure factors self.f_calc
     and the 000 component self.f_000, scaling by the unit cell volume """
-    self.rho_map = miller.fft_map(self.crystal_gridding,
-                                  self.f_calc,
-                                  self.f_000)
+    f_calc = self.f_calc
+    if self.f_free.size():
+      f_calc = self.f_calc.concatenate(self.f_calc_free)
+    self.rho_map = miller.fft_map(self.crystal_gridding, f_calc, self.f_000)
     self.rho_map.apply_volume_scaling()
 
   def compute_structure_factors(self):
@@ -191,8 +230,22 @@ class density_modification_iterator(object):
     grid points """
     rho = self.rho_map.real_map()
     self._g_000 = flex.sum(rho) * self.fft_scale
-    self._g = self.f_obs.structure_factors_from_map(rho, in_place_fft=True)
-    self._g *= self.fft_scale
+    if not self.f_free.size():
+      self._g = self.f_obs.structure_factors_from_map(rho, in_place_fft=True)
+      self._g *= self.fft_scale
+      return
+    if self.f_all is None:
+      self.f_all = miller.set.concatenate(self.f_obs, self.f_free)
+    g = self.f_all.structure_factors_from_map(rho, in_place_fft=True)
+    g *= self.fft_scale
+    n = self.f_obs.size()
+    self._g = miller.array(self.f_obs, g.data()[:n])
+    # unmeasured amplitudes follow the map but may not outgrow the measured ones
+    gf = g.data()[n:]
+    a = flex.abs(gf)
+    cap = flex.max(self.f_obs.data())
+    a.set_selected(a > cap, cap)
+    self.f_calc_free = miller.array(self.f_free, flex.polar(a, flex.arg(gf)))
 
   def transfer_phase_to_f_obs(self):
     self.f_calc = self.f_obs.phase_transfer(self._g)
@@ -236,9 +289,10 @@ class weak_reflection_improved_iterator(basic_iterator):
     self.delta_varphi = delta_varphi
     self.weak_reflection_fraction = weak_reflection_fraction
 
-  def start(self, f_obs, phases, f_000=0):
+  def start(self, f_obs, phases, f_000=0, **kwds):
     """ sort f_obs by increasing amplitudes once and for all """
-    super(weak_reflection_improved_iterator, self).start(f_obs, phases, f_000)
+    super(weak_reflection_improved_iterator, self).start(
+      f_obs, phases, f_000, **kwds)
     p = self.f_obs.sort_permutation(by_value="data", reverse=True)
     self.f_obs = self.f_obs.select(p)
 
@@ -248,6 +302,92 @@ class weak_reflection_improved_iterator(basic_iterator):
       self.delta_varphi,
       self.weak_reflection_fraction,
       need_sorting=False)
+
+  # The whole cycle in one C++ call over a persistent map (ext.
+  # charge_flipping_cycle), the same bits as the steps above. f_calc,
+  # f_calc_free, _g, _g_000 and f_000 come out of it only when read; rho_map
+  # answers sigma() and skewness() from it and builds the fft_map for anything
+  # else. Anything that recomputes the map (normalise) ends the fused run with
+  # what the caller changed kept, and the next cycle starts a new one.
+  _cf_attributes = ('f_calc', 'f_calc_free', '_g', '_g_000', 'f_000')
+
+  def _cf_lazy(self):
+    # without a free set f_calc_free is the empty set start() made, not C++'s
+    if self.f_free.size(): return self._cf_attributes
+    return self._cf_attributes[:1] + self._cf_attributes[2:]
+
+  def __getattr__(self, k):
+    d = self.__dict__
+    if k not in self._cf_attributes or not d.get('_cf_live'):
+      raise AttributeError(k)
+    c = d['_cf']
+    if k == 'f_calc': v = miller.array(d['f_obs'], c.f_calc())
+    elif k == 'f_calc_free': v = miller.array(d['f_free'], c.f_calc_free())
+    elif k == '_g': v = miller.array(d['f_obs'], c.g_obs())
+    elif k == 'f_000': v = c.f_000()
+    else: v = c.g_000()
+    d[k] = v
+    return v
+
+  def compute_electron_density_map(self):
+    d = self.__dict__
+    if d.get('_cf_live'):
+      for k in self._cf_lazy(): getattr(self, k)
+      d['_cf_live'] = False
+      d['_cf_n'] += 1
+    super(weak_reflection_improved_iterator,
+          self).compute_electron_density_map()
+
+  def __next__(self):
+    d = self.__dict__
+    if not d.get('_cf_live'):
+      d['_cf'] = ab_initio.ext.charge_flipping_cycle(
+        n_real=self.crystal_gridding.n_real(),
+        indices_obs=self.f_obs.indices(),
+        f_obs=self.f_obs.data(),
+        indices_free=self.f_free.indices(),
+        fft_scale=self.fft_scale,
+        volume_scale=1/self.f_obs.unit_cell().volume(),
+        cut=int(self.weak_reflection_fraction*self.f_obs.size()),
+        delta_varphi=self.delta_varphi)
+      d['_cf'].load(self.rho_map.real_map())
+      d['_cf_live'] = True
+      d.setdefault('_cf_n', 0)
+    d['_cf'].run(self.delta)
+    d['_cf_n'] += 1
+    for k in self._cf_lazy(): d.pop(k, None)
+    self.rho_map = _fused_rho_map(self)
+    return self
+
+
+class _fused_rho_map(object):
+  """ rho_map of weak_reflection_improved_iterator after a fused cycle """
+
+  def __init__(self, it):
+    self.it, self.n, self.m = it, it._cf_n, None
+
+  def _check(self):
+    if not self.it.__dict__.get('_cf_live') or self.it._cf_n != self.n:
+      raise RuntimeError('fused rho_map read after its cycle')
+
+  def sigma(self):
+    self._check()
+    return self.it._cf.sigma()
+
+  def skewness(self):
+    self._check()
+    return self.it._cf.skewness()
+
+  def __getattr__(self, k):
+    if k.startswith('__'): raise AttributeError(k)
+    if self.m is None:
+      self._check()
+      it = self.it
+      f = it.f_calc
+      if it.f_free.size(): f = f.concatenate(it.f_calc_free)
+      self.m = miller.fft_map(it.crystal_gridding, f, it.f_000)
+      self.m.apply_volume_scaling()
+    return getattr(self.m, k)
 
 
 class low_density_elimination_iterator(density_modification_iterator):
@@ -277,6 +417,14 @@ class low_density_elimination_iterator(density_modification_iterator):
     rho = self.rho_map.real_map_unpadded(in_place=False).as_1d()
     return 0.2*flex.mean(rho.select(rho >0))
 
+
+max_shift_refinements = 3
+
+# crystal_gridding.tags() builds the symmetry tags of the whole grid (0.01-0.11
+# s) and was rebuilt on every call although it depends only on the gridding and
+# the space group. peak_list writes into the tag array it is given, so one
+# pristine copy is kept and each search gets a fresh copy of it
+_tags_cache = {}
 
 def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
   # The fast correlation map as per cctbx.translation_search.fast_nv1995
@@ -311,7 +459,7 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
                        unit_cell=f_calc_in_p1.unit_cell(),
                        positive_iso_level=0.8)
 
-  search_parameters = maptbx.peak_search_parameters(
+  p = maptbx.peak_search_parameters(
     peak_search_level=1,
     peak_cutoff=0.5,
     interpolate=True,
@@ -319,15 +467,38 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
     general_positions_only=False,
     min_cross_distance=f_obs.d_min()/2)
   ## The correlation map is not a miller.fft_map, just a 3D flex.double
-  correlation_map_peaks = crystal_gridding.tags().peak_search(
-    map=correlation_map,
-    parameters=search_parameters)
+  # crystal_gridding_tags.peak_search with the tag array taken from the cache
+  key = (tuple(crystal_gridding.n_real()),
+         crystal_gridding.space_group_info().type().hall_symbol())
+  tags = _tags_cache.get(key)
+  if tags is None:
+    if len(_tags_cache) > 8: _tags_cache.clear()
+    tags = _tags_cache[key] = \
+      crystal_gridding.tags().tags().tag_array().deep_copy()
+  grid_peaks = maptbx.peak_list(
+    data=correlation_map, tags=tags.deep_copy(),
+    peak_search_level=p.peak_search_level(), max_peaks=p.max_peaks(),
+    peak_cutoff=p.peak_cutoff(), interpolate=p.interpolate())
+  correlation_map_peaks = maptbx.peak_cluster_analysis(
+    peak_list=grid_peaks,
+    special_position_settings=crystal.special_position_settings(
+      crystal_symmetry=crystal_gridding.crystal_symmetry(),
+      min_distance_sym_equiv=p.min_distance_sym_equiv()),
+    general_positions_only=p.general_positions_only(),
+    effective_resolution=p.effective_resolution(),
+    significant_height_fraction=p.significant_height_fraction(),
+    cluster_height_fraction=p.cluster_height_fraction(),
+    min_cross_distance=p.min_cross_distance(),
+    max_clusters=p.max_clusters(),
+    min_cubicle_edge=p.min_cubicle_edge())
   # iterate over the strong peak; for each, shift and symmetrised f_calc
-  for peak in correlation_map_peaks:
-    if peak.height < min_cc_peak_height: break
+  # ponytail: only the first solution is ever used, and each shift refinement
+  # is ~30 ms of Python-driven LBFGS -- 78 per trial was 91 % of a trial
+  for i, peak in enumerate(correlation_map_peaks):
+    if peak.height < min_cc_peak_height or i >= max_shift_refinements: break
     sr = symmetry_search.shift_refinement(
       f_obs, f_calc_in_p1, peak.site)
-    yield sr.symmetrised_shifted_sf.f_x, sr.shift, sr.goos.correlation
+    yield sr.f_x, sr.shift, sr.goos.correlation
 
 
 def amplitude_quasi_normalisations(f_obs):
@@ -356,6 +527,8 @@ class solving_iterator(object):
   map_skewness_stability_threshold = 0.01
   polishing_iterations = 5
   min_cc_peak_height = 0.9
+  # a rise of the map skewness below this is noise, not a phase transition
+  min_skewness_at_phase_transition = 1.5
 
   def __init__(self, flipping_iterator, f_obs, **kwds):
     self.flipping_iterator = flipping_iterator
@@ -423,15 +596,39 @@ class solving_iterator(object):
     del self.finished
 
   def _starting(self, f_obs):
+    free = f_obs.complete_set().lone_set(f_obs.map_to_asu()) \
+                .expand_to_p1().map_to_asu().unique_under_symmetry()
     f_obs = f_obs.expand_to_p1() \
                  .merge_equivalents().array() \
                  .discard_sigmas()
+    free = free.lone_set(f_obs)
     if self.normalisations_for is not None:
       self.normalisations = self.normalisations_for(f_obs)
       f_obs /= self.normalisations.data()
+    free = self.expected_amplitudes(f_obs, free)
     while True:
-      self.flipping_iterator.start(f_obs, self.initial_phases_for(f_obs))
+      # both phase sets from the trial's own generator, so a seed reproduces
+      phases = self.initial_phases_for(f_obs)
+      self.flipping_iterator.start(
+        f_obs, phases,
+        free=free.phase_transfer(self.initial_phases_for(free)))
       yield self.guessing_delta
+
+  def expected_amplitudes(self, f_obs, free):
+    """ `free` as an array holding the mean amplitude of `f_obs` in the
+    resolution shell of each reflection, the outermost shells standing in
+    beyond the measured range. """
+    if not free.size():
+      return f_obs.select(flex.size_t())
+    f_obs.setup_binner_counting_sorted(reflections_per_bin=200)
+    binner = f_obs.binner()
+    means = [flex.mean(f_obs.data().select(binner.selection(i)))
+             for i in binner.range_used()]
+    lo, hi = binner.range_used()[0], binner.range_used()[-1]
+    data = flex.double([
+      means[min(max(binner.get_i_bin(s), lo), hi) - lo]
+      for s in free.d_star_sq().data()])
+    return free.array(data=data)
 
   def _finished(self):
     if not self.max_attempts_exceeded:
@@ -455,7 +652,14 @@ class solving_iterator(object):
       low, high = 0.8, 1.
       if low <= r <= high:
         yield self.solving
-        flipping.restart()
+        # Control only comes back here when solving failed, and the way back
+        # passes through the starting state, which has already given the
+        # flipping iterator a fresh set of random phases. So there is nothing
+        # to restart -- only the delta to guess again. This used to call
+        # flipping.restart(), which no iterator in this module has ever
+        # defined, so the whole c_tot_over_c_flip method raised AttributeError
+        # the first time an attempt failed. It went unnoticed because a
+        # structure that solves on the first attempt never reaches this line.
         delta_needs_initialisation = True
       else:
         if self.yield_during_delta_guessing:
@@ -487,20 +691,29 @@ class solving_iterator(object):
   def _solving(self):
     while True:
       i_attempt = 0
+      # Later attempts get a longer run at it. Held locally and recomputed from
+      # the configured value on each pass: this used to multiply
+      # self.max_solving_iterations in place, so the budget compounded over
+      # every attempt of every pass and never went back down -- a structure
+      # that kept failing could end up being given thousands of iterations per
+      # attempt, and the configured value no longer meant anything.
       while i_attempt < self.max_attempts_to_get_phase_transition:
         i_attempt += 1
+        solving_iterations = self.max_solving_iterations
         if i_attempt > 2:
-          self.max_solving_iterations *= 1.5
+          solving_iterations *= 1.5**(i_attempt - 2)
         self.skewness_evolution = observable_evolution()
         for n, flipping in enumerate(
           itertools.islice(self.flipping_iterator,
-                           0, int(self.max_solving_iterations))):
+                           0, int(solving_iterations))):
           self.iteration_index = n
           if n % self.yield_solving_interval == 0:
             yield self.solving
           self.skewness_evolution.append(flipping.rho_map.skewness())
           #if flipping.rho_map.skewness() < 3: continue
-          if self.skewness_evolution.had_phase_transition():
+          if (self.skewness_evolution.had_phase_transition()
+              and flipping.rho_map.skewness()
+                  >= self.min_skewness_at_phase_transition):
             self.attempts.append(n)
             yield self.polishing
             break
@@ -535,7 +748,8 @@ class solving_iterator(object):
         constant_rho_c=self.flipping_iterator.delta)
       low_density_elimination.start(f_obs=self.flipping_iterator.f_obs,
                                     phases=self.flipping_iterator.f_calc,
-                                    f_000=0)
+                                    f_000=0,
+                                    free=self.flipping_iterator.f_calc_free)
       for i in range(self.polishing_iterations):
         next(low_density_elimination)
       yield self.evaluating
@@ -551,7 +765,10 @@ class solving_iterator(object):
                                       self.flipping_iterator.f_calc,
                                       self.min_cc_peak_height):
           if cc_peak_height < self.min_cc_peak_height: break
-          self.f_calc_solutions.append((f_calc, shift, cc_peak_height))
+          fo, fc = original_f_obs.common_sets(f_calc)
+          r1 = fo.r1_factor(fc, scale_factor=fo.scale_factor(fc))
+          self.f_calc_solutions.append((f_calc, shift, cc_peak_height, r1))
+        self.f_calc_solutions.sort(key=lambda s: s[3])
         if self.f_calc_solutions: yield self.finished
         else: yield self.starting
       self.max_attempts_exceeded = True

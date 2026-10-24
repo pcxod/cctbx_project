@@ -90,6 +90,11 @@ def exercise_gaussian():
   assert approx_equal(g.at_d_star_sq(flex.double([3,4])),
     [13.4251206, 15.079612])
   assert approx_equal(g.at_d_star(math.sqrt(3)), 13.4251206)
+  assert approx_equal(g.at_stol_sq(flex.double([3/4.,1])), [13.4251206, 15.079612])
+  assert approx_equal(g.at_stol(flex.double([math.sqrt(3/4.),1])),
+    [13.4251206, 15.079612])
+  assert approx_equal(g.at_d_star(flex.double([math.sqrt(3),2])),
+    [13.4251206, 15.079612])
   s = pickle.dumps(g)
   l = pickle.loads(s)
   assert l.n_terms() == g.n_terms()

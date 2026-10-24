@@ -10,6 +10,8 @@ tst_list = [
     ["$D/ab_initio/tests/tst_charge_flipping.py", '--fix_seed', '--on=E',
      '"hall: P 1"', '"hall: P 3"', '"hall: -P 2ybc"' ],
     "$D/masks/tests/tst_masks.py",
+    "$D/masks/tests/tst_solvent_level.py",
+    "$D/masks/tests/tst_boundary_smearing.py",
     "$D/structure_factors/direct/tests/tst_standard_xray.py",
     "$D/structure_factors/direct/tests/tst_table_based.py",
     ["$D/refinement/tests/tst_weighting_schemes.py",
@@ -40,6 +42,7 @@ tst_list = [
     # the unstable ones, which run() does not run at all
     "$D/refinement/tests/tst_scipy_minimisers.py",
     "$D/refinement/tests/tst_cgls.py",
+    "$D/modulation/tests/tst_modulation.py",
 ]
 
 # unstable test

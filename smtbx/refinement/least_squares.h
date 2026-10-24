@@ -617,6 +617,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
               objective_only,
               f_calc_.ref(), observables_.ref(), weights_.ref(),
               design_matrix_, ml));
+          accumulator->first = thread_idx;
+          accumulator->stride = thread_count;
           accumulators.push_back(accumulator);
           pool.push_back(boost::shared_ptr<boost::thread>(
             new boost::thread(boost::ref(*accumulator))));
@@ -728,6 +730,14 @@ namespace smtbx { namespace refinement { namespace least_squares {
       void reset() {
         current = 0;
       }
+      /// chunk k of the same partition, for a worker that takes every n-th
+      chunk at(int k) const {
+        int first = k*256;
+        if (first >= count) {
+          return chunk();
+        }
+        return chunk(first, std::min(count - first, 256));
+      }
     };
 
     /// the shared one, defined next to f_calc_function_base which uses it
@@ -826,6 +836,13 @@ namespace smtbx { namespace refinement { namespace least_squares {
        */
       ml_data<FloatType> const& ml;
       bool running;
+      /* Chunks first, first + stride, ... of the scheduler's partition, or
+         whatever next() hands out while first is negative. The workers are
+         given a fixed share: taken first come first served, which rows a
+         worker sums into its private matrix, and so the rounding of the
+         merged normal equations, changed from one run to the next.
+       */
+      int first, stride;
       accumulate_reflection_chunk(
         builder_base<FloatType>& parent,
         Scheduler& scheduler,
@@ -858,7 +875,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
         f_calc(f_calc), observables(observables), weights(weights),
         design_matrix(design_matrix),
         ml(ml),
-        running(true)
+        running(true),
+        first(-1), stride(1)
       {}
 
       void operator()() {
@@ -909,8 +927,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
            */
           f_calc_function.set_defer_grad_observable(
             fast && f_calc_function.raw_gradients());
-          while (true) {
-            chunk ch = scheduler.next();
+          for (int k = first; ; k += stride) {
+            chunk ch = first < 0 ? scheduler.next() : scheduler.at(k);
             if (ch.size == 0) {
               break;
             }
