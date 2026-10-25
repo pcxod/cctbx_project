@@ -14,6 +14,7 @@ tst_list = [
     "$D/masks/tests/tst_boundary_smearing.py",
     "$D/structure_factors/direct/tests/tst_standard_xray.py",
     "$D/structure_factors/direct/tests/tst_table_based.py",
+    "$D/structure_factors/direct/tests/tst_tshb.py",
     ["$D/refinement/tests/tst_weighting_schemes.py",
      "--fix_random_seeds"],
     "$D/refinement/constraints/tests/tst_lbfgs.py",

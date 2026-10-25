@@ -178,6 +178,16 @@ namespace smtbx { namespace structure_factors { namespace direct {
     struct scatterer_contribution_wrapper {
       typedef one_scatterer_one_h::scatterer_contribution<FloatType> wt;
 
+      // the form factor of every symmetry equivalent, h R_i, for an aspherical
+      // contribution
+      static af::shared<std::complex<FloatType> > get_full(wt const &self,
+        std::size_t scatterer_index, miller::index<> const &h)
+      {
+        std::vector<std::complex<FloatType> > const &v =
+          self.get_full(scatterer_index, h);
+        return af::shared<std::complex<FloatType> >(&v[0], &v[0] + v.size());
+      }
+
       static void wrap() {
         using namespace boost::python;
         class_<wt, boost::noncopyable>("scatterer_contribution", no_init)
@@ -187,6 +197,7 @@ namespace smtbx { namespace structure_factors { namespace direct {
           .def("at_d_star_sq", &wt::at_d_star_sq,
             (arg("d_start_sq")), return_internal_reference<>())
           .def("is_spherical", &wt::is_spherical)
+          .def("get_full", get_full, (arg("scatterer_index"), arg("h")))
           .def("scatterers_not_in_table", &wt::scatterers_not_in_table)
           ;
       }

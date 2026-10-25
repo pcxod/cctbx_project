@@ -7,6 +7,7 @@
 #include <boost/shared_ptr.hpp>
 #include <smtbx/structure_factors/direct/standard_xray.h>
 #include <cctbx/miller/lookup_utils.h>
+#include <smtbx/structure_factors/direct/harmonic_expansion.h>
 #include <cstdlib>
 #include <cstring>
 #include <charconv>
@@ -1175,6 +1176,25 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         af::shared<cctbx::miller::index<> > const &wanted =
           af::shared<cctbx::miller::index<> >())
     {
+      if (boost::algorithm::iends_with(file_name, ".tshb")) {
+        // densities, not tabulated values: any reflection can be evaluated,
+        // so `wanted` has nothing to filter
+        boost::shared_ptr<harmonic_expansion_data<FloatType> > densities(
+          new harmonic_expansion_data<FloatType>(scatterers, file_name));
+        direct::one_scatterer_one_h::scatterer_contribution<FloatType> *result =
+          new harmonic_expansion<FloatType>(densities, u_cell, space_group);
+        af::shared<bool> const &covered = densities->covered;
+        if (std::find(covered.begin(), covered.end(), false) != covered.end()) {
+          if (scattering_type_registry == 0) {
+            delete result;
+            throw SMTBX_ERROR("the table does not cover the whole structure and"
+              " no scattering type registry was given to fall back on");
+          }
+          result = new partially_tabulated<FloatType>(result, scatterers,
+            *scattering_type_registry, covered, space_group.n_smx());
+        }
+        return result;
+      }
       table_reader<FloatType> data(u_cell, scatterers, file_name, space_group, wanted);
       if(!data.use_AD()){
         anomalous_flag = false;
