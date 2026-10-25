@@ -64,14 +64,31 @@ class solvent_accessible_volume(object):
     self.flood_fill = cctbx.masks.flood_fill(
       self.mask.data, xray_structure.unit_cell())
     self.exclude_void_flags = [False] * self.flood_fill.n_voids()
+    self._void_isel = None
     self.solvent_accessible_volume = self.n_solvent_grid_points() \
         / self.mask.data.size() * xray_structure.unit_cell().volume()
 
   def n_voids(self):
     return self.flood_fill.n_voids()
 
+  def void_iselection(self, i):
+    """ The grid points of void i, as indices into the mask's grid.
+
+    Built once, on first use: the mask does not change after it is computed.
+    structure_factors used to compare the whole grid against each label, and
+    then copy and zero a whole map to sum one void, every iteration: four to
+    five passes over the grid per void per iteration, 39 ms an iteration for
+    four voids on a 1.7M point grid. Summing the selected points instead costs
+    a pass over the void alone.
+    """
+    if self._void_isel is None:
+      labels = self.mask.data.as_1d()
+      self._void_isel = [(labels == j+2).iselection()
+                         for j in range(self.n_voids())]
+    return self._void_isel[i]
+
   def n_solvent_grid_points(self):
-    return sum([self.mask.data.count(i+2) for i in range(self.n_voids())
+    return sum([self.void_iselection(i).size() for i in range(self.n_voids())
                 if not self.exclude_void_flags[i]])
 
   def show_summary(self, log=None):
@@ -159,6 +176,14 @@ class mask(object):
     # structure where every atom is at 0.999 should behave as though it were
     # fully occupied.
     self.occupancy_full_tolerance = 0.01
+    # How Fc for the difference map is computed: "direct" (as always) or
+    # "fft". The direct sum goes as reflections x atoms and is the largest
+    # single cost of the mask stage once a structure has a few hundred atoms:
+    # measured at 0.66 s for 300 atoms in the asymmetric unit, 27,000
+    # reflections, against 41 ms for a transform pair at the mask's grid. The
+    # map it feeds is only cut into solvent regions, so the FFT's accuracy is
+    # ample - but it is a change of numbers, hence not the default.
+    self.f_calc_algorithm = "direct"
     self._f_mask = None
     self._masked_diff_map = None
     self.f_000 = None
@@ -194,6 +219,7 @@ class mask(object):
     self.mask = result.mask
     self.flood_fill = result.flood_fill
     self.exclude_void_flags = [False] * self.flood_fill.n_voids()
+    self._void_isel = None
     self.solvent_accessible_volume = self.n_solvent_grid_points() \
         / self.mask.data.size() * self.xray_structure.unit_cell().volume()
 
@@ -432,7 +458,7 @@ class mask(object):
     else:
       f_calc_set = self.fo2.set()
     self.f_calc = f_calc_set.structure_factors_from_scatterers(
-      self.xray_structure, algorithm="direct").f_calc()
+      self.xray_structure, algorithm=self.f_calc_algorithm).f_calc()
     f_obs = self.f_obs()
     self.scale_factor = flex.sum(f_obs.data())/flex.sum(
       flex.abs(self.f_calc.data()))
@@ -464,12 +490,11 @@ class mask(object):
         # restored every void still carries its share of the missing F(000),
         # and the test would then discard a void merely for holding less than
         # that share rather than for holding nothing.
-        selection = self.mask.data == j+2
+        selection = self.void_iselection(j)
         if self.exclude_void_flags[j]:
           masked_diff_map.set_selected(selection, 0)
           continue
-        diff_map_ = masked_diff_map.deep_copy().set_selected(~selection, 0)
-        electrons = flex.sum(diff_map_) * self.fft_scale
+        electrons = flex.sum(masked_diff_map.select(selection)) * self.fft_scale
         if electrons < 0:
           masked_diff_map.set_selected(selection, 0)
           f_000_s -= electrons
@@ -552,8 +577,24 @@ class mask(object):
   def n_voids(self):
     return self.flood_fill.n_voids()
 
+  def void_iselection(self, i):
+    """ The grid points of void i, as indices into the mask's grid.
+
+    Built once, on first use: the mask does not change after it is computed.
+    structure_factors used to compare the whole grid against each label, and
+    then copy and zero a whole map to sum one void, every iteration: four to
+    five passes over the grid per void per iteration, 39 ms an iteration for
+    four voids on a 1.7M point grid. Summing the selected points instead costs
+    a pass over the void alone.
+    """
+    if self._void_isel is None:
+      labels = self.mask.data.as_1d()
+      self._void_isel = [(labels == j+2).iselection()
+                         for j in range(self.n_voids())]
+    return self._void_isel[i]
+
   def n_solvent_grid_points(self):
-    return sum([self.mask.data.count(i+2) for i in range(self.n_voids())
+    return sum([self.void_iselection(i).size() for i in range(self.n_voids())
                 if not self.exclude_void_flags[i]])
 
   def electron_counts_per_void(self):
@@ -569,9 +610,8 @@ class mask(object):
       if self.exclude_void_flags[i]:
         electrons = 0
       else:
-        diff_map = masked_diff_map.deep_copy().set_selected(
-          self.mask.data != i+2, 0)
-        electrons = flex.sum(diff_map) * self.fft_scale
+        electrons = flex.sum(
+          masked_diff_map.select(self.void_iselection(i))) * self.fft_scale
       self._electron_counts_per_void.append(electrons)
     # a smeared boundary puts density outside the flood filled void that the
     # labels above cannot attribute, so the parts are made to sum to the whole
