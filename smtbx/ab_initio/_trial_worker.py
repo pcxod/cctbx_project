@@ -38,12 +38,19 @@ def main(argv):
     # within a worker but cannot stop the others. That is deliberate: a worker
     # that finds a good solution should stop, and the rest are already running.
     good_enough_cc_peak_height=job["good_enough_cc_peak_height"],
+    # Fallback rounds would otherwise start at first_seed + n_trials, which is
+    # the next worker's block: same settings, same starting phases, the same
+    # trials run twice. Moving by the total keeps every worker on seeds of its
+    # own, the very ones the serial run would use for that round.
+    fallback_seed_stride=job.get("n_trials_total"),
     out=open(out_path + ".log", "w"))
 
   # Only what the parent needs. Whole trial records would drag every trial's
   # miller arrays through the pickle for no purpose.
   payload = dict(
     cc_peak_height=result.cc_peak_height,
+    # multi_trial ranks by R1, and so must the parent across workers
+    r1=result.r1,
     f_calc=result.f_calc,
     shift=result.shift,
     f_calc_in_p1=result.f_calc_in_p1,

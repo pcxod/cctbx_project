@@ -15,8 +15,13 @@ Measured over 377 Crystallography Open Database entries with real measured
 data, scoring peak positions against the deposited model with
 `cctbx.euclidean_model_matching`, the solution rate roughly doubles.
 
-**Ranking is just the correlation peak height.** That is worth stating
-plainly, because it is not what one would guess and not what this started as.
+**Candidates are ranked by R1; the correlation peak height decides only when
+a trial counts as a solution and when the run may stop early** (see `solve`:
+"R separates right from wrong where the correlation peak does not"). What
+follows is why chemistry is not used either, and it still holds.
+
+On the peak height as a ranker, the history is worth stating plainly, because
+it is not what one would guess and not what this started as.
 Chemical plausibility of the peak list -- the fraction of peaks with a
 neighbour at a bonding distance -- looks like the better signal on a single
 structure, and is actively harmful at corpus scale: it correlates -0.08 with
@@ -134,6 +139,11 @@ def solve(f_obs,
           # the solving iterator's threshold for a symmetrisation peak to be
           # a solution; None keeps its own (0.9)
           min_cc_peak_height=None,
+          # how far the seeds of a fallback round move on from this round's;
+          # None moves them past the trials just run. parallel_trials passes
+          # its total trial count, so that each worker's fallback seeds are the
+          # serial run's again and never another worker's.
+          fallback_seed_stride=None,
           # the first call's settings, so that every fallback round overrides
           # those and not the previous round's (24 Sep 2026)
           _base=None):
@@ -401,7 +411,10 @@ def solve(f_obs,
               good_r1=good_r1, retry_r1=retry_r1,
               max_seconds=(None if max_seconds is None
                            else max_seconds - elapsed),
-              first_seed=first_seed + len(trials), initial_phases_list=None,
+              first_seed=first_seed + (len(trials) if fallback_seed_stride
+                                       is None else fallback_seed_stride),
+              fallback_seed_stride=fallback_seed_stride,
+              initial_phases_list=None,
               keep_solutions=keep_solutions, loop=loop, callback=callback,
               n_threads=n_threads, stop=stop, verbose=verbose, out=out)
     kw.update(fallbacks[0])
