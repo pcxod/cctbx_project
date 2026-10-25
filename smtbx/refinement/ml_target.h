@@ -307,56 +307,137 @@ namespace smtbx { namespace refinement { namespace least_squares {
       \f$ F_c \f$, grows with \f$ \sigma^2 \f$ and vanishes as
       \f$ \sigma \to 0 \f$.
 
-      The integral is evaluated by Gauss-Hermite quadrature after the
-      substitution \f$ I_t = I_o + \sqrt{2}\,\sigma x \f$, which casts it in the
-      weight \f$ e^{-x^2} \f$ the rule assumes. Nodes at \f$ I_t < 0 \f$
-      contribute nothing.
+      How the integral is evaluated is described at mli_quadrature.
 
       Reference: Pannu & Read (1996) Acta Cryst. A52, 659-668.
    */
+  /// How the integral over the true intensity is evaluated.
+  /** It used to be one 20-node Gauss-Hermite rule centred on the measurement,
+      \f$ I_t = I_o + \sqrt{2}\,\sigma x \f$. That rule assumes the integrand
+      is the measurement Gaussian times something smooth on the scale of
+      sigma, and two common cases break that:
+
+      - **Weak reflections.** The centric density has an integrable
+        \f$ 1/\sqrt{I_t} \f$ singularity at zero, and both densities are
+        steep there. When the measurement reaches zero, as it does for every
+        near-absent reflection, no rule in \f$ I_t \f$ resolves it.
+      - **A model distribution narrower than the measurement**
+        (sigma comparable to or larger than the spread of
+        \f$ P(I_t \mid F_c) \f$). Then the nodes, spaced on the scale of
+        sigma, step over the peak.
+
+      Measured against an adaptive Gauss-Kronrod reference on the reflections
+      of a refined synthetic structure: 9 to 19 percent of reflections had
+      dT/d|Fc| wrong by more than 1 percent of \f$ a^2|F_c|/\epsilon b \f$ (the
+      effective observation relative to \f$ |F_c| \f$), some by factors of
+      several and with the wrong sign.
+
+      Now there are two branches, chosen per reflection:
+
+      - **Away from zero** (the posterior mean is more than six posterior
+        standard deviations above zero): Gauss-Hermite in \f$ I_t \f$, centred
+        on the product of the measurement Gaussian and a Gaussian with the
+        model distribution's mean \f$ a^2F_c^2 + \epsilon b \f$ and variance,
+        with the ratio to that proposal carried in the weights. It follows
+        whichever factor is narrower.
+      - **Near zero, or a measurement more than four combined standard
+        deviations from the model's mean and not much narrower than the
+        model's spread:** Gauss-Legendre in
+        \f$ u = \sqrt{I_t} \f$, where
+        \f$ P(I_t)\,dI_t = P_F(u)\,du \f$ is smooth (Rice or Woolfson in
+        amplitude). The rule spans the intersection of the two factors'
+        supports (each taken to \f$ e^{-40} \f$ of its own peak), or their
+        union where they do not overlap. For such an outlier the posterior
+        sits in the tails of both, so it takes the union in four panels.
+
+      With 8 Hermite and 24 Legendre nodes, the worst error in dT/d|Fc| over
+      the effective-observation scale \f$ |d| + a^2|F_c|/\epsilon b \f$ was
+      1.6e-4 on three refined synthetic data sets (it had been 5.5) and 1e-3
+      over 2,000 random cases (sigma/Io from 0.003 to beyond 1, model spread
+      from a thousandth to half of Fc^2). On 3,000 cases with models far off
+      the data it was 8e-3, where the old rule failed outright. Per pass over
+      the refined data it is 20-37 percent faster than the old rule, because
+      most reflections take the 8-node branch. With 10 + 32 nodes the error
+      falls to the level of the Bessel approximations in scitbx/math/bessel.h
+      (3e-7) at about the old rule's cost.
+
+      The old warning against trimming nodes still applies to the rule it was
+      about: centred on the measurement, fewer nodes are worse. Here the
+      Hermite rule is centred on the posterior and the weak cases go to the
+      Legendre rule, so it does not.
+   */
   namespace mli_quadrature {
-    /* Twenty nodes: the integrand is smooth and unimodal in one variable, so
-       this resolves it well beyond the precision carried elsewhere, at a cost
-       of twenty Bessel evaluations per reflection.
+    inline int n_hermite() { return 8; }
 
-       Do not trim the rule to make the intensity target cheaper. The outer
-       weights look negligible - 2e-13 at the ends - but the weight is not the
-       contribution: the Rice density spans many orders of magnitude across the
-       nodes, and where the measurement is weak, sigma is comparable to Io and
-       every inner node falls at a negative true intensity and is skipped. The
-       outer nodes are then the only ones left, which is precisely the case
-       this target exists to handle.
-
-       Measured over 4000 random (Io, sigma, Fc, alpha, beta) with sigma/Io
-       from 0.01 to 1, worst relative error in dT/d|Fc| against the full rule:
-       18 nodes 0.71, 16 nodes 2.0, 14 nodes 6.5. One node off each end is
-       already a 71% error in the gradient the refinement follows.
-     */
-    inline int n_nodes() { return 20; }
-
-    inline double const* nodes() {
-      static const double x[20] = {
-        -5.387480890011233, -4.603682449550744, -3.944764040115625,
-        -3.347854567383216, -2.788806058428131, -2.254974002089276,
-        -1.738537712116586, -1.234076215395323, -0.737473728545394,
-        -0.245340708300901,  0.245340708300901,  0.737473728545394,
-         1.234076215395323,  1.738537712116586,  2.254974002089276,
-         2.788806058428131,  3.347854567383216,  3.944764040115625,
-         4.603682449550744,  5.387480890011233 };
+    inline double const* hermite_nodes() {
+      static const double x[8] = {
+        -2.9306374202572441, -1.981656756695843, -1.1571937124467802,
+        -0.38118699020732211, 0.38118699020732211, 1.1571937124467802,
+        1.981656756695843, 2.9306374202572441 };
       return x;
     }
 
-    /// Weights of the rule, already divided by sqrt(pi) so they sum to one.
-    inline double const* weights() {
-      static const double w[20] = {
-        2.229393645534151e-13, 4.399340992273181e-10, 1.086069370769282e-07,
-        7.802556478532064e-06, 2.283386360163540e-04, 3.243773342237863e-03,
-        2.481052088746362e-02, 1.090172060200233e-01, 2.866755053628341e-01,
-        4.622436696006101e-01, 4.622436696006101e-01, 2.866755053628341e-01,
-        1.090172060200233e-01, 2.481052088746362e-02, 3.243773342237863e-03,
-        2.283386360163540e-04, 7.802556478532064e-06, 1.086069370769282e-07,
-        4.399340992273181e-10, 2.229393645534151e-13 };
+    /// Weights of the Hermite rule, already divided by sqrt(pi).
+    inline double const* hermite_weights() {
+      static const double w[8] = {
+        0.0001126145383753679, 0.009635220120788263, 0.117239907661759,
+        0.37301225767907747, 0.37301225767907747, 0.117239907661759,
+        0.009635220120788263, 0.0001126145383753679 };
       return w;
+    }
+
+    inline int n_legendre() { return 24; }
+
+    inline double const* legendre_nodes() {
+      static const double x[24] = {
+        -0.99518721999702131, -0.97472855597130947, -0.9382745520027328,
+        -0.88641552700440107, -0.82000198597390295, -0.74012419157855436,
+        -0.64809365193697555, -0.54542147138883956, -0.43379350762604513,
+        -0.3150426796961634, -0.19111886747361631, -0.06405689286260563,
+        0.06405689286260563, 0.19111886747361631, 0.3150426796961634,
+        0.43379350762604513, 0.54542147138883956, 0.64809365193697555,
+        0.74012419157855436, 0.82000198597390295, 0.88641552700440107,
+        0.9382745520027328, 0.97472855597130947, 0.99518721999702131 };
+      return x;
+    }
+
+    inline double const* legendre_weights() {
+      static const double w[24] = {
+        0.01234122979998869, 0.028531388628933559, 0.044277438817419412,
+        0.05929858491543636, 0.073346481411080161, 0.086190161531953205,
+        0.097618652104113926, 0.10744427011596556, 0.11550566805372552,
+        0.12167047292780329, 0.12583745634682825, 0.12793819534675202,
+        0.12793819534675202, 0.12583745634682825, 0.12167047292780329,
+        0.11550566805372552, 0.10744427011596556, 0.097618652104113926,
+        0.086190161531953205, 0.073346481411080161, 0.05929858491543636,
+        0.044277438817419412, 0.028531388628933559, 0.01234122979998869 };
+      return w;
+    }
+
+    /// ln of P(I_t) dI_t/du and its derivative in |Fc|, at u = sqrt(I_t) > 0.
+    /** Rice (acentric) or Woolfson (centric) in amplitude, with every
+        constant, so that the target value is the log-likelihood proper.
+     */
+    template <typename FloatType>
+    inline void ln_p_amplitude(FloatType u, FloatType a, FloatType modulus_fc,
+                               FloatType eb, bool centric,
+                               FloatType &ln_p, FloatType &d_ln_p)
+    {
+      FloatType const sq = u*u + a*a*modulus_fc*modulus_fc;
+      if (centric) {
+        // ln cosh(z) = |z| + ln(1 + exp(-2|z|)) - ln 2, safe for large z
+        FloatType const z = a*u*modulus_fc/eb;
+        FloatType const az = std::abs(z);
+        ln_p = 0.5*std::log(2/(scitbx::constants::pi*eb)) - sq/(2*eb)
+               + az + std::log1p(std::exp(-2*az)) - std::log(FloatType(2));
+        d_ln_p = -a*a*modulus_fc/eb + (a*u/eb)*std::tanh(z);
+      }
+      else {
+        FloatType const arg = 2*a*u*modulus_fc/eb;
+        ln_p = std::log(2*u/eb) - sq/eb + scitbx::math::bessel::ln_of_i0(arg);
+        d_ln_p = -2*a*a*modulus_fc/eb
+                 + (2*a*u/eb)*scitbx::math::bessel::i1_over_i0(arg);
+      }
     }
   }
 
@@ -366,6 +447,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
       ordinary Gauss-Newton practice: an approximate Hessian changes how fast a
       refinement converges, never what it converges to, because the gradient is
       what vanishes at the answer.
+
+      T = -ln of the integral of P(I_t) N(I_o; I_t, sigma^2) over I_t >= 0.
    */
   template <typename FloatType>
   bool mli_target_and_d_modulus_fc(
@@ -393,74 +476,113 @@ namespace smtbx { namespace refinement { namespace least_squares {
     FloatType const b = beta*scale_factor*scale_factor;
     FloatType const eb = epsilon*b;
     FloatType const modulus_fc = std::sqrt(observable);
-    FloatType const root_two_sigma =
-      std::sqrt(FloatType(2))*sigma_fo_sq;
+    FloatType const s = sigma_fo_sq;
+    FloatType const two_s_sq = 2*s*s;
 
-    int const n = mli_quadrature::n_nodes();
-    double const *x = mli_quadrature::nodes();
-    double const *w = mli_quadrature::weights();
+    // the posterior, both factors taken as Gaussians in I_t
+    FloatType const mean_p = a*a*observable + eb;
+    FloatType const var_p = (centric ? 2 : 1)*eb*(eb + 2*a*a*observable);
+    FloatType const precision = 1/(s*s) + 1/var_p;
+    FloatType const mu = (fo_sq/(s*s) + mean_p/var_p)/precision;
+    FloatType const tau = 1/std::sqrt(precision);
 
-    /* Accumulated with the largest log-density factored out: the Rice density
-       underflows to zero for a reflection the model fits badly, and the ratio
+    /* Accumulated with the largest log-term factored out: the densities
+       underflow to zero for a reflection the model fits badly, and the ratio
        below is then 0/0 rather than the finite number it should be.
      */
+    FloatType ln_q[96], dln_p[96];
+    bool usable[96];
     FloatType ln_max = -std::numeric_limits<FloatType>::max();
-    /* Fixed arrays, not vectors: three heap allocations per reflection for a
-       rule whose size never changes.
+    FloatType ln_prefactor;
+    int n, n_w;             // nodes used, and the length of the rule repeated
+    double const *w;
+    /* A measurement many combined standard deviations from what the model
+       expects puts the posterior in the far tails of both factors, where
+       neither Gaussian picture holds; that case takes the u branch too, over
+       the union of the supports and in four panels.
      */
-    FloatType ln_p[20], dln_p[20];
-    bool usable[20];
-    SMTBX_ASSERT(n <= 20);
-    for (int i = 0; i < n; i++) {
-      usable[i] = false;
-      FloatType const it = fo_sq + root_two_sigma*static_cast<FloatType>(x[i]);
-      if (it <= 0) {
-        continue;             // no density below zero true intensity
+    bool const outlier =
+      std::abs(fo_sq - mean_p) >= 4*std::sqrt(s*s + var_p)
+      && s*s >= 0.09*var_p;  // a narrow measurement is still the posterior
+    if (mu - 6*tau > 0 && !outlier) {
+      n = n_w = mli_quadrature::n_hermite();
+      double const *x = mli_quadrature::hermite_nodes();
+      w = mli_quadrature::hermite_weights();
+      FloatType const root_two_tau = std::sqrt(FloatType(2))*tau;
+      for (int i = 0; i < n; i++) {
+        usable[i] = false;
+        FloatType const xi = static_cast<FloatType>(x[i]);
+        FloatType const it = mu + root_two_tau*xi;
+        if (it <= 0) continue;
+        FloatType const u = std::sqrt(it), d = it - fo_sq;
+        FloatType ln_p;
+        mli_quadrature::ln_p_amplitude(u, a, modulus_fc, eb, centric,
+                                       ln_p, dln_p[i]);
+        // P(I_t) = P_F(u)/(2u); the proposal's exp(-x^2) is divided out
+        ln_q[i] = ln_p - std::log(2*u) - d*d/two_s_sq + xi*xi;
+        usable[i] = true;
+        if (ln_q[i] > ln_max) ln_max = ln_q[i];
       }
-      FloatType const root_it = std::sqrt(it);
-      if (centric) {
-        // ln cosh(z) = |z| + ln(1 + exp(-2|z|)) - ln 2, safe for large z
-        FloatType const z = a*root_it*modulus_fc/eb;
-        FloatType const az = std::abs(z);
-        ln_p[i] = 0.5*std::log(2/(scitbx::constants::pi*eb))
-                  - std::log(2*root_it) - (it + a*a*observable)/(2*eb)
-                  + az + std::log1p(std::exp(-2*az)) - std::log(FloatType(2));
-        // d ln P / d|Fc|
-        dln_p[i] = -a*a*modulus_fc/eb + (a*root_it/eb)*std::tanh(z);
+      // the integral is (tau/sigma) sum w exp(ln_q), w summing to one
+      ln_prefactor = std::log(tau/s);
+    }
+    else {
+      int const n_rule = mli_quadrature::n_legendre();
+      double const *x = mli_quadrature::legendre_nodes();
+      w = mli_quadrature::legendre_weights();
+      n_w = n_rule;
+      // supports in u, each factor to exp(-40) of its own peak
+      FloatType const m_lo = std::sqrt(std::max(fo_sq - 9*s, FloatType(0)));
+      FloatType const m_hi = std::sqrt(std::max(fo_sq + 9*s, FloatType(0)));
+      FloatType const half_width =
+        (centric ? FloatType(13) : FloatType(9.5))*std::sqrt(eb);
+      FloatType const p_lo = std::max(a*modulus_fc - half_width, FloatType(0));
+      FloatType const p_hi = a*modulus_fc + half_width;
+      FloatType lo = std::max(m_lo, p_lo), hi = std::min(m_hi, p_hi);
+      if (outlier || !(hi > lo)) {
+        lo = std::min(m_lo, p_lo);
+        hi = std::max(m_hi, p_hi);
       }
-      else {
-        FloatType const arg = 2*a*root_it*modulus_fc/eb;
-        ln_p[i] = -std::log(eb) - (it + a*a*observable)/eb
-                  + scitbx::math::bessel::ln_of_i0(arg);
-        // d ln P_Rice / d|Fc|
-        dln_p[i] = -2*a*a*modulus_fc/eb
-                   + (2*a*root_it/eb)*scitbx::math::bessel::i1_over_i0(arg);
+      if (!(hi > lo)) return false;
+      int const panels = outlier ? 4 : 1;
+      n = panels*n_rule;
+      FloatType const half = (hi - lo)/(2*panels);
+      for (int i = 0; i < n; i++) {
+        usable[i] = false;
+        FloatType const left = lo + 2*half*(i/n_rule);
+        FloatType const u = left + half*(static_cast<FloatType>(x[i % n_rule]) + 1);
+        if (u <= 0) continue;
+        FloatType const d = u*u - fo_sq;
+        FloatType ln_p;
+        mli_quadrature::ln_p_amplitude(u, a, modulus_fc, eb, centric,
+                                       ln_p, dln_p[i]);
+        ln_q[i] = ln_p - d*d/two_s_sq;
+        usable[i] = true;
+        if (ln_q[i] > ln_max) ln_max = ln_q[i];
       }
-      usable[i] = true;
-      if (ln_p[i] > ln_max) {
-        ln_max = ln_p[i];
-      }
+      // the integral is half/(sqrt(2 pi) sigma) sum w exp(ln_q), half being
+      // the half-width of one panel
+      ln_prefactor = std::log(half/(std::sqrt(2*scitbx::constants::pi)*s));
     }
     if (ln_max == -std::numeric_limits<FloatType>::max()) {
       return false;
     }
     FloatType sum = 0, sum_d = 0;
     for (int i = 0; i < n; i++) {
-      if (!usable[i]) {
-        continue;
-      }
-      FloatType const p = static_cast<FloatType>(w[i])*std::exp(ln_p[i] - ln_max);
+      if (!usable[i]) continue;
+      FloatType const p =
+        static_cast<FloatType>(w[i % n_w])*std::exp(ln_q[i] - ln_max);
       sum += p;
       sum_d += p*dln_p[i];
     }
     if (sum <= 0) {
       return false;
     }
-    /* T = -ln sum, so dT/d|Fc| = -(sum of P dlnP)/(sum of P). The largest
-       log-density was factored out of every term above, so it comes back into
-       the value here; it cancels out of the ratio the derivative is.
+    /* T = -ln of the integral, so dT/d|Fc| = -(sum of P dlnP)/(sum of P).
+       The factored-out maximum and the prefactor come back into the value;
+       both cancel out of the ratio the derivative is.
      */
-    target_value = -(ln_max + std::log(sum));
+    target_value = -(ln_max + std::log(sum) + ln_prefactor);
     d_target = -sum_d/sum;
     return true;
   }
