@@ -355,6 +355,24 @@ class linearised_problem(object):
 
   def undamped_normal_matrix_times(self, v):
     """ A v, with A = D^T W D, without ever forming A. """
+    # One pass over the stored matrix instead of two, where the builder has
+    # it: the same products, a tile of rows at a time while they are still in
+    # cache (see build_design_matrix::normal_times). The vector form below is
+    # what it computes, and what runs with a builder that lacks it.
+    if hasattr(self.built, 'normal_times'):
+      n = self.n_parameters
+      fused = self.built.normal_times(
+        v, self.inverse_sqrt_weights, self.weights, self.observables,
+        self.scale_factor, flex.sum(self.grad_scale_factor*v))
+      result = fused[:n]
+      result *= self.scale_factor
+      result += self.grad_scale_factor*fused[n]
+      result /= self.sum_w_yo_sq
+      if self.extra_design_matrix is not None:
+        rows = self.extra_design_matrix
+        u = rows.dot(v.as_numpy_array())*self.extra_weights.as_numpy_array()
+        result += flex.double(rows.T.dot(u))
+      return result
     # data equations: D v = k* (J v) + (grad_k* . v) yc
     jv = self._jacobian_times(v)
     jv *= self.scale_factor

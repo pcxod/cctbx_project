@@ -244,8 +244,14 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         return 0                      # no budget given: the accumulator decides
       n = int(n_parameters)
       result = (n*n + n*(n + 1)//2)*8
+      # Past max(32 MB, 512 rows) a larger buffer buys nothing (measured flat,
+      # 1950 and 5200 parameters) but has to be paged in afresh every cycle,
+      # the accumulator releasing it once the normal matrix is formed; the
+      # 512 rows keep a wide row from cutting the chunks thin. The same bound
+      # the threaded build gives its workers, max_worker_buffer_bytes.
+      cap = max(32 << 20, 512*n*8)
       return max(8 << 20,
-                 min(512 << 20, int(max_memory_mb)*1048576 - result))
+                 min(cap, 512 << 20, int(max_memory_mb)*1048576 - result))
 
     def __init__(self, observations, reparametrisation,
                  one_h_linearisation=None, **kwds):

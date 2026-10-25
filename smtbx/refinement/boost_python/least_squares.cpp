@@ -244,6 +244,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
         klass
           .def("times", &wt::times, (arg("x")))
           .def("transpose_times", &wt::transpose_times, (arg("x")))
+          .def("normal_times", &wt::normal_times,
+               (arg("x"), arg("inverse_sqrt_weights"), arg("weights"),
+                arg("observables"), arg("scale_factor"),
+                arg("grad_scale_factor_dot_x")))
           .def("is_mixed_precision", &wt::is_mixed_precision)
           .staticmethod("is_mixed_precision")
           ;

@@ -1405,6 +1405,137 @@ namespace smtbx { namespace refinement { namespace least_squares {
     }
     //@}
 
+    /** @brief The conjugate gradients' whole product in one pass over the
+        matrix.
+
+    With rows R_i = sqrt(w_i) j_i stored, linearised_problem in cgls.py forms
+
+        t  = (R x) * isw
+        u  = (t k + yc g) * w            (g = grad k* . x)
+        result = R^T (u * isw),   and the scalar yc . u
+
+    as two products, each a pass over the whole matrix -- which at the sizes
+    where the matrix is stored at all is bandwidth bound, so the second pass
+    costs as much as the first. Here the matrix is taken a tile of rows at a
+    time, small enough to stay in cache: the tile's part of R x, then its u,
+    then its part of R^T u while the rows are still there. Every element of t
+    and u is formed by the same operations in the same order as the vector
+    expressions; only the sums inside the products are associated differently,
+    which is rounding. Measured on 40000 x 2000: 124 ms for the two passes,
+    89 ms for this, single threaded, and the same ratio on four threads.
+
+    The threads take fixed slabs of tiles and add their partial results in
+    slab order, so the result is the same from one run to the next.
+
+    Returns n + 1 values: R^T (u * isw), then yc . u.
+     */
+    af::shared<FloatType> normal_times(
+      af::const_ref<FloatType> const &x,
+      af::const_ref<FloatType> const &inverse_sqrt_weights,
+      af::const_ref<FloatType> const &weights,
+      af::const_ref<FloatType> const &yc,
+      FloatType k, FloatType g) const
+    {
+      af::versa<StoreType, af::c_grid<2> > const &a = parent_t::design_matrix_;
+      int const m = static_cast<int>(a.accessor()[0]),
+                n = static_cast<int>(a.accessor()[1]);
+      SMTBX_ASSERT(x.size() == std::size_t(n))(x.size())(n);
+      SMTBX_ASSERT(inverse_sqrt_weights.size() == std::size_t(m));
+      SMTBX_ASSERT(weights.size() == std::size_t(m) && yc.size() == std::size_t(m));
+      af::shared<FloatType> result(n + 1, FloatType(0));
+      int const n_threads = parent_t::get_available_threads();
+      if (is_mixed_precision() && n_threads == 1) {
+        /* The one case the tiles lose: a narrow store on one thread, where
+           the plain loops of a tile run behind the matrix_*_mixed kernels
+           (measured 0.9x). The two passes then, with the same elementwise
+           arithmetic in between.
+         */
+        af::shared<FloatType> t(m, af::init_functor_null<FloatType>());
+        times_(m, n, a.begin(), x.begin(), t.begin());
+        FloatType yc_dot_u = 0;
+        for (int i = 0; i < m; i++) {
+          FloatType u = ((t[i]*inverse_sqrt_weights[i])*k + yc[i]*g)*weights[i];
+          yc_dot_u += yc[i]*u;
+          t[i] = u*inverse_sqrt_weights[i];
+        }
+        transpose_times_(m, n, a.begin(), t.begin(), result.begin());
+        result[n] = yc_dot_u;
+        return result;
+      }
+      fused_normal_times(m, n, a.begin(), x.begin(),
+        inverse_sqrt_weights.begin(), weights.begin(), yc.begin(), k, g,
+        result.begin(), n_threads);
+      return result;
+    }
+
+    /// The kernel of normal_times, on raw arrays; out is n + 1 long
+    template <typename S>
+    static void fused_normal_times(int m, int n, S const *a,
+      FloatType const *x, FloatType const *isw, FloatType const *w,
+      FloatType const *yc, FloatType k, FloatType g, FloatType *out,
+      int n_threads)
+    {
+      // rows per tile: about 256 KB of them, so that the second product
+      // finds the tile in L2, and never fewer than 16
+      int const tile = std::max(16,
+        int((256u << 10)/std::max<std::size_t>(1, std::size_t(n)*sizeof(S))));
+      int const n_tiles = (m + tile - 1)/tile;
+      int const n_slabs = std::max(1, std::min(n_threads, n_tiles));
+      std::vector<std::vector<FloatType> > partial(n_slabs,
+        std::vector<FloatType>(n + 1, FloatType(0)));
+      struct slab_job {
+        int first_tile, last_tile, tile, m, n;
+        S const *a; FloatType const *x, *isw, *w, *yc; FloatType k, g;
+        FloatType *out;
+        void operator()() const {
+          std::vector<FloatType> t(tile);
+          FloatType yc_dot_u = 0;
+          for (int b = first_tile; b < last_tile; b++) {
+            int const i0 = b*tile, rows = std::min(tile, m - i0);
+            S const *ab = a + std::size_t(i0)*n;
+            tile_times_(rows, n, ab, x, &t[0]);
+            for (int r = 0; r < rows; r++) {
+              int const i = i0 + r;
+              // as the vector expressions: t*isw, *k, + yc*g, *w
+              FloatType u = ((t[r]*isw[i])*k + yc[i]*g)*w[i];
+              yc_dot_u += yc[i]*u;
+              t[r] = u*isw[i];
+            }
+            tile_transpose_times_add_(rows, n, ab, &t[0], out);
+          }
+          out[n] = yc_dot_u;
+        }
+      };
+      std::vector<slab_job> jobs(n_slabs);
+      for (int s = 0; s < n_slabs; s++) {
+        slab_job j = { int((long long)n_tiles*s/n_slabs),
+                       int((long long)n_tiles*(s + 1)/n_slabs), tile, m, n,
+                       a, x, isw, w, yc, k, g, &partial[s][0] };
+        jobs[s] = j;
+      }
+      {
+        // the tiles are small: BLAS threading underneath would only get in
+        // the way of the slabs
+        blas_threads_scope blas_threads(1);
+        if (n_slabs == 1) {
+          jobs[0]();
+        }
+        else {
+          boost::thread_group pool;
+          for (int s = 1; s < n_slabs; s++) {
+            pool.create_thread(boost::ref(jobs[s]));
+          }
+          jobs[0]();
+          pool.join_all();
+        }
+      }
+      for (int j = 0; j <= n; j++) {
+        FloatType v = 0;
+        for (int s = 0; s < n_slabs; s++) v += partial[s][j];
+        out[j] = v;
+      }
+    }
+
   private:
     /* Overloaded rather than branched on is_mixed_precision(), because the
        BLAS calls only typecheck when the store and the vectors agree.
@@ -1427,6 +1558,41 @@ namespace smtbx { namespace refinement { namespace least_squares {
                                  FloatType const *x, FloatType *y) {
       scitbx::matrix::matrix_transposed_vector_mixed(m, n, a, x, y);
     }
+    /** @name The tiles of fused_normal_times: y = A x and y += A^T x on a
+        few rows, from inside its threads. BLAS for a store of FloatType; for a
+        narrower store, plain loops accumulating in FloatType -- the OpenMP in
+        the matrix_*_mixed kernels must not open a team per tile per thread.
+     */
+    //@{
+    static void tile_times_(int m, int n, FloatType const *a,
+                            FloatType const *x, FloatType *y) {
+      scitbx::matrix::matrix_vector(m, n, a, x, y);
+    }
+    template <typename S>
+    static void tile_times_(int m, int n, S const *a,
+                            FloatType const *x, FloatType *y) {
+      for (int i = 0; i < m; i++) {
+        S const *row = a + std::size_t(i)*n;
+        FloatType s = 0;
+        for (int j = 0; j < n; j++) s += static_cast<FloatType>(row[j])*x[j];
+        y[i] = s;
+      }
+    }
+    static void tile_transpose_times_add_(int m, int n, FloatType const *a,
+                                          FloatType const *x, FloatType *y) {
+      scitbx::matrix::matrix_transposed_vector(m, n, a, x, y,
+                                               FloatType(1), FloatType(1));
+    }
+    template <typename S>
+    static void tile_transpose_times_add_(int m, int n, S const *a,
+                                          FloatType const *x, FloatType *y) {
+      for (int i = 0; i < m; i++) {
+        S const *row = a + std::size_t(i)*n;
+        FloatType const xi = x[i];
+        for (int j = 0; j < n; j++) y[j] += static_cast<FloatType>(row[j])*xi;
+      }
+    }
+    //@}
   };
 
 }}}
