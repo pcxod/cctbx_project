@@ -312,6 +312,7 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         self.f_mask.data())
 
     def build_up(self, objective_only=False):
+      self._inverse_cache = None
       f_mask_data = self.mask_data()
 
       fc_correction = self.reparametrisation.fc_correction
@@ -863,15 +864,31 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
           raise RuntimeError(
             "the normal equations are still incomplete after a full build; "
             "there is no covariance matrix to take.")
-      if not self.step_equations().solved:
-        self.solve()
-      cov = linalg.inverse_of_u_transpose_u(
-        self.step_equations().cholesky_factor_packed_u())
-      cov /= self.sum_w_yo_sq()
+      # The inverse is the expensive part, n^3, and the same for every caller
+      # until the equations change: Olex2 asks three times after the last
+      # cycle (the shift analysis, the annotated matrix, the twin/extinction
+      # block), each of which used to invert afresh. Kept until the next build
+      # or restore, at the cost of holding the n(n+1)/2 inverse that long.
+      cov = self._inverse_cache
+      if cov is None:
+        if not self.step_equations().solved:
+          self.solve()
+        cov = linalg.inverse_of_u_transpose_u(
+          self.step_equations().cholesky_factor_packed_u())
+        cov /= self.sum_w_yo_sq()
+        self._inverse_cache = cov
       if jacobian_transpose is not None:
         cov = jacobian_transpose.self_transpose_times_symmetric_times_self(cov)
+      else:
+        cov = cov.deep_copy()   # the caller may scale it in place
       if normalised_by_goof: cov *= self.variance_goof_factor()
       return cov
+
+    _inverse_cache = None
+
+    def restore_step_equations(self, saved):
+      self._inverse_cache = None
+      return super(klass, self).restore_step_equations(saved)
 
     def covariance_matrix_and_annotations(self):
       jac_tr = self.reparametrisation.jacobian_transpose_matching_grad_fc()
