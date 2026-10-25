@@ -484,13 +484,19 @@ namespace smtbx { namespace refinement { namespace least_squares {
 
     - twinning, because the components are summed as intensities and the
       amplitudes of different components do not add;
-    - a non-trivial Fc correction (extinction, SWAT), because it returns an
-      intensity multiplier which has no place in the amplitude distribution;
     - anything that is not one alpha, beta, epsilon and centric flag per
       reflection.
 
     Each of these would otherwise produce numbers rather than an error, which is
     the worse outcome. OpenMP is refused separately, in build().
+
+    An Fc correction (EXTI, SWAT) is not on the list. It multiplies the
+    observable before the likelihood sees it, so the model amplitude in the
+    distribution is the corrected one, sqrt(y)|Fc|; alpha and beta are
+    estimated against that same corrected Fc, and the correction's own
+    parameters reach the likelihood through d(observable)/dx, which is exact.
+    beta is not rescaled by y: the model error is that of the corrected
+    amplitude, the convention least squares uses for its residual too.
     */
     void check_maximum_likelihood() const {
       if (!ml.active()) {
@@ -498,7 +504,6 @@ namespace smtbx { namespace refinement { namespace least_squares {
       }
       SMTBX_ASSERT(ml.is_consistent_with(reflections_.size()));
       SMTBX_ASSERT(!reflections_.is_twinned());
-      SMTBX_ASSERT(fc_cr.is_trivial());
     }
 
     template<class NormalEquations>

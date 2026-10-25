@@ -569,6 +569,90 @@ def exercise_log_likelihood_reaches_the_driver():
   print("\tlog_likelihood() and r_free() reach the driver for both targets")
 
 
+def exercise_an_fc_correction_reaches_the_likelihood():
+  """ EXTI and SWAT under both targets, against a finite difference of -ln L.
+
+  The correction multiplies the observable before the likelihood sees it, so
+  the right-hand side entry of its parameter must be -d(-ln L)/dx. alpha and
+  beta are held at the central build's: re-estimated from the corrected Fc
+  each build, they would otherwise move with x and the difference would not be
+  of the target the equations are formed for.
+  """
+  from cctbx.development import random_structure
+  from scitbx.lstbx import normal_eqns
+  from smtbx.refinement import least_squares, constraints, sigma_a
+  import smtbx.utils
+
+  if not sigma_a.is_available():
+    print("\tskipped: the alpha/beta estimator is not available here")
+    return
+
+  random.seed(5)
+  xs = random_structure.xray_structure(
+    space_group_symbol="P 21 21 21",
+    elements=["C"]*14 + ["O"]*3, u_iso=0.045, random_u_iso=True)
+  fo_sq = xs.structure_factors(d_min=1.0).f_calc().norm()
+  fo_sq = fo_sq.customized_copy(
+    sigmas=flex.double([max(0.5, 0.04*v) for v in fo_sq.data()]))
+  fo_sq.set_observation_type_xray_intensity()
+  free = fo_sq.generate_r_free_flags(fraction=0.1, max_free=None).data()
+  uc = xs.unit_cell()
+  corrections = {
+    "EXTI": (lambda v: xray.shelx_extinction_correction(uc, 0.71073, v[0]),
+             [0.05]),
+    "SWAT": (lambda v: xray.shelx_SWAT_correction(uc, v[0], v[1]),
+             [0.3, 2.0]),
+  }
+
+  def build(target, make, values, held=None):
+    xs2 = xs.deep_copy_scatterers()
+    random.seed(11)
+    for sc in xs2.scatterers():
+      sc.site = tuple(c + random.uniform(-0.004, 0.004) for c in sc.site)
+      sc.flags.set_grad_site(True)
+      sc.flags.set_use_u_iso(True)
+      sc.flags.set_grad_u_iso(True)
+    cr = make(values)
+    cr.grad = True
+    rep = constraints.reparametrisation(
+      structure=xs2, constraints=[],
+      connectivity_table=smtbx.utils.connectivity_table(xs2),
+      fc_correction=cr)
+    klass = least_squares.crystallographic_ls_class(
+      non_linear_ls_with_separable_scale_factor=
+        normal_eqns.non_linear_ls_with_fixed_scale_factor_BLAS_2,
+      n_parameters=rep.n_independents, may_parallelise=False)
+    ls = klass(fo_sq.as_xray_observations(), rep,
+               weighting_scheme=least_squares.unit_weighting(),
+               ml_target=target, ml_free_flags=free,
+               ml_free_reflections_per_bin=40)
+    if held is not None:
+      ls.build_ml_data = lambda *args, **kwds: held
+    ls.build_up()
+    first = rep.independent_scalar_parameters[-1].index
+    return ls, first
+
+  for target in ("mlf", "mli"):
+    for name, (make, values) in corrections.items():
+      ls, first = build(target, make, values)
+      held = ls.ml_data_last
+      # the accumulator divides its equations by sum(w yo^2)
+      rhs = ls.step_equations().right_hand_side()*ls.sum_w_yo_sq()
+      for i in range(len(values)):
+        h = 1e-5*max(abs(values[i]), 1)
+        ll = []
+        for s in (1, -1):
+          v = list(values)
+          v[i] += s*h
+          ll.append(build(target, make, v, held)[0].log_likelihood().work)
+        fd = (ll[0] - ll[1])/(2*h)
+        g = rhs[first + i]
+        # agreement is 2e-5 to 4e-5, the difference's own error
+        assert abs(fd) > 1e-6, (target, name, i, fd)
+        assert abs(g + fd) < 1e-3*abs(fd), (target, name, i, g, fd)
+  print("\tEXTI and SWAT reach both likelihoods with the right gradient")
+
+
 def run():
   exercise_effective_observation_reproduces_the_gradient()
   exercise_the_weight_is_positive()
@@ -581,6 +665,7 @@ def run():
   exercise_the_accumulator_family_is_chosen_and_enforced()
   exercise_log_likelihood_against_the_cctbx_target()
   exercise_log_likelihood_reaches_the_driver()
+  exercise_an_fc_correction_reaches_the_likelihood()
   print("OK")
 
 
