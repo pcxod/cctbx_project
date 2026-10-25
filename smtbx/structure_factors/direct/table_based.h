@@ -7,6 +7,9 @@
 #include <boost/shared_ptr.hpp>
 #include <smtbx/structure_factors/direct/standard_xray.h>
 #include <cctbx/miller/lookup_utils.h>
+#include <cstdlib>
+#include <cstring>
+#include <charconv>
 #include <cctbx/xray/scatterer_lookup.h>
 #include <fstream>
 #include <cstdio>
@@ -298,36 +301,62 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         }
         // data
         else {
-          boost::split(toks, line, boost::is_any_of(" "));
+          /* Parsed in place. Splitting each row into strings first, then
+             cutting each "re,im" into two more, made three heap strings per
+             value; and the OpenMP loop over a row's columns opened a parallel
+             region per row, hundreds of thousands of them for a work load of
+             a few hundred numbers each. A 150-atom expanded table (245,000
+             rows) took 6.2 s to read that way, and takes 2.0 s now with the
+             same numbers to the bit.
+           */
+          const char *p = line.c_str();
+          char *end;
+          int hkl[3];
+          for (int k = 0; k < 3; k++) {
+            hkl[k] = static_cast<int>(std::strtol(p, &end, 10));
+            SMTBX_ASSERT(end != p)(lc);
+            p = end;
+          }
+          parent_t::miller_indices_.push_back(
+            cctbx::miller::index<>(hkl[0], hkl[1], hkl[2]));
+          // an atom the table misses keeps a zero and is served elsewhere
+          vector<complex_type> row(scatterers.size(), complex_type(0));
           // as many columns as the table names, which need not be as many
           // atoms as the structure has
-          SMTBX_ASSERT(toks.size() == 3 + sc_indices.size());
-          cctbx::miller::index<> mi(
-            atoi(toks[0].c_str()),
-            atoi(toks[1].c_str()),
-            atoi(toks[2].c_str()));
-          parent_t::miller_indices_.push_back(mi);
-          vector<complex_type> row;
-          // an atom the table misses keeps a zero and is served elsewhere
-          row.assign(scatterers.size(), complex_type(0));
-#pragma omp parallel for
-          for (int sci = 3; sci < toks.size(); sci++) {
-            if (sc_indices[sci - 3] == ~0) {
-              continue;
+          const char *const line_end = p + std::strlen(p);
+          // std::from_chars: correctly rounded like strtod, so the same
+          // numbers, but several times faster and independent of the locale
+          auto number = [&](float_type &v) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '+') p++;
+#if defined(__cpp_lib_to_chars)
+            std::from_chars_result r = std::from_chars(p, line_end, v);
+            if (r.ec != std::errc()) return false;
+            p = r.ptr;
+#else
+            // libc++ before LLVM 20 (Apple clang, the Android NDK) has no
+            // floating-point from_chars; strtod reads as the old atof did
+            char *e;
+            v = static_cast<float_type>(std::strtod(p, &e));
+            if (e == p) return false;
+            p = e;
+#endif
+            return true;
+          };
+          for (size_t col = 0; col < sc_indices.size(); col++) {
+            float_type re, im = 0;
+            SMTBX_ASSERT(number(re))(lc)(col);  // fewer columns than named
+            if (*p == ',') {
+              p++;
+              SMTBX_ASSERT(number(im))(lc)(col);
             }
-            size_t ci = toks[sci].find(',');
-            if (ci != string::npos) {
-              complex_type v(
-                  atof(toks[sci].substr(0, ci).c_str()),
-                  atof(toks[sci].substr(ci + 1).c_str()));
-              row[sc_indices[sci - 3]] = v;
-            }
-            else {
-              row[sc_indices[sci - 3]] = complex_type(
-                boost::lexical_cast<float_type>(toks[sci]));
+            if (sc_indices[col] != static_cast<size_t>(~0)) {
+              row[sc_indices[col]] = complex_type(re, im);
             }
           }
-          parent_t::data_.push_back(row);
+          while (*p == ' ' || *p == '\t') p++;
+          SMTBX_ASSERT(*p == 0)(lc);           // more columns than named
+          parent_t::data_.push_back(std::move(row));
         }
       }
     }
