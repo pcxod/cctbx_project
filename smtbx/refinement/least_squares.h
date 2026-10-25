@@ -173,6 +173,30 @@ namespace smtbx { namespace refinement { namespace least_squares {
     static int min_accumulator_threads() { return 3; }
     //@}
 
+    /** @brief The most rows one worker buffers before folding them in.
+
+    A ceiling on what the memory budget would otherwise give each worker. The
+    rows of a chunk are written by the structure factor pass and read back by
+    the syrk that folds them in, and that read is only cheap while the chunk is
+    still in cache: with several workers filling chunks at once, what they
+    share is the last level cache, so a chunk well beyond a share of it makes
+    the syrk read every row back from memory instead. Measured on a 4-core
+    machine, 3 workers, 1950 parameters: up to ~40 MB a worker the build time is
+    flat, while the 80-330 MB a generous budget hands out made it 50-65%
+    slower -- a larger budget gave a slower build. 32 MB leaves the default
+    budget's share (~25 MB) untouched and stops the large ones; with it a 2000 MB
+    budget measured 1.19 s against 1.51 s.
+
+    The floor in rows is the other side of the trade. Each chunk costs a pass
+    over the n^2 result, so for a wide row a byte cap alone would mean many
+    thin chunks and many passes: at 5200 parameters 8 MB chunks (190 rows)
+    measured 7% slower than the default. 512 rows keeps that pass rare however
+    large the structure.
+     */
+    static std::size_t max_worker_buffer_bytes(std::size_t row_bytes) {
+      return std::max<std::size_t>(32u << 20, 512*row_bytes);
+    }
+
     /** @brief A per-thread normal equations object, told its memory budget
         where the type in question has one to be told.
 
@@ -597,10 +621,17 @@ namespace smtbx { namespace refinement { namespace least_squares {
            the floor keeps that from becoming silly on a machine with many
            threads and a small budget.
          */
+        /* Capped as well, so that a generous budget does not buy chunks too
+           large to still be in cache when they are folded in -- see
+           max_worker_buffer_bytes. With no budget the cap is the size: the
+           accumulator's own default is far past it.
+         */
+        std::size_t const worker_cap = parent_t::max_worker_buffer_bytes(
+          std::size_t(normal_equations.n_parameters())*sizeof(FloatType));
         std::size_t const thread_buffer_bytes = max_memory > 0
-          ? std::max<std::size_t>(4u << 20,
-              ((std::size_t(max_memory) << 20)/4)/thread_count)
-          : 0;
+          ? std::min(worker_cap, std::max<std::size_t>(4u << 20,
+              ((std::size_t(max_memory) << 20)/4)/thread_count))
+          : worker_cap;
         for(int thread_idx=0; thread_idx<thread_count; thread_idx++) {
           normal_equations_ptr_t chunk_normal_equations(
             parent_t::template new_chunk_equations<NormalEquations>(
