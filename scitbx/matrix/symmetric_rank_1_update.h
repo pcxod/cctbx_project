@@ -9,6 +9,9 @@
 #include <scitbx/array_family/simple_io.h>
 #include <fast_linalg/lapacke.h>
 #include <algorithm>
+#include <condition_variable>
+#include <mutex>
+#include <vector>
 
 namespace scitbx { namespace matrix {
 
@@ -153,6 +156,8 @@ namespace scitbx { namespace matrix {
    *  in the last digit or two from the unchunked one, as it does between any
    *  two summation orders.
    */
+  template <typename T> class rank_n_update_shared_fold;
+
   template <typename T>
   class rank_n_update
   {
@@ -195,7 +200,7 @@ namespace scitbx { namespace matrix {
     a substantial fraction of a gigabyte across a build.
      */
     rank_n_update(int n, std::size_t buffer_bytes=0)
-    : aaT(std::size_t(n)*n, T(0)), cols(n)
+    : aaT(std::size_t(n)*n, T(0)), cols(n), shared_(0), worker_(-1)
     {
       if (buffer_bytes == 0) {
         buffer_bytes = default_buffer_bytes();
@@ -212,6 +217,39 @@ namespace scitbx { namespace matrix {
        */
       reset();
     }
+
+    /** @brief Fold into another accumulator's matrix instead of an own one.
+
+    A worker of a threaded build normally keeps an n x n matrix of its own, to
+    be added up with the others at the end -- T workers, T + 1 matrices. An
+    attached one keeps only its row buffer: whenever that fills, the rows are
+    handed to the shared fold, which adds them to the one matrix every worker
+    shares. The own matrix is released here. See rank_n_update_shared_fold.
+     */
+    void attach(rank_n_update_shared_fold<T> &shared, int worker) {
+      SCITBX_ASSERT(n_pending_ == 0 && !folded);
+      shared_ = &shared;
+      worker_ = worker;
+      aaT = af::shared<T>();
+    }
+    /// The last rows of an attached worker go in, and it stops taking part
+    void finish_shared();
+
+    int n_cols() const { return cols; }
+
+    /// The matrix a shared fold accumulates into: zeroed, and counted as
+    /// folded, since the fold adds to it rather than overwriting it
+    void prepare_shared() {
+      SCITBX_ASSERT(shared_ == 0 && n_pending_ == 0);
+      if (aaT.size() != std::size_t(cols)*cols) {
+        aaT = af::shared<T>(std::size_t(cols)*cols, T(0));
+      }
+      else {
+        std::fill(aaT.begin(), aaT.end(), T(0));
+      }
+      folded = true;
+    }
+    T *shared_matrix() { return &aaT[0]; }
 
     /// Add a row \f$\sqrt{\alpha} x\f$ to matrix A
     /// Precondition: alpha >= 0
@@ -362,9 +400,14 @@ namespace scitbx { namespace matrix {
       if (cols == 0 || n_pending_ == 0) {
         return;
       }
+      if (shared_ != 0) {
+        flush_shared();
+        return;
+      }
       update(a.begin(), n_pending_);
       n_pending_ = 0;
     }
+    void flush_shared();
 
     /// Make sure the buffer holds n rows, growing it geometrically if not
     /** Doubling, and never past one chunk, so that filling a chunk costs a
@@ -415,7 +458,141 @@ namespace scitbx { namespace matrix {
     std::size_t chunk_rows, n_pending_;
     /// whether anything has been folded into aaT_rfp since the last reset
     bool folded;
+    /// the shared fold this worker deposits into, if attached, and its index
+    rank_n_update_shared_fold<T> *shared_;
+    int worker_;
   };
+
+  /** @brief One normal matrix for all the workers of a threaded build.
+
+  A worker of a threaded build used to keep an n x n matrix of its own, all of
+  them added up at the end: T workers, T + 1 matrices, which at 5200 parameters
+  and 3 workers is 820 MB against 260 MB single-threaded. Here there is one.
+
+  The upper triangle is cut into tiles of whole rows, of roughly equal work.
+  Each worker folds its own buffer of rows into the tiles itself, tile by tile
+  -- a syrk for the diagonal block and a gemm for the rest of the tile's rows,
+  single-threaded BLAS -- and every tile takes the buffers in one fixed order:
+  a buffer's place is (its index among the worker's buffers) x T + worker. The
+  workers sweep the tiles in the same order, so they follow one another through
+  them in a pipeline rather than queueing for the whole matrix, and in between
+  they go back to computing structure factors.
+
+  With the workers' share of the reflections fixed, as the build assigns it,
+  which rows make up a worker's k-th buffer is fixed too, so every element of
+  the matrix is summed in an order fixed by the thread count alone: the result
+  is the same from one run to the next, to the last bit. Against the private
+  matrices it differs by the reassociation of the sums, which is rounding.
+
+  No deadlock: a worker only ever waits for a buffer of lower place at some
+  tile, and the lowest outstanding place can always proceed; a worker which has
+  finished has its remaining places skipped.
+   */
+  template <typename T>
+  class rank_n_update_shared_fold
+  {
+  public:
+    rank_n_update_shared_fold(rank_n_update<T> &target, int n_workers)
+      : target_(target), n_workers_(n_workers), cols_(target.n_cols()),
+        deposits_(n_workers, 0), done_(n_workers, false)
+    {
+      target_.prepare_shared();
+      // rows of equal work: row i of the upper triangle has n - i elements
+      int const n = cols_;
+      int const n_tiles = std::max(1, std::min(n/32, std::max(8, 4*n_workers)));
+      double const total = 0.5*double(n)*(n + 1);
+      tile_start_.push_back(0);
+      double acc = 0;
+      for (int i = 0; i < n; i++) {
+        acc += n - i;
+        if (acc >= total*tile_start_.size()/n_tiles
+            && int(tile_start_.size()) < n_tiles && i + 1 < n)
+        {
+          tile_start_.push_back(i + 1);
+        }
+      }
+      tile_start_.push_back(n);
+      tile_next_.assign(tile_start_.size() - 1, 0);
+    }
+
+    void deposit(int worker, T const *rows, std::size_t n_rows) {
+      long long place;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        place = (long long)deposits_[worker]++ * n_workers_ + worker;
+      }
+      for (std::size_t t = 0; t + 1 < tile_start_.size(); t++) {
+        {
+          std::unique_lock<std::mutex> lock(mutex_);
+          released_.wait(lock, [&] { return next_place(t) == place; });
+        }
+        fold_tile(t, rows, n_rows);
+        {
+          std::unique_lock<std::mutex> lock(mutex_);
+          tile_next_[t] = place + 1;
+        }
+        released_.notify_all();
+      }
+    }
+
+    void finish(int worker) {
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_[worker] = true;
+      }
+      released_.notify_all();
+    }
+
+  private:
+    // the next place tile t takes, skipping those of finished workers
+    long long next_place(std::size_t t) {
+      long long p = tile_next_[t];
+      for (;;) {
+        int const w = int(p % n_workers_);
+        long long const k = p/n_workers_;
+        if (done_[w] && k >= (long long)deposits_[w]) { p++; continue; }
+        break;
+      }
+      tile_next_[t] = p;
+      return p;
+    }
+
+    void fold_tile(std::size_t t, T const *rows, std::size_t n_rows) {
+      using namespace fast_linalg;
+      int const r0 = tile_start_[t], r1 = tile_start_[t + 1], n = cols_;
+      T *c = target_.shared_matrix();
+      // the diagonal block, upper triangle
+      syrk(101, 121, 112, r1 - r0, int(n_rows), T(1), rows + r0, n,
+           T(1), c + std::size_t(r0)*n + r0, n);
+      // and the rest of these rows
+      if (r1 < n) {
+        gemm(101, 112, 111, r1 - r0, n - r1, int(n_rows), T(1),
+             rows + r0, n, rows + r1, n, T(1), c + std::size_t(r0)*n + r1, n);
+      }
+    }
+
+    rank_n_update<T> &target_;
+    int n_workers_, cols_;
+    std::vector<std::size_t> deposits_;
+    std::vector<bool> done_;
+    std::vector<int> tile_start_;
+    std::vector<long long> tile_next_;
+    std::mutex mutex_;
+    std::condition_variable released_;
+  };
+
+  template <typename T>
+  void rank_n_update<T>::flush_shared() {
+    shared_->deposit(worker_, a.begin(), n_pending_);
+    n_pending_ = 0;
+  }
+
+  template <typename T>
+  void rank_n_update<T>::finish_shared() {
+    if (shared_ == 0) return;
+    flush();
+    shared_->finish(worker_);
+  }
 
 }}
 

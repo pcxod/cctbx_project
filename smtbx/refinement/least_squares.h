@@ -17,6 +17,9 @@
 #include <smtbx/refinement/least_squares_twinning.h>
 #include <smtbx/refinement/ml_target.h>
 #include <smtbx/refinement/weighting_schemes.h>
+#if defined(USE_FAST_LINALG)
+#include <fast_linalg/environment.h>
+#endif
 
 #include <algorithm>
 #include <vector>
@@ -72,6 +75,71 @@ namespace smtbx { namespace refinement { namespace least_squares {
     static af::versa<FloatType, af::c_grid<2> > const &
     get(af::versa<FloatType, af::c_grid<2> > const &m) { return m; }
   };
+
+  /** @brief Whether the workers of a threaded build can share one normal
+      matrix, and the means of doing it.
+
+  Only an accumulator that buffers rows can: matrix::rank_n_update, through
+  matrix::rank_n_update_shared_fold. For every other normal equations type --
+  the packed accumulator, the summaries the conjugate gradients use -- this is
+  the null version and the workers keep matrices of their own, as before.
+   */
+  //@{
+  template <class Accumulator>
+  struct shared_fold_for_accumulator {
+    static bool const available = false;
+    struct fold_t {};
+    template <class NE> static fold_t *make(NE &, int) { return 0; }
+    template <class NE> static void attach(NE &, fold_t &, int) {}
+    template <class NE> static void finish(NE &) {}
+  };
+
+  template <typename T>
+  struct shared_fold_for_accumulator<scitbx::matrix::rank_n_update<T> > {
+    static bool const available = true;
+    typedef scitbx::matrix::rank_n_update_shared_fold<T> fold_t;
+    template <class NE> static fold_t *make(NE &ne, int n_workers) {
+      return new fold_t(ne.rank_1_updates(), n_workers);
+    }
+    template <class NE> static void attach(NE &ne, fold_t &f, int worker) {
+      ne.rank_1_updates().attach(f, worker);
+    }
+    template <class NE> static void finish(NE &ne) {
+      ne.rank_1_updates().finish_shared();
+    }
+  };
+
+  template <class T> struct void_of { typedef void type; };
+
+  template <class NE, class = void>
+  struct shared_fold_of : shared_fold_for_accumulator<void> {};
+
+  template <class NE>
+  struct shared_fold_of<NE,
+    typename void_of<typename NE::sum_of_rank_1_updates_t>::type>
+    : shared_fold_for_accumulator<typename NE::sum_of_rank_1_updates_t> {};
+
+  /// OpenBLAS threads set for a scope and restored after it
+  struct blas_threads_scope {
+#if defined(USE_FAST_LINALG)
+    int saved;
+    explicit blas_threads_scope(int n) : saved(-1) {
+      if (n > 0 && fast_linalg::is_initialised()) {
+        fast_linalg::environment env;
+        saved = env.threads();
+        env.set_threads(n);
+      }
+    }
+    ~blas_threads_scope() {
+      if (saved > 0) {
+        fast_linalg::environment().set_threads(saved);
+      }
+    }
+#else
+    explicit blas_threads_scope(int) {}
+#endif
+  };
+  //@}
 
   template <typename FloatType>
   class builder_base {
@@ -583,7 +651,13 @@ namespace smtbx { namespace refinement { namespace least_squares {
             parent_t::template accumulator_work_constant<NormalEquations>(0),
             reflections_.size()));
         }
-        if (max_memory > 0 && normal_equations.n_parameters() > 0) {
+        typedef shared_fold_of<NormalEquations> shared_fold_t;
+        /* With a shared fold the workers keep no matrices of their own, only
+           row buffers (capped below), so there are no private copies for the
+           budget to bound and the cap that follows does not apply.
+         */
+        if (!shared_fold_t::available
+            && max_memory > 0 && normal_equations.n_parameters() > 0) {
           std::size_t const n = normal_equations.n_parameters();
           std::size_t const result_bytes = n*n*sizeof(FloatType);
           /* A quarter of the budget, not all of it. The private matrices are
@@ -632,10 +706,23 @@ namespace smtbx { namespace refinement { namespace least_squares {
           ? std::min(worker_cap, std::max<std::size_t>(4u << 20,
               ((std::size_t(max_memory) << 20)/4)/thread_count))
           : worker_cap;
+        /* One matrix for all the workers, where the accumulator allows it;
+           see matrix::rank_n_update_shared_fold. The workers fold into it
+           themselves, tile by tile, so the BLAS must not thread underneath
+           them; its own setting comes back after the build.
+         */
+        boost::scoped_ptr<typename shared_fold_t::fold_t> shared_fold(
+          shared_fold_t::make(normal_equations, thread_count));
+        // each worker folds its own tiles: one BLAS thread apiece
+        blas_threads_scope blas_threads(shared_fold_t::available ? 1 : 0);
         for(int thread_idx=0; thread_idx<thread_count; thread_idx++) {
           normal_equations_ptr_t chunk_normal_equations(
             parent_t::template new_chunk_equations<NormalEquations>(
               normal_equations.n_parameters(), thread_buffer_bytes, 0));
+          if (shared_fold) {
+            shared_fold_t::attach(*chunk_normal_equations, *shared_fold,
+                                  thread_idx);
+          }
           accumulate_reflection_chunk_ptr_t accumulator(
             new accumulate_reflection_chunk_t(
               *this,
@@ -650,6 +737,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
               design_matrix_, ml));
           accumulator->first = thread_idx;
           accumulator->stride = thread_count;
+          if (shared_fold) {
+            accumulator->finish_shared = &shared_fold_t::template
+              finish<NormalEquations>;
+          }
           accumulators.push_back(accumulator);
           pool.push_back(boost::shared_ptr<boost::thread>(
             new boost::thread(boost::ref(*accumulator))));
@@ -867,6 +958,17 @@ namespace smtbx { namespace refinement { namespace least_squares {
        */
       ml_data<FloatType> const& ml;
       bool running;
+      /* Set when the worker deposits into a shared fold: called on every way
+         out of operator(), the early return on interruption and the error
+         paths included. A worker leaving without it would have the others wait
+         for its next buffer forever.
+       */
+      void (*finish_shared)(NormalEquations &);
+      struct finish_on_exit {
+        void (*f)(NormalEquations &);
+        NormalEquations &ne;
+        ~finish_on_exit() { if (f) f(ne); }
+      };
       /* Chunks first, first + stride, ... of the scheduler's partition, or
          whatever next() hands out while first is negative. The workers are
          given a fixed share: taken first come first served, which rows a
@@ -907,11 +1009,13 @@ namespace smtbx { namespace refinement { namespace least_squares {
         design_matrix(design_matrix),
         ml(ml),
         running(true),
+        finish_shared(0),
         first(-1), stride(1)
       {}
 
       void operator()() {
         running = true;
+        finish_on_exit finisher = { finish_shared, normal_equations };
         try {
           af::shared<FloatType> gradients;
           int n_params = jacobian_transpose_matching_grad_fc.n_rows();

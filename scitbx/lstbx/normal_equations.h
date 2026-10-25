@@ -721,6 +721,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       return *this;
     }
 
+    /// The accumulator of the normal matrix, for a threaded build to attach
+    /// its workers to; c.f. matrix::rank_n_update_shared_fold
+    sum_of_rank_1_updates_t &rank_1_updates() { return grad_yc_dot_grad_yc; }
+
     /// \f$\sum w y_o^2\f$
     /** This is the normalisation that guarantees
         that \f$L(K, x)\f$ is between 0 and 1.
@@ -1033,6 +1037,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       throw SCITBX_NOT_IMPLEMENTED();
     }
 #endif
+
+    /// The accumulator of the normal matrix, for a threaded build to attach
+    /// its workers to; c.f. matrix::rank_n_update_shared_fold
+    sum_of_rank_1_updates_t &rank_1_updates() { return grad_yc_dot_grad_yc; }
 
     non_linear_ls_with_fixed_scale_factor
     &operator+=(non_linear_ls_with_fixed_scale_factor const &other) {
