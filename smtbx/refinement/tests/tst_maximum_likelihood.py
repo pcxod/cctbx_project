@@ -194,31 +194,39 @@ def exercise_mli_approaches_mlf_as_the_error_vanishes():
   So the test that matters is that the convolved gradient tends to the
   amplitude one as sigma tends to zero, and departs from it when the error is
   real.
+
+  Centric reflections too - in a centrosymmetric space group they are all of
+  them. The acentric density used to be applied to them, which this test, run
+  acentric only, could not see: centric, the gap stayed at 0.36 instead of
+  falling. The gradient was the acentric one while the weight was the centric
+  one, half the acentric curvature, so Gauss-Newton steps came out up to twice
+  too long and could go uphill.
   """
   from smtbx.refinement import least_squares as ls_ext
   ext = ls_ext.ext
   a, b, k, e = 0.85, 6., 1., 1.
   fo, modulus_fc = 9., 7.
   u = modulus_fc*modulus_fc
-  exact_mlf = d_target_d_modulus_fcalc(
-    fo, complex(modulus_fc, 0.), a, b, k, e, False)
-  previous = None
-  for sigma in (8., 4., 2., 1., 0.5, 0.25):
-    ok, d = ext.mli_d_target_d_modulus_fc(
-      fo_sq=fo*fo, sigma_fo_sq=sigma, observable=u, alpha=a, beta=b,
-      scale_factor=k, epsilon=e, centric=False)
-    assert ok
-    gap = abs(d - exact_mlf)
-    if previous is not None:
-      # halving sigma must bring it closer, and it does so quadratically
-      assert gap < previous, (sigma, gap, previous)
-    previous = gap
-  assert previous < 1e-3, previous
-  # and with a real error the two genuinely differ
-  ok, d_big = ext.mli_d_target_d_modulus_fc(
-    fo_sq=fo*fo, sigma_fo_sq=8., observable=u, alpha=a, beta=b,
-    scale_factor=k, epsilon=e, centric=False)
-  assert ok and abs(d_big - exact_mlf) > 1e-2, (d_big, exact_mlf)
+  for centric in (False, True):
+    exact_mlf = d_target_d_modulus_fcalc(
+      fo, complex(modulus_fc, 0.), a, b, k, e, centric)
+    previous = None
+    for sigma in (8., 4., 2., 1., 0.5, 0.25):
+      ok, d = ext.mli_d_target_d_modulus_fc(
+        fo_sq=fo*fo, sigma_fo_sq=sigma, observable=u, alpha=a, beta=b,
+        scale_factor=k, epsilon=e, centric=centric)
+      assert ok
+      gap = abs(d - exact_mlf)
+      if previous is not None:
+        # halving sigma must bring it closer, and it does so quadratically
+        assert gap < previous, (centric, sigma, gap, previous)
+      previous = gap
+    assert previous < 1e-3, (centric, previous)
+    # and with a real error the two genuinely differ
+    ok, d_big = ext.mli_d_target_d_modulus_fc(
+      fo_sq=fo*fo, sigma_fo_sq=8., observable=u, alpha=a, beta=b,
+      scale_factor=k, epsilon=e, centric=centric)
+    assert ok and abs(d_big - exact_mlf) > 1e-2, (centric, d_big, exact_mlf)
   print("\tthe intensity target converges on the amplitude one as sigma -> 0")
 
 
