@@ -721,6 +721,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       return true;
     }
 
+    virtual std::size_t n_scatterers() const {
+      return data.size() ? data[0].size() : 0;
+    }
+
     virtual base_type *raw_fork() const {
       return new table_based_isotropic(*this);
     }
@@ -819,6 +823,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
 
     virtual bool is_spherical() const {
       return false;
+    }
+
+    virtual std::size_t n_scatterers() const {
+      return data.size() && data[0].size() ? data[0][0].size() : 0;
     }
 
     virtual base_type *raw_fork() const {
@@ -1020,6 +1028,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       return false;
     }
 
+    virtual std::size_t n_scatterers() const {
+      return data.size() ? data[0].size() : 0;
+    }
+
     virtual base_type *raw_fork() const {
       return new lookup_based_anisotropic(*this);
     }
@@ -1149,6 +1161,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     virtual af::shared<std::string> records_moved_by_symmetry() const {
       return tabulated_->records_moved_by_symmetry();
     }
+
+    virtual std::size_t n_scatterers() const { return covered_.size(); }
 
     virtual base_type *raw_fork() const {
       return new partially_tabulated(*this);

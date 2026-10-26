@@ -180,18 +180,41 @@ namespace smtbx { namespace structure_factors { namespace direct {
 
       // the form factor of every symmetry equivalent, h R_i, for an aspherical
       // contribution
+      /* From Python an index is checked before it reaches the lookups, which
+         the refinement loops run unchecked: past the end is an IndexError,
+         not a read of whatever lies there. A contribution that does not
+         implement one of the two (get for the aspherical ones, get_full for
+         the spherical ones) raises from inside it.
+       */
+      static void check_index(wt const &self, std::size_t scatterer_index) {
+        std::size_t const n = self.n_scatterers();
+        if (n != ~std::size_t(0) && scatterer_index >= n) {
+          PyErr_SetString(PyExc_IndexError,
+            "scatterer_index is past the scatterers of this contribution");
+          boost::python::throw_error_already_set();
+        }
+      }
+
+      static std::complex<FloatType> get(wt const &self,
+        std::size_t scatterer_index, miller::index<> const &h)
+      {
+        check_index(self, scatterer_index);
+        return self.get(scatterer_index, h);
+      }
+
       static af::shared<std::complex<FloatType> > get_full(wt const &self,
         std::size_t scatterer_index, miller::index<> const &h)
       {
+        check_index(self, scatterer_index);
         std::vector<std::complex<FloatType> > const &v =
           self.get_full(scatterer_index, h);
-        return af::shared<std::complex<FloatType> >(&v[0], &v[0] + v.size());
+        return af::shared<std::complex<FloatType> >(v.data(), v.data() + v.size());
       }
 
       static void wrap() {
         using namespace boost::python;
         class_<wt, boost::noncopyable>("scatterer_contribution", no_init)
-          .def("get", &wt::get,
+          .def("get", get,
             (arg("scatterer_index"),
              arg("h")))
           .def("at_d_star_sq", &wt::at_d_star_sq,
@@ -201,6 +224,7 @@ namespace smtbx { namespace structure_factors { namespace direct {
           .def("scatterers_not_in_table", &wt::scatterers_not_in_table)
           .def("records_not_in_structure", &wt::records_not_in_structure)
           .def("records_moved_by_symmetry", &wt::records_moved_by_symmetry)
+          .def("n_scatterers", &wt::n_scatterers)
           ;
       }
     };

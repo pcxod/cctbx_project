@@ -792,6 +792,87 @@ def exercise_uncovered_atom_before_d_star_sq():
   print("\tuncovered atom before at_d_star_sq: refused, not a crash")
 
 
+def exercise_python_entry_points():
+  """ Every way into a contribution from Python either answers through
+  get_full or raises a Python exception - never a crash. For a .tshb that
+  covers the model, for one that misses an atom, and for the same densities
+  as an expanded text table and as a .tscb: get (which the expanded ones do
+  not implement), get_full, an index past the end, a reflection the table
+  does not hold, absurd indices, and the f_calc functor. """
+  import struct
+  rng = random.Random(16)
+  xs = disordered_setup()
+  d = tempfile.mkdtemp()
+  recs = [keyed(xs, j, random_atom("x", 2, rng)._replace(z=6)) for j in range(4)]
+  full = os.path.join(d, "full.tshb"); tshb.write(full, recs)
+  part = os.path.join(d, "part.tshb"); tshb.write(part, recs[:3])
+  c_full = build_with_fallback(xs.unit_cell(), xs.scatterers(), full,
+    xs.space_group(), True, xs.scattering_type_registry())
+  # the same densities as tables, on every h R of the indices to 1.5 A
+  ms = xs.build_miller_set(anomalous_flag=False, d_min=1.5)
+  rows = set()
+  for h in ms.indices():
+    for op in xs.space_group().smx():
+      r = op.r().num()
+      hr = tuple(sum(h[k]*r[3*k + c] for k in range(3)) for c in range(3))
+      rows.add(hr); rows.add(tuple(-v for v in hr))
+  rows = sorted(rows)
+  ids = [sc.get_id_big(sc.get_part()) for sc in xs.scatterers()]
+  values = dict((hr, [c_full.get_full(j, hr)[0] for j in range(4)]) for hr in rows)
+  tsc = os.path.join(d, "t.tsc")
+  with open(tsc, "w") as out:
+    out.write("TITLE: t\nSYMM: expanded\nSCATTERER_IDS: %s\nDATA:\n"
+              % " ".join(i.to_hex_string() for i in ids))
+    for hr in rows:
+      out.write("%d %d %d %s\n" % (hr + (" ".join("%.17g,%.17g" % (v.real, v.imag)
+                                                  for v in values[hr]),)))
+  tscb = os.path.join(d, "t.tscb")
+  with open(tscb, "wb") as out:
+    head = b"SCATTERER_IDS"
+    out.write(struct.pack("<i", len(head))); out.write(head)
+    out.write(struct.pack("<i", 4))
+    for i in ids: out.write(bytes(i.to_bytes()))
+    out.write(struct.pack("<i", len(rows)))
+    for hr in rows:
+      out.write(struct.pack("<3i", *hr))
+      for v in values[hr]: out.write(struct.pack("<2d", v.real, v.imag))
+  h_in, h_out, h_huge = ms.indices()[3], (40, 40, 40), (1 << 22, 0, 0)
+  kinds = [(".tshb", full, None), (".tshb, one atom missing", part, True),
+           ("expanded .tsc", tsc, None), (".tscb", tscb, None)]
+  n_raised = 0
+  for name, path, fallback in kinds:
+    kw = {"allow_spherical_fallback": True} if fallback else {}
+    c = build_with_fallback(xs.unit_cell(), xs.scatterers(), path,
+      xs.space_group(), True, xs.scattering_type_registry(), **kw)
+    assert c.n_scatterers() == 4, (name, c.n_scatterers())
+    calls = []
+    for j in (0, 3, 4, 2**31, 2**63):
+      for h in (h_in, h_out, h_huge, (0, 0, 0)):
+        calls += [(c.get, j, h), (c.get_full, j, h)]
+    for f, j, h in calls:
+      try:
+        v = f(j, h)
+      except (RuntimeError, IndexError, OverflowError, ValueError):
+        n_raised += 1
+        continue
+      if f == c.get_full:
+        assert len(v) == xs.space_group().n_smx()
+    # answered through get_full: the same values as the .tshb
+    if not fallback:
+      c.at_d_star_sq(xs.unit_cell().d_star_sq(h_in))
+      for j in range(4):
+        assert abs(c.get_full(j, h_in)[0] - c_full.get_full(j, h_in)[0]) < 1e-12, name
+    fc = direct.f_calc_modulus_squared(xs, scatterer_contribution=c)
+    fc.linearise(h_in)
+    for h in (h_out, h_huge):
+      try:
+        fc.linearise(h)
+      except (RuntimeError, ValueError):
+        n_raised += 1
+  print("\tPython entry points into .tshb, partial .tshb, expanded .tsc and"
+        " .tscb: answered or raised (%d raised), no crash" % n_raised)
+
+
 def run():
   exercise_transform_against_numerical_integral()
   exercise_spherical_records()
@@ -806,6 +887,7 @@ def run():
   exercise_disorder_gradients()
   exercise_corrupt_files()
   exercise_uncovered_atom_before_d_star_sq()
+  exercise_python_entry_points()
   exercise_spherical_equivalence()
   exercise_least_squares_build()
   print("OK")

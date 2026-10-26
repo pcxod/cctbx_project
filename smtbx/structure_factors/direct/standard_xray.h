@@ -900,6 +900,12 @@ namespace smtbx { namespace structure_factors { namespace direct {
         return af::shared<std::string>();
       }
 
+      /* How many scatterers an index may name, for the Python wrappers to
+      check get/get_full against before the unchecked lookups below them;
+      ~0 for a contribution that cannot tell.
+      */
+      virtual std::size_t n_scatterers() const { return ~std::size_t(0); }
+
       virtual scatterer_contribution *raw_fork() const = 0;
     };
 
@@ -1024,6 +1030,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
       virtual bool is_spherical() const {
         return true;
       }
+
+      virtual std::size_t n_scatterers() const { return scatterers.size(); }
 
       virtual base_type *raw_fork() const {
         return new isotropic_scatterer_contribution(*this);

@@ -1249,6 +1249,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       return r;
     }
 
+    virtual std::size_t n_scatterers() const { return data->atoms.size(); }
+
     virtual base_type *raw_fork() const {
       return new harmonic_expansion(*this);
     }
