@@ -946,7 +946,8 @@ def _atom_map(at, op, flags):
 
   For each harmonic n the image of (A, B) is (R (eps c A + s B), R (-eps s A + c B)) with c, s = cos, sin of
   2 pi n (M.x + tau): the image's u(x4) is R u(eps (x4 - M.x - tau)). Occupancy waves mix the same way with
-  R -> 1, ADP waves with R -> the U* map.
+  R -> 1, ADP waves with R -> the U* map. A crenel's centre takes eps, its width 1; Legendre terms of order n
+  eps^n R, x-harmonics eps R (sine) or R (cosine), with the U* map for the ADP ones.
   """
   off, i = {}, 0
   for name, _, get, _ in _blocks(at, flags):
@@ -974,15 +975,27 @@ def _atom_map(at, op, flags):
   pair("a", "b", 3, op.r)
   pair("occ_sin", "occ_cos", 1, np.eye(1))
   pair("u_sin", "u_cos", 6, r6)
-  # how a site-symmetry operation maps a crenel and the functions defined on it is not worked out here: under
-  # any operation but the identity those parameters are held, not left free to break the symmetry
-  identity = (np.allclose(op.r, np.eye(3)) and op.eps == 1 and not np.any(op.m)
-              and abs(op.tau) < 1e-12 and np.allclose(op.t, np.round(op.t)))
-  if not identity:
-    for name in ("crenel", "legendre", "xharm", "u_xharm"):
-      if name in off:
-        sb, lb = off[name]
-        t[sb:sb + lb, sb:sb + lb] = 0
+  # The crenel and the functions on it map like the Fourier waves, u'(x4) = R u(eps (x4 - delta)): the interval
+  # [c - w/2, c + w/2] goes to centre eps c + delta, width w, so the local coordinate (x4 - c) / w turns into eps
+  # times the image's. A Legendre term of order n takes eps^n (P_n is even or odd), an x-harmonic eps if it is a
+  # sine and 1 if a cosine; displacements with R, ADPs with the U* map. delta only decides whether a model is
+  # symmetric at all; the free directions come from the linear part.
+  if "crenel" in off:
+    sb, lb = off["crenel"]
+    if lb:
+      t[sb, sb], t[sb + 1, sb + 1] = op.eps, 1.0
+
+  def by_order(name, width, rk, sign):
+    if name not in off:
+      return
+    sb, lb = off[name]
+    for n in range(lb // width):
+      i = slice(sb + n * width, sb + (n + 1) * width)
+      t[i, i] = sign(n + 1) * rk
+  by_order("legendre", 3, op.r, lambda order: op.eps ** order)
+  sine = lambda order: (order % 2 == 1) == (XHARM_MODE == "sin_first")
+  by_order("xharm", 3, op.r, lambda order: op.eps if sine(order) else 1.0)
+  by_order("u_xharm", 6, r6, lambda order: op.eps if sine(order) else 1.0)
   return t
 
 

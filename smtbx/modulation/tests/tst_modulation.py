@@ -514,6 +514,120 @@ def test_gradients_all_wave_blocks():
     "%s %.1e" % (b, e) for b, e in sorted(worst.items()))))
 
 
+def _image_mismatch(at, op, n_x4=41):
+  """How far the atom's image under a site-symmetry operation is from the atom itself, evaluated through the
+  atom's own functions - not through the parameter map: crenel interval, displacement R u(eps (x4 - delta))
+  and ADP x-harmonics inside the crenel."""
+  delta = op.m.dot(at.site) + op.tau
+  c, w = at.crenel
+  dc = (op.eps * c + delta - c + 0.5) % 1.0 - 0.5
+  x4 = c + 0.45 * w * np.linspace(-1, 1, n_x4)
+  src = op.eps * (x4 - delta)
+  worst = abs(dc)
+  worst = max(worst, np.max(np.abs(at.displacement(src).dot(op.r.T) - at.displacement(x4))))
+  if len(at.u_xharm):
+    worst = max(worst, np.max(np.abs(at.u_xharm_at(src).dot(mod._u6_map(op.r).T) - at.u_xharm_at(x4))))
+  return worst
+
+
+def test_crenel_blocks_under_site_symmetry():
+  """Crenel, Legendre and x-harmonic blocks of atoms on special positions, constrained by the superspace site
+  symmetry rather than held: on a mirror (eps = +1) and a two-fold axis (eps = -1) of P2/m, and on a centre
+  (eps = -1) of P2_1/c. Moving along the free directions keeps every atom equal to its images (checked through
+  the atom's own functions, independently of the map); a step along a removed direction does not; and the
+  gradients along the free directions are the central differences."""
+  q = (0.31, 0.0, 0.23)
+  uc = uctbx.unit_cell((7.1, 5.3, 9.2, 90, 101.3, 90))
+  rng = np.random.RandomState(9)
+  cases = [("P 1 2/m 1", [("Cu", (0.12, 0.0, 0.33)), ("O", (0.0, 0.21, 0.5)), ("N", (0.43, 0.38, 0.27))]),
+           ("P 1 21/c 1", [("Cu", (0.0, 0.0, 0.0)), ("O", (0.31, 0.07, 0.15))])]
+  flags = {"site": True, "adp": True, "modulation": True, "occ_waves": True, "adp_waves": False,
+           "crenel": True, "legendre": True, "xharm": True, "u_xharm": True, "scale": False}
+  table = {}
+  n_free_new = 0
+  for symbol, rows in cases:
+    ssg = mod.superspace_group(sgtbx.space_group_info(symbol).group(), q)
+    atoms = []
+    for i, (t, xyz) in enumerate(rows):
+      at = mod.modulated_atom("%s%d" % (t, i), t, xyz, 0.012, 1.0, 1,
+                              0.01 * rng.uniform(-1, 1, (1, 3)), 0.01 * rng.uniform(-1, 1, (1, 3)),
+                              occ_sin=[0.05], occ_cos=[0.03])
+      at.crenel = (0.3, 0.6)
+      at.legendre = 0.01 * rng.uniform(-1, 1, (3, 3))
+      at.xharm = 0.01 * rng.uniform(-1, 1, (2, 3))
+      at.u_xharm = 0.001 * rng.uniform(-1, 1, (2, 6))
+      atoms.append(at)
+    xs = mod.modulated_structure(uc, ssg, atoms)
+    # make the model symmetric: the free part of every parameter, and a crenel centre an eps = -1 operation
+    # pins (eps c + delta = c mod 1) put where it must be
+    z = mod.reduction(xs, flags)
+    p = mod.get_parameters(xs, flags)
+    mod.set_parameters(xs, flags, z.dot(z.T.dot(p)))
+    special = []
+    for at in xs.atoms:
+      ops = [op for op in mod.site_symmetry_ops(xs, at) if not np.allclose(op.r, np.eye(3)) or op.eps != 1]
+      for op in ops:
+        if op.eps == -1:
+          at.crenel = (((op.m.dot(at.site) + op.tau) / 2) % 0.5, at.crenel[1])
+      at.crenel = (at.crenel[0] or 0.3, at.crenel[1] or 0.6) if not ops else at.crenel
+      if ops:
+        special.append((at, ops))
+    for at, ops in special:
+      for op in ops:
+        assert _image_mismatch(at, op) < 1e-12, (symbol, at.label, _image_mismatch(at, op))
+    z = mod.reduction(xs, flags)
+    p0 = mod.get_parameters(xs, flags)
+    names = []
+    for at in xs.atoms:
+      for name, _, get, _ in mod._blocks(at, mod._flags(flags)):
+        names += [(name, at.label, k) for k in range(len(get()))]
+    new_blocks = ("crenel", "legendre", "xharm", "u_xharm")
+    # free directions keep the symmetry, removed ones break it
+    removed = np.eye(len(p0)) - z.dot(z.T)
+    for at, ops in special:
+      rows_at = [i for i, nm in enumerate(names) if nm[1] == at.label and nm[0] in new_blocks]
+      free = z[rows_at]
+      n_free_new += int(np.sum(np.abs(free).sum(axis=0) > 1e-12))
+      for k in range(z.shape[1]):
+        if np.abs(z[rows_at, k]).max() < 1e-12:
+          continue
+        mod.set_parameters(xs, flags, p0 + 0.05 * z[:, k])
+        assert max(_image_mismatch(at, op) for op in ops) < 1e-10, (symbol, at.label, k)
+      bad = [i for i in rows_at if np.abs(removed[:, i]).max() > 1e-6]
+      assert bad, (symbol, at.label, "nothing removed")
+      v = removed[:, bad[0]] / np.linalg.norm(removed[:, bad[0]])
+      mod.set_parameters(xs, flags, p0 + 0.05 * v)
+      assert max(_image_mismatch(at, op) for op in ops) > 1e-4, (symbol, at.label, names[bad[0]])
+      mod.set_parameters(xs, flags, p0)
+    # gradients along the free directions
+    h, m = reflections(xs, d_min=1.5)
+    calc = mod.calculator(h, m)
+    _, _, d = calc.compute(xs, flags, gradients=True)
+    for k in range(z.shape[1]):
+      top = names[int(np.argmax(np.abs(z[:, k])))]
+      block = top[0]
+      if block == "crenel":
+        block = "crenel c" if top[2] == 0 else "crenel w"
+      if block not in ("crenel c", "crenel w", "legendre", "xharm", "u_xharm"):
+        continue
+      special_atom = any(top[1] == at.label for at, _ in special)
+      step = 1e-6   # the ADP x-harmonics curve the Debye-Waller factor hard: 1e-5 leaves 2e-5 truncation
+      mod.set_parameters(xs, flags, p0 + step * z[:, k]); _, fp, _ = calc.compute(xs)
+      mod.set_parameters(xs, flags, p0 - step * z[:, k]); _, fm, _ = calc.compute(xs)
+      mod.set_parameters(xs, flags, p0)
+      num, ana = (fp - fm) / (2 * step), d.dot(z[:, k])
+      err = np.max(np.abs(num - ana)) / max(np.max(np.abs(num)), np.max(np.abs(ana)), 1e-300)
+      key = (symbol, block, "special" if special_atom else "general")
+      table[key] = max(table.get(key, 0.0), err)
+  for key, err in table.items():
+    assert err <= 1e-6, (key, err)
+  assert n_free_new > 0
+  print("  crenel/Legendre/x-harmonic blocks under site symmetry: images = atoms to 1e-10 along the free"
+        " directions, broken along removed ones; gradients along the free directions:")
+  for key in sorted(table):
+    print("    %-11s %-9s %-8s %.1e" % (key + (table[key],)))
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
@@ -521,6 +635,7 @@ def run():
   test_gradients_finite_difference()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
+  test_crenel_blocks_under_site_symmetry()
   test_mscif_against_jana()
   test_hklm_files()
   test_reflection_statistics()
