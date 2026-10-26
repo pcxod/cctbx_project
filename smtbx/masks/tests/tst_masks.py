@@ -119,6 +119,13 @@ Void  Vol/Ang^3  #Electrons
    2       73.3         21.6
 """)
   cif_block = mask.as_cif_block()
+  # an excluded void is zeroed through its index selection, which on the
+  # map's 3-d grid has to go through a 1-d view of it
+  mask.exclude_void_flags[0] = True
+  mask.structure_factors()
+  assert flex.max(flex.abs(
+    mask._masked_diff_map.select(mask.void_iselection(0)))) == 0
+  assert mask.n_solvent_grid_points() == 21074
 
   fo2 = fo.f_as_f_sq()
   # this bit is necessary until we have constraints, as

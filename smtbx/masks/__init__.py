@@ -491,12 +491,14 @@ class mask(object):
         # and the test would then discard a void merely for holding less than
         # that share rather than for holding nothing.
         selection = self.void_iselection(j)
+        # flex takes an index selection only on a 1-d array; as_1d() is a
+        # view of the same data, so zeroing through it zeroes the map
         if self.exclude_void_flags[j]:
-          masked_diff_map.set_selected(selection, 0)
+          masked_diff_map.as_1d().set_selected(selection, 0)
           continue
         electrons = flex.sum(masked_diff_map.select(selection)) * self.fft_scale
         if electrons < 0:
-          masked_diff_map.set_selected(selection, 0)
+          masked_diff_map.as_1d().set_selected(selection, 0)
           f_000_s -= electrons
           self.exclude_void_flags[j] = True
       previous_f_000_s = self.f_000_s
