@@ -316,6 +316,52 @@ def exercise_spherical_equivalence():
     print("\tspherical atoms as .tshb (%s): Fc %.1e, gradients %.1e" % (label, worst_f, worst_g))
 
 
+def exercise_special_position_electrons():
+  """ Atoms on special positions, where operators differing by the stabiliser
+  share one form factor: the whole F_calc, its gradients and F(000) against
+  IAM, and F(000) against sum occ mult f(0) - the electron count of the cell -
+  with and without the cache. """
+  sgi = sgtbx.space_group_info("F m -3 m")
+  cs = crystal.symmetry(sgi.any_compatible_unit_cell(volume=1500), space_group_info=sgi)
+  sps = crystal.special_position_settings(cs, min_distance_sym_equiv=0.01)
+  # Wyckoff a, b, c (m-3m, m-3m, -43m), e (4mm) and a general atom, one at 0.6
+  rows = [("Fe1", "Fe", (0, 0, 0), 1), ("O1", "O", (0.5, 0.5, 0.5), 1),
+          ("N1", "N", (0.25, 0.25, 0.25), 0.6), ("C1", "C", (0.21, 0, 0), 1),
+          ("C2", "C", (0.11, 0.23, 0.37), 1)]
+  xs = xray.structure(special_position_settings=sps, scatterers=flex.xray_scatterer(
+    [xray.scatterer(l, site, u=0.02, occupancy=occ, scattering_type=t) for l, t, site, occ in rows]))
+  for sc in xs.scatterers():
+    sc.flags.set_grad_site(True); sc.flags.set_grad_u_iso(True); sc.flags.set_grad_occupancy(True)
+  xs.scattering_type_registry(table="it1992")
+  reg = xs.scattering_type_registry()
+  mult = [xs.site_symmetry_table().get(i).multiplicity() for i in range(len(rows))]
+  assert mult == [4, 4, 8, 24, 192], mult
+  f000 = sum(sc.occupancy*m*reg.gaussian(sc.scattering_type).at_stol(0)
+             for sc, m in zip(xs.scatterers(), mult))
+  path = os.path.join(tempfile.mkdtemp(), "sp.tshb")
+  write_spherical(xs, path)
+  spherical = direct.f_calc_modulus_squared(xs)
+  hs = [(0, 0, 0)] + list(xs.structure_factors(d_min=0.7).f_calc().indices())
+  for budget in ("0", None):
+    if budget is None: os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
+    else: os.environ["SMTBX_TSHB_CACHE_MB"] = budget
+    c = build(xs.unit_cell(), xs.scatterers(), path, xs.space_group(), True)
+    os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
+    table = direct.f_calc_modulus_squared(xs, scatterer_contribution=c)
+    worst_f = worst_g = 0
+    for h in hs + hs[::-1]:
+      spherical.linearise(h); table.linearise(h)
+      if h == (0, 0, 0):
+        assert abs(table.f_calc - f000) < 1e-8*f000, (table.f_calc, f000)
+      worst_f = max(worst_f, abs(spherical.f_calc - table.f_calc)/max(1, abs(spherical.f_calc)))
+      g1, g2 = spherical.grad_f_calc, table.grad_f_calc
+      worst_g = max(worst_g, max(abs(a - b) for a, b in zip(g1, g2))/max(1, max(abs(a) for a in g1)))
+    assert worst_f < 1e-8 and worst_g < 1e-8, (budget, worst_f, worst_g)
+  print("\tspecial positions a, b, c, e + general, F m -3 m: F(000) = %.4f electrons as"
+        " sum occ mult f(0); Fc %.1e, gradients %.1e against IAM, cache on and off"
+        % (f000, worst_f, worst_g))
+
+
 def exercise_least_squares_build():
   from smtbx.refinement import least_squares, constraints
   import smtbx.utils
@@ -957,6 +1003,7 @@ def run():
   exercise_uncovered_atom_before_d_star_sq()
   exercise_python_entry_points()
   exercise_spherical_equivalence()
+  exercise_special_position_electrons()
   exercise_least_squares_build()
   print("OK")
 
