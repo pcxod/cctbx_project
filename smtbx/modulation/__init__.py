@@ -1015,21 +1015,119 @@ def seed_amplitudes(xs, size_angstrom=0.01, seed=0):
       at.b = rng.uniform(-1, 1, at.b.shape) * size_angstrom / abc
 
 
+class _average_link(object):
+  """refine()'s side of an external parametrisation of the average structure (see refine)."""
+
+  def __init__(self, xs, flags, average):
+    self.xs, self.flags, self.average = xs, flags, average
+    self.avg_idx, self.wave_idx, self.ab = [], [], {}
+    i = 0
+    for k, at in enumerate(xs.atoms):
+      for name, _, get, _ in _blocks(at, flags):
+        n = len(get())
+        (self.avg_idx if name in ("site", "adp") else self.wave_idx).extend(range(i, i + n))
+        if name in ("a", "b"):
+          self.ab[(k, name)] = i
+        i += n
+    self.n_p = i + (1 if flags["scale"] else 0)
+    self.na = np.asarray(average.jacobian()).shape[1]
+    self.zb = _reduction_blocks(xs, dict(flags, site=False, adp=False, scale=False))
+    self.zw = _block_diag(self.zb)
+    self.follow = {}                # follower: (parent, cos, sin) of 2 pi n dx4, one row per harmonic
+    for k, (kp, dx4) in (getattr(average, "follow", None) or {}).items():
+      if flags["modulation"] and xs.atoms[k].n_harmonics == xs.atoms[kp].n_harmonics:
+        arg = TWO_PI * np.arange(1, xs.atoms[k].n_harmonics + 1) * dx4
+        self.follow[k] = (kp, np.cos(arg)[:, None], np.sin(arg)[:, None])
+
+  def sync(self):
+    """u_f(x4) = u_p(x4 - dx4): A_f = c A_p + s B_p, B_f = -s A_p + c B_p."""
+    for k, (kp, c, s) in self.follow.items():
+      p = self.xs.atoms[kp]
+      self.xs.atoms[k].a, self.xs.atoms[k].b = c * p.a + s * p.b, -s * p.a + c * p.b
+
+  def _fold(self, d):
+    """The follower's wave gradient goes to its parent's (chain rule of sync); its own columns to zero."""
+    for k, (kp, c, s) in self.follow.items():
+      nh = len(c)
+      sl = lambda kk, name: slice(self.ab[(kk, name)], self.ab[(kk, name)] + 3 * nh)
+      da = d[:, sl(k, "a")].reshape(-1, nh, 3)
+      db = d[:, sl(k, "b")].reshape(-1, nh, 3)
+      d[:, sl(kp, "a")] += (c * da - s * db).reshape(len(d), -1)
+      d[:, sl(kp, "b")] += (s * da + c * db).reshape(len(d), -1)
+      d[:, sl(k, "a")] = 0
+      d[:, sl(k, "b")] = 0
+    return d
+
+  def jacobian(self, d):
+    """Columns: the average's independent parameters, the free wave directions, the scale."""
+    d = self._fold(d)
+    cols = [d[:, self.avg_idx].dot(np.asarray(self.average.jacobian())), _times_blocks(d[:, self.wave_idx], self.zb)]
+    if self.flags["scale"]:
+      cols.append(d[:, -1:])
+    return np.hstack(cols)
+
+  def restraints(self, n_free):
+    """(design padded to every free parameter, deltas, weights) at the current model, or None."""
+    r = self.average.restraints()
+    if r is None or not len(r[1]):
+      return None
+    design = np.asarray(r[0])
+    return (np.hstack([design, np.zeros((len(design), n_free - design.shape[1]))]),
+            np.asarray(r[1], dtype=float), np.asarray(r[2], dtype=float))
+
+  def apply(self, p0, x):
+    step = np.zeros(self.n_p)
+    step[self.wave_idx] = self.zw.dot(x[self.na:self.na + self.zw.shape[1]])
+    if self.flags["scale"]:
+      step[-1] = x[-1]
+    set_parameters(self.xs, self.flags, p0 + step)
+    self.average.shift(x[:self.na])
+    self.sync()
+
+  def undo(self, p0, x):
+    self.average.shift(-x[:self.na])
+    set_parameters(self.xs, self.flags, p0)
+
+
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True,
-           table=None, radiation="xray"):
+           table=None, radiation="xray", average=None):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
   table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
 
   The x4 origin of a wave is free unless an eps = -1 operation fixes it; the damping keeps that direction
   (a rotation of every (A_n, B_n) pair together) from running away.
+
+  average: the average structure's own parametrisation, so the constraints and restraints of the 3D model hold
+  while the waves refine (Olex2 passes the one olex2.refine builds: AFIX, EXYZ, EADP, rigid groups, riding U,
+  fixed parameters, special positions). Sites and ADPs then move only through it. It provides
+    jacobian()   d(site and ADP of every atom, atom order, U* when anisotropic)/d(its n independent parameters),
+                 shape (rows, n), at the current model
+    shift(x)     moves its independent parameters by x and writes the resulting sites and ADPs into xs.atoms
+    restraints() None or (design (n_r, n), deltas, weights) at the current model, design = d delta/dx
+    follow       {atom index: (parent atom index, dx4)}: the atom's waves are the parent's moved along x4 by
+                 dx4 = q.(x_atom - x_parent), so both are displaced alike in every section t (riding hydrogens)
+  Restraints are weighted by the GooF^2 of the starting model, as in smtbx.refinement.least_squares.
+  ponytail: restraints act on the average structure only, not section by section along t.
   """
   flags = _flags(flags)
-  zb = _reduction_blocks(xs, flags)
-  z = _block_diag(zb)               # superspace site symmetry: the free directions
+  link = None
+  if average is not None:
+    flags.update(site=True, adp=True, occupancy=False)   # occupancies stay with the average's own refinement
+    link = _average_link(xs, flags, average)
+  else:
+    zb = _reduction_blocks(xs, flags)
+    z = _block_diag(zb)             # superspace site symmetry: the free directions
   if flags["modulation"]:
     p_before = get_parameters(xs, flags)
     seed_amplitudes(xs)
-    set_parameters(xs, flags, p_before + z.dot(z.T.dot(get_parameters(xs, flags) - p_before)))
+    p = get_parameters(xs, flags)
+    if link is None:
+      set_parameters(xs, flags, p_before + z.dot(z.T.dot(p - p_before)))
+    else:
+      wi = link.wave_idx
+      p[wi] = p_before[wi] + link.zw.dot(link.zw.T.dot(p[wi] - p_before[wi]))
+      set_parameters(xs, flags, p)
+      link.sync()
   f_obs_sq = np.asarray(f_obs_sq, dtype=float)
   calc = calculator(h, m, n_x4, table, radiation=radiation)
   w = 1.0 / np.maximum(np.asarray(sigmas, dtype=float), 1e-12) ** 2
@@ -1037,13 +1135,22 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
   history = []
   lam = damping
   _, fc_sq, _ = calc.compute(xs)
-  chi = float(np.sum(w * (f_obs_sq - fc_sq) ** 2))
+  chi = float(np.sum(w * (f_obs_sq - fc_sq) ** 2))   # + the weighted restraints once there are any
+  norm = None
   for cycle in range(cycles):
     _, fc_sq, d = calc.compute(xs, flags, gradients=True)
     r = sw * (f_obs_sq - fc_sq)
-    j = _times_blocks(sw[:, None] * d, zb)
+    j = _times_blocks(sw[:, None] * d, zb) if link is None else link.jacobian(sw[:, None] * d)
     jtj = j.T.dot(j)
     jtr = j.T.dot(r)
+    rest = None if link is None else link.restraints(j.shape[1])
+    if rest is not None:
+      if norm is None:
+        norm = chi / max(len(r) - j.shape[1], 1)
+        chi += norm * float(np.sum(rest[2] * rest[1] ** 2))
+      rw = norm * rest[2]
+      jtj += rest[0].T.dot(rw[:, None] * rest[0])
+      jtr -= rest[0].T.dot(rw * rest[1])
     p0 = get_parameters(xs, flags)
     diag = np.diag(jtj).copy()
     diag[diag <= 1e-12 * max(diag.max(), 1e-300)] = max(diag.max(), 1.0)
@@ -1051,21 +1158,30 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
     for _ in range(16):
       a_mat = jtj + lam * np.diag(diag)
       try:
-        step = z.dot(np.linalg.solve(a_mat, jtr))
+        x = np.linalg.solve(a_mat, jtr)
       except np.linalg.LinAlgError:
-        step = z.dot(np.linalg.lstsq(a_mat, jtr, rcond=None)[0])
-      set_parameters(xs, flags, p0 + step)
+        x = np.linalg.lstsq(a_mat, jtr, rcond=None)[0]
+      if link is None:
+        set_parameters(xs, flags, p0 + z.dot(x))
+      else:
+        link.apply(p0, x)
+      step = get_parameters(xs, flags) - p0
       with np.errstate(over="ignore", invalid="ignore"):
         _, fc_new, _ = calc.compute(xs)
       chi_new = float(np.sum(w * (f_obs_sq - fc_new) ** 2))
+      if rest is not None:
+        r_new = link.restraints(j.shape[1])
+        chi_new += norm * float(np.sum(r_new[2] * r_new[1] ** 2))
       if np.isfinite(chi_new) and chi_new <= chi:
         chi, lam, accepted = chi_new, max(lam / 3, 1e-9), True
         break
+      if link is not None:
+        link.undo(p0, x)
       lam *= 5
     if not accepted:
       set_parameters(xs, flags, p0)
       _, fc_new, _ = calc.compute(xs)
-    wr2 = math.sqrt(chi / float(np.sum(w * f_obs_sq ** 2)))
+    wr2 = math.sqrt(float(np.sum(w * (f_obs_sq - fc_new) ** 2)) / float(np.sum(w * f_obs_sq ** 2)))
     rec = {"cycle": cycle + 1, "wR2": wr2, "R1": r_factors(f_obs_sq, fc_new, m),
            "max_shift": float(np.max(np.abs(step))) if accepted and step.size else 0.0, "lambda": lam}
     history.append(rec)

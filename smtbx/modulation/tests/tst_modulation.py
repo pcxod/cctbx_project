@@ -290,6 +290,61 @@ def test_recovery():
   assert err < 0.003, err
 
 
+class _riding_average(object):
+  """refine(average=): atoms 0-3 free (site, u_iso); atom 4 rides on atom 3 (site + delta, 1.2 U, waves moved by
+  q.delta along x4); one restraint holds atom 1's x at `target` (sigma 1e-4)."""
+
+  def __init__(self, xs, delta, target):
+    self.xs, self.delta, self.target = xs, np.asarray(delta), target
+    self.x = np.concatenate([np.append(xs.atoms[i].site, xs.atoms[i].u_iso) for i in range(4)])
+    self.follow = {4: (3, float(xs.q.dot(self.delta)))}
+    self.shift(np.zeros(16))
+
+  def shift(self, x):
+    self.x = self.x + x
+    for i in range(4):
+      self.xs.atoms[i].site, self.xs.atoms[i].u_iso = self.x[4 * i:4 * i + 3].copy(), self.x[4 * i + 3]
+    self.xs.atoms[4].site, self.xs.atoms[4].u_iso = self.x[12:15] + self.delta, 1.2 * self.x[15]
+
+  def jacobian(self):
+    jac = np.vstack([np.eye(16), np.zeros((4, 16))])
+    jac[16:19, 12:15], jac[19, 15] = np.eye(3), 1.2
+    return jac
+
+  def restraints(self):
+    design = np.zeros((1, 16))
+    design[0, 4] = -1.0
+    return design, [self.target - self.x[4]], [1e8]
+
+
+def test_average_constraints_and_restraints():
+  delta = (0.10, 0.12, 0.09)
+  truth = model(amp=0.012, seed=7)
+  ride = _riding_average(truth, delta, truth.atoms[1].site[0])
+  mod._average_link(truth, mod._flags(None), ride).sync()   # the truth obeys the constraints too
+  h, m = reflections(truth, d_min=0.8)
+  _, fsq, _ = mod.calculator(h, m).compute(truth)
+  rng = np.random.RandomState(3)
+  sig = 0.02 * fsq + 2e-5 * fsq.max()
+  fobs = fsq + rng.normal(0, 1, fsq.size) * sig
+  start = model(amp=0.0)
+  for at, tr in zip(start.atoms, truth.atoms):
+    at.site = tr.site + rng.normal(0, 0.003, 3)
+  start.scale = 0.9
+  target = truth.atoms[1].site[0] + 0.002        # off the data's optimum: only the restraint puts it here
+  avg = _riding_average(start, delta, target)
+  hist = mod.refine(start, h, m, fobs, sig, cycles=30, verbose=False, average=avg)
+  r, floor = hist[-1]["R1"], mod.r_factors(fobs, fsq, m)
+  a3, a4 = start.atoms[3], start.atoms[4]
+  c, s = math.cos(2 * math.pi * avg.follow[4][1]), math.sin(2 * math.pi * avg.follow[4][1])
+  assert np.allclose(a4.site - a3.site, delta) and abs(a4.u_iso - 1.2 * a3.u_iso) < 1e-12
+  assert np.allclose(a4.a, c * a3.a + s * a3.b) and np.allclose(a4.b, -s * a3.a + c * a3.b)
+  assert abs(start.atoms[1].site[0] - target) < 2e-4, (start.atoms[1].site[0], target)
+  assert r["m=1"] < floor["m=1"] * 1.05 + 2e-3, (r, floor)
+  print("  riding atom keeps site, U and waves on its parent; restrained x off by %.1e; R1(m=1) %.4f (true %.4f)"
+        % (abs(start.atoms[1].site[0] - target), r["m=1"], floor["m=1"]))
+
+
 def _write_tsc(path, ids, idx, f, binary):
   """A NoSpherA2 id table (ids: xray.scatterer_id_big): tscb (header size, header, id count, 16-byte ids, row count,
   rows) or text."""
@@ -416,6 +471,7 @@ def run():
   test_change_of_basis_invariant()
   test_rank_by_absences()
   test_recovery()
+  test_average_constraints_and_restraints()
   test_aspherical_table()
   test_electron()
   print("OK")
