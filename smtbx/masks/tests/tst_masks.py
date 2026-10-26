@@ -126,6 +126,9 @@ Void  Vol/Ang^3  #Electrons
   assert flex.max(flex.abs(
     mask._masked_diff_map.select(mask.void_iselection(0)))) == 0
   assert mask.n_solvent_grid_points() == 21074
+  # and its electrons are out of F(000)_s, which is what f_mask is made of
+  assert approx_equal(mask.f_000_s,
+    flex.sum(mask._masked_diff_map)*mask.fft_scale, eps=1e-6)
 
   fo2 = fo.f_as_f_sq()
   # this bit is necessary until we have constraints, as

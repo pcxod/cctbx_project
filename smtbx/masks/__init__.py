@@ -491,12 +491,16 @@ class mask(object):
         # and the test would then discard a void merely for holding less than
         # that share rather than for holding nothing.
         selection = self.void_iselection(j)
+        electrons = flex.sum(masked_diff_map.select(selection)) * self.fft_scale
         # flex takes an index selection only on a 1-d array; as_1d() is a
-        # view of the same data, so zeroing through it zeroes the map
+        # view of the same data, so zeroing through it zeroes the map. The
+        # level above counted every void, so one that goes - excluded in an
+        # earlier cycle or by the caller, or negative now - takes its
+        # electrons out of f_000_s, which stays the count f_mask is made of.
         if self.exclude_void_flags[j]:
           masked_diff_map.as_1d().set_selected(selection, 0)
+          f_000_s -= electrons
           continue
-        electrons = flex.sum(masked_diff_map.select(selection)) * self.fft_scale
         if electrons < 0:
           masked_diff_map.as_1d().set_selected(selection, 0)
           f_000_s -= electrons
