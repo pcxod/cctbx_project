@@ -532,7 +532,7 @@ class mask(object):
     result.reshape(self.mask.data.accessor())
     return result
 
-  def _level_and_clamp(self, m, weight, sigma, mean_w):
+  def _level_and_clamp(self, m, weight, sigma, mean_w=None):
     """Put the F(000) level back into the region, and solve for it.
 
     F(000) is not measured, so the difference map has zero mean over the cell.
@@ -563,6 +563,9 @@ class mask(object):
     v_cell = self.xray_structure.unit_cell().volume()
     flat = m.as_1d()
     w_flat = weight.as_1d()
+    # optional: Olex2's own copy of structure_factors calls with three arguments
+    if mean_w is None:
+      mean_w = flex.sum(w_flat)/flat.size()
     integral = flex.sum(flat)*dv
     q = integral/(1 - mean_w) if mean_w < 1 else integral
     cut = 0.
