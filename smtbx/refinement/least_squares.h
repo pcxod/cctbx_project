@@ -625,13 +625,15 @@ namespace smtbx { namespace refinement { namespace least_squares {
           return;
         }
 #endif
-        /* Every worker keeps a normal matrix of its own, so what a threaded
-           build costs in memory grows with the thread count, and nothing in
-           `available_threads` knows that. On a large structure this is the
-           dominant allocation and can run to many times the budget asked for.
+        /* Every worker keeps a copy of the accumulator of its own, so what a
+           threaded build costs in memory grows with the thread count, and
+           nothing in `available_threads` knows that. For the accumulators which
+           form a normal matrix that copy is the matrix, which on a large
+           structure is the dominant allocation and can run to many times the
+           budget asked for.
 
-           Bounding the workers by what the budget holds is not the trade it
-           appears to be: past a handful of them the extra copies buy overhead
+           Bounding those workers by what the budget holds is not the trade it
+           appears to be: past a handful of them the extra matrices buy overhead
            and duplicate storage rather than arithmetic, the heavy kernel being
            threaded by the BLAS already. A build bounded this way is usually
            quicker as well as smaller.
@@ -663,8 +665,18 @@ namespace smtbx { namespace refinement { namespace least_squares {
          */
         if (!shared_fold_t::available
             && max_memory > 0 && normal_equations.n_parameters() > 0) {
-          std::size_t const n = normal_equations.n_parameters();
-          std::size_t const result_bytes = n*n*sizeof(FloatType);
+          /* Asked of the accumulator rather than assumed to be n x n. The
+             summary the stored-matrix conjugate gradients accumulate holds
+             O(n) -- two vectors, a lent row and the preconditioner blocks --
+             and charging it for a normal matrix it never allocates held a
+             protein's design matrix build to the floor of three workers; the
+             matrix-free mode's summary and product passes were held there
+             too. The normal equations accumulators are still charged n^2,
+             exactly as before; see their per_thread_bytes for why that is not
+             exact.
+           */
+          std::size_t const per_thread_bytes =
+            NormalEquations::per_thread_bytes(normal_equations.n_parameters());
           /* A quarter of the budget, not all of it. The private matrices are
              not what the budget was written for -- the row buffers are -- and
              giving them the whole of it lets a *generous* budget produce a
@@ -674,12 +686,15 @@ namespace smtbx { namespace refinement { namespace least_squares {
              Floored, and on a very large structure the floor matters more than
              the cap: once one matrix is itself larger than the share, the
              division alone would say a single worker and give up threading
-             altogether, costing far more than the memory it saves.
+             altogether, costing far more than the memory it saves. Capped
+             before the narrowing to int, which an O(n) charge against a large
+             budget could otherwise overflow.
            */
           std::size_t const budget = (std::size_t(max_memory) << 20)/4;
-          int const by_memory = static_cast<int>(
+          int const by_memory = static_cast<int>(std::min<std::size_t>(
+            parent_t::max_accumulator_threads(),
             std::max<std::size_t>(parent_t::min_accumulator_threads(),
-              budget/std::max<std::size_t>(1, result_bytes)));
+              budget/std::max<std::size_t>(1, per_thread_bytes))));
           thread_count = std::min(thread_count, by_memory);
         }
         /* Held here rather than in a boost::thread_group so that each thread
