@@ -39,35 +39,132 @@ class IncompatibleQ(ValueError):
   """q is not mapped onto +-q (modulo the reciprocal lattice) by an operation of the basic space group."""
 
 
+def _parse_hklm_line(line):
+  """One .hklm line by the rules below: [h, k, l, m, I, sigma], or None for a line that is neither format."""
+  try:
+    if len(line) < 32:
+      raise ValueError
+    return [int(line[i:i + 4]) for i in (0, 4, 8, 12)] + [float(line[16:24]), float(line[24:32])]
+  except ValueError:
+    t = line.split()
+    if not t:
+      return None
+    try:
+      return [int(x) for x in t[:4]] + [float(t[4]), float(t[5])]
+    except (ValueError, IndexError):
+      return None
+
+
+def _read_hklm_lines(lines, path):
+  """The reference parser, line by line."""
+  rows, bad = [], []
+  for n, line in enumerate(lines, 1):
+    v = _parse_hklm_line(line)
+    if v is None:
+      if line.split() and rows:   # before the data a header; after it skipped, not the end of the file
+        bad.append((n, line))
+      continue
+    if not any(v[:4]):
+      break
+    rows.append(v)
+  if bad:
+    print("hklm: skipped %d unreadable line(s) in %s, the first is line %d: %r" % (len(bad), path, *bad[0]))
+  return np.array(rows, dtype=float).reshape(-1, 6)
+
+
+_HKLM_FIELDS = np.dtype([("h", "S4"), ("k", "S4"), ("l", "S4"), ("m", "S4"), ("i", "S8"), ("s", "S8")])
+
+
+def _read_hklm_fast(lines):
+  """The same rows in one numpy conversion, for the regular file: header lines, then fixed 4I4,2F8 lines (anything
+  after column 32 ignored, as the reference does), ended by 0 0 0 0 or the end of the file. None as soon as
+  anything is irregular - a short, blank, non-ASCII or unconvertible line in the data - so that the caller falls
+  back on the reference parser for the whole file."""
+  first = None
+  for n, line in enumerate(lines):
+    v = _parse_hklm_line(line)
+    if v is not None:
+      if len(line) < 32 or not any(v[:4]):
+        return None
+      first = n
+      break
+  if first is None:
+    return np.zeros((0, 6))
+  block = lines[first:]
+  while block and not block[-1].strip():
+    block = block[:-1]
+  try:
+    raw = np.array([l[:32] for l in block]).astype("S32")
+  except UnicodeEncodeError:
+    return None
+  if np.any(np.char.str_len(raw) < 32):
+    return None
+  rec = raw.view(_HKLM_FIELDS).ravel()
+  try:
+    hklm = np.column_stack([rec[k].astype(np.int64) for k in ("h", "k", "l", "m")])
+    vals = np.column_stack([rec[k].astype(np.float64) for k in ("i", "s")])
+  except ValueError:
+    return None
+  zero = np.flatnonzero(~hklm.any(axis=1))
+  stop = zero[0] if len(zero) else len(block)
+  return np.column_stack([hklm[:stop].astype(float), vals[:stop]])
+
+
 def read_hklm(path):
   """(h (N,3), m (N,), I, sigma) from an .hklm file: h k l m I sigma [batch], fixed 4I4,2F8 or space separated,
   ended by 0 0 0 0; lines that are neither are headers before the data and skipped (and reported) after it (the
-  rules of Olex2's THklFile::LoadHklmFromStrings)."""
-  rows, bad = [], []
-  with open(path, errors="replace") as f:
-    for n, line in enumerate(f, 1):
-      line = line.rstrip("\r\n")
-      try:
-        if len(line) < 32:
-          raise ValueError
-        v = [int(line[i:i + 4]) for i in (0, 4, 8, 12)] + [float(line[16:24]), float(line[24:32])]
-      except ValueError:
-        t = line.split()
-        if not t:
-          continue
-        try:
-          v = [int(x) for x in t[:4]] + [float(t[4]), float(t[5])]
-        except (ValueError, IndexError):
-          if rows:   # before the data a header; after it skipped, not the end of the file
-            bad.append((n, line))
-          continue
-      if not any(v[:4]):
-        break
-      rows.append(v)
-  if bad:
-    print("hklm: skipped %d unreadable line(s) in %s, the first is line %d: %r" % (len(bad), path, *bad[0]))
-  a = np.array(rows, dtype=float).reshape(-1, 6)
+  rules of Olex2's THklFile::LoadHklmFromStrings). A regular fixed-format file is converted in one go, anything
+  else line by line; both give the same arrays."""
+  a = _read_hklm_uniform(path)
+  if a is None:
+    with open(path, errors="replace") as f:
+      lines = f.read().split("\n")
+    a = _read_hklm_fast(lines)
+    if a is None:
+      a = _read_hklm_lines(lines, path)
   return a[:, :3].astype(int), a[:, 3].astype(int), a[:, 4], a[:, 5]
+
+
+def _read_hklm_uniform(path):
+  """_read_hklm_fast for the common file whose data lines all have one length, as fixed-size records straight
+  from the bytes, with no work per line in Python. None for anything else (non-ASCII, CR line ends, lines of
+  different lengths): the caller then goes through the text."""
+  with open(path, "rb") as f:
+    data = f.read()
+  if b"\r" in data or not data.isascii():
+    return None
+  # the header: the lines before the first one the reference parser takes as data
+  pos = 0
+  while pos < len(data):
+    nl = data.find(b"\n", pos)
+    nl = len(data) if nl < 0 else nl
+    v = _parse_hklm_line(data[pos:nl].decode("ascii"))
+    if v is not None:
+      if nl - pos < 32 or not any(v[:4]):
+        return None
+      break
+    pos = nl + 1
+  else:
+    return np.zeros((0, 6))
+  block = data[pos:].rstrip(b" \n")    # trailing blank lines, as the reference skips them
+  width = block.find(b"\n")
+  if width < 0:
+    width = len(block)
+  if width < 32 or (len(block) + 1) % (width + 1):
+    return None
+  n = (len(block) + 1) // (width + 1)
+  buf = np.frombuffer(block + b"\n", dtype=np.uint8).reshape(n, width + 1)
+  if np.any(buf[:, width] != 10) or np.any(buf[:, :width] == 10):
+    return None
+  rec = np.ascontiguousarray(buf[:, :32]).view(_HKLM_FIELDS).ravel()
+  try:
+    hklm = np.column_stack([rec[k].astype(np.int64) for k in ("h", "k", "l", "m")])
+    vals = np.column_stack([rec[k].astype(np.float64) for k in ("i", "s")])
+  except ValueError:
+    return None
+  zero = np.flatnonzero(~hklm.any(axis=1))
+  stop = zero[0] if len(zero) else n
+  return np.column_stack([hklm[:stop].astype(float), vals[:stop]])
 
 
 def _pack(h, m):
@@ -733,6 +830,8 @@ class calculator(object):
     # compute() calls of a refinement; rebuilt when any of those changes (_invariant_key)
     self._invariants = (None, None)
     self._share_classes = True   # False: every operation evaluates its own x4 sums (the reference path)
+    self._mode = None            # None: pool_mode decides; "atoms" or "reflections" forces it
+    self._sub = {}               # reflection-slice calculators, by number of slices (_chunks)
 
   def table_indices(self, ssg):
     """The rows a NoSpherA2 table needs for these reflections (-hkl_scale TABLE_SCALE): round(TABLE_SCALE S R)
@@ -796,7 +895,51 @@ class calculator(object):
     self._invariants = (key, value)
     return value
 
+  # scaling of the atom pool saturates near four threads (memory bandwidth)
+  default_threads = 4
+
+  def _threads(self):
+    return max(1, self.threads or min(self.default_threads, os.cpu_count() or 1))
+
+  def _chunks(self, n_chunks, threads=1):
+    """Calculators over consecutive slices of the reflections, made once per (number of slices, threads) and kept:
+    each keeps its own invariants under the same key as this one (its reflections are fixed, the rest is in the
+    key). threads 1: one slice per thread of the pool; more: slices of the normal equations, each with the atom
+    pool inside."""
+    key = (n_chunks, threads)
+    if key not in self._sub:
+      bounds = np.linspace(0, len(self.m), n_chunks + 1).astype(int)
+      subs = []
+      for a, b in zip(bounds[:-1], bounds[1:]):
+        c = calculator(self.h[a:b], self.m[a:b], self.n_x4, self.table, threads=threads, radiation=self.radiation)
+        c._share_classes, c._mode = self._share_classes, "atoms"
+        subs.append(c)
+      self._sub[key] = subs
+    return self._sub[key]
+
+  def pool_mode(self, xs):
+    """'atoms' or 'reflections' for the thread pool: atoms when there are enough of them to keep every thread busy
+    (twice the threads), else slices of the reflections - a few atoms with many satellites."""
+    if self._mode is not None:
+      return self._mode
+    t = self._threads()
+    if t == 1 or len(xs.atoms) >= 2 * t or len(self.m) < 2000 * t:
+      return "atoms"
+    return "reflections"
+
   def compute(self, xs, flags=None, gradients=False):
+    if self.pool_mode(xs) == "reflections":
+      subs = self._chunks(self._threads())
+      for c in subs:
+        c._share_classes = self._share_classes
+      with concurrent.futures.ThreadPoolExecutor(len(subs)) as ex:
+        parts = list(ex.map(lambda c: c.compute(xs, flags, gradients), subs))
+      f = np.concatenate([p[0] for p in parts])
+      fsq = np.concatenate([p[1] for p in parts])
+      return f, fsq, (np.vstack([p[2] for p in parts]) if gradients else None)
+    return self._compute_rows(xs, flags, gradients)
+
+  def _compute_rows(self, xs, flags=None, gradients=False):
     flags = _flags(flags)
     q = xs.q
     s_vec, s_sq, ff, ops, classes = self._per_operation(xs)
@@ -952,7 +1095,7 @@ class calculator(object):
 
     # numpy's ufuncs and dots release the GIL, so atoms run in threads; summed in atom order, so the result does
     # not depend on the thread count. About 40 bytes per (reflection, node) per thread are live at once.
-    n_threads = max(1, min(self.threads or os.cpu_count() or 1, len(xs.atoms),
+    n_threads = max(1, min(self._threads(), len(xs.atoms),
                            int(2e9 // (40 * nref * max(len(p[0]) for p in pre)))))
     if n_threads == 1:
       for ia in range(len(xs.atoms)):
@@ -1301,8 +1444,99 @@ class _average_link(object):
     set_parameters(self.xs, self.flags, p0)
 
 
+def _blocks_times(blocks, x):
+  """Z x for the block-diagonal Z of _reduction_blocks, block by block (no dense Z)."""
+  out, j = [], 0
+  for b in blocks:
+    out.append(b.dot(x[j:j + b.shape[1]]))
+    j += b.shape[1]
+  return np.concatenate(out)
+
+
+def _solve_in_place(a_mat, rhs, jtj, lam, diag):
+  """(J^T J + lam D) x = J^T r with a_mat holding the matrix, which it may overwrite; least squares on a fresh
+  copy when it is singular."""
+  try:
+    from scipy.linalg import solve, LinAlgError as ScipyError
+  except ImportError:
+    solve, ScipyError = None, np.linalg.LinAlgError
+  try:
+    if solve is not None:
+      return solve(a_mat, rhs, overwrite_a=True, check_finite=False)
+    return np.linalg.solve(a_mat, rhs)
+  except (np.linalg.LinAlgError, ScipyError):
+    np.copyto(a_mat, jtj)
+    a_mat[np.diag_indices_from(a_mat)] += lam * diag
+    return np.linalg.lstsq(a_mat, rhs, rcond=None)[0]
+
+
+def _slices(calc, n, max_rows):
+  """The calculators of the slices _normal_equations uses: [calc] when one slice holds everything."""
+  n_chunks = max(1, -(-n // max(1, max_rows)))
+  return [calc] if n_chunks == 1 else calc._chunks(n_chunks, calc._threads())
+
+
+def _f_sq(calc, xs, max_rows):
+  """F^2 through the same slices as the normal equations, so that the full set of reflections never has its own
+  per-operation arrays next to the slices' ones."""
+  return np.concatenate([c.compute(xs)[1] for c in _slices(calc, len(calc.m), max_rows)])
+
+
+def _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows):
+  """F^2 and J^T J, J^T r of the weighted residuals r = sw (Fo^2 - Fc^2), J = project(sw dFc^2/dp), with the
+  reflections taken max_rows at a time: the design matrix (reflections x parameters) is never held whole.
+  One slice is exactly the dense product."""
+  subs = _slices(calc, len(f_obs_sq), max_rows)
+  n_chunks = len(subs)
+  try:
+    from scipy.linalg.blas import dsyrk
+  except ImportError:
+    dsyrk = None
+  fc_parts, jtj, jtr, a = [], None, None, 0
+  for c in subs:
+    b = a + len(c.m)
+    _, fc_sq, d = c.compute(xs, flags, gradients=True)
+    d *= sw[a:b, None]      # in place: d is this slice's own
+    j = project(d)
+    del d
+    r = sw[a:b] * (f_obs_sq[a:b] - fc_sq)
+    if n_chunks == 1:
+      jtj = j.T.dot(j)
+    elif dsyrk is not None:
+      # in place, upper triangle: no second n x n matrix per slice
+      if jtj is None:
+        jtj = np.zeros((j.shape[1], j.shape[1]), order="F")
+      jtj = dsyrk(1.0, j, beta=1.0, c=jtj, trans=1, lower=0, overwrite_c=1)
+    else:
+      jtj = j.T.dot(j) if jtj is None else jtj + j.T.dot(j)
+    jtr = j.T.dot(r) if jtr is None else jtr + j.T.dot(r)
+    fc_parts.append(fc_sq)
+    a = b
+  if n_chunks > 1 and dsyrk is not None:
+    _mirror_upper(jtj)
+  return np.concatenate(fc_parts), jtj, jtr
+
+
+def _mirror_upper(a, block=1024):
+  """The lower triangle of a square matrix from its upper one, in place and a block of rows at a time: no n x n
+  temporaries."""
+  for k in range(0, a.shape[0], block):
+    a[k:k + block, :k] = a[:k, k:k + block].T
+    blk = a[k:k + block, k:k + block]
+    low = np.tril_indices(blk.shape[0], -1)
+    blk[low] = blk.T[low]
+  return a
+
+
+def _rows_per_slice(xs, flags, max_memory_mb):
+  """How many reflections a slice of the normal equations may hold: per reflection about 40 bytes per parameter
+  (the complex per-atom gradients, the real dF^2/dp, its projection)."""
+  n_p = len(get_parameters(xs, flags))
+  return max(256, int(max_memory_mb * 2 ** 20 // (40 * max(n_p, 1))))
+
+
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True,
-           table=None, radiation="xray", average=None):
+           table=None, radiation="xray", average=None, max_memory_mb=512):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
   table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
 
@@ -1319,6 +1553,9 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
     follow       {atom index: (parent atom index, dx4)}: the atom's waves are the parent's moved along x4 by
                  dx4 = q.(x_atom - x_parent), so both are displaced alike in every section t (riding hydrogens)
   Restraints are weighted by the GooF^2 of the starting model, as in smtbx.refinement.least_squares.
+
+  max_memory_mb: what one slice of the normal equations may take; the reflections are taken in as many slices as
+  that needs (_rows_per_slice), J^T J and J^T r summed over them. A problem that fits uses one slice.
   ponytail: restraints act on the average structure only, not section by section along t.
   """
   flags = _flags(flags)
@@ -1327,14 +1564,13 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
     flags.update(site=True, adp=True, occupancy=False)   # occupancies stay with the average's own refinement
     link = _average_link(xs, flags, average)
   else:
-    zb = _reduction_blocks(xs, flags)
-    z = _block_diag(zb)             # superspace site symmetry: the free directions
+    zb = _reduction_blocks(xs, flags)   # superspace site symmetry: the free directions, block by block
   if flags["modulation"]:
     p_before = get_parameters(xs, flags)
     seed_amplitudes(xs)
     p = get_parameters(xs, flags)
     if link is None:
-      set_parameters(xs, flags, p_before + z.dot(z.T.dot(p - p_before)))
+      set_parameters(xs, flags, p_before + _blocks_times(zb, _times_blocks((p - p_before)[None, :], zb)[0]))
     else:
       wi = link.wave_idx
       p[wi] = p_before[wi] + link.zw.dot(link.zw.T.dot(p[wi] - p_before[wi]))
@@ -1348,18 +1584,18 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
   lam = damping
   chi = None    # from the first gradient pass: the same F^2 a separate pass before the loop would give
   norm = None
+  project = (lambda d: _times_blocks(d, zb)) if link is None else link.jacobian
+  max_rows = _rows_per_slice(xs, flags, max_memory_mb)
   for cycle in range(cycles):
-    _, fc_sq, d = calc.compute(xs, flags, gradients=True)
+    fc_sq, jtj, jtr = _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows)
     if chi is None:
       chi = float(np.sum(w * (f_obs_sq - fc_sq) ** 2))   # + the weighted restraints once there are any
     r = sw * (f_obs_sq - fc_sq)
-    j = _times_blocks(sw[:, None] * d, zb) if link is None else link.jacobian(sw[:, None] * d)
-    jtj = j.T.dot(j)
-    jtr = j.T.dot(r)
-    rest = None if link is None else link.restraints(j.shape[1])
+    n_free = jtj.shape[0]
+    rest = None if link is None else link.restraints(n_free)
     if rest is not None:
       if norm is None:
-        norm = chi / max(len(r) - j.shape[1], 1)
+        norm = chi / max(len(r) - n_free, 1)
         chi += norm * float(np.sum(rest[2] * rest[1] ** 2))
       rw = norm * rest[2]
       jtj += rest[0].T.dot(rw[:, None] * rest[0])
@@ -1368,22 +1604,22 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
     diag = np.diag(jtj).copy()
     diag[diag <= 1e-12 * max(diag.max(), 1e-300)] = max(diag.max(), 1.0)
     accepted, step = False, np.zeros_like(p0)
+    a_mat = np.empty_like(jtj)     # one buffer for every damping tried: no new n x n matrix per try
+    on_diag = np.diag_indices_from(jtj)
     for _ in range(16):
-      a_mat = jtj + lam * np.diag(diag)
-      try:
-        x = np.linalg.solve(a_mat, jtr)
-      except np.linalg.LinAlgError:
-        x = np.linalg.lstsq(a_mat, jtr, rcond=None)[0]
+      np.copyto(a_mat, jtj)
+      a_mat[on_diag] += lam * diag
+      x = _solve_in_place(a_mat, jtr, jtj, lam, diag)
       if link is None:
-        set_parameters(xs, flags, p0 + z.dot(x))
+        set_parameters(xs, flags, p0 + _blocks_times(zb, x))
       else:
         link.apply(p0, x)
       step = get_parameters(xs, flags) - p0
       with np.errstate(over="ignore", invalid="ignore"):
-        _, fc_new, _ = calc.compute(xs)
+        fc_new = _f_sq(calc, xs, max_rows)
       chi_new = float(np.sum(w * (f_obs_sq - fc_new) ** 2))
       if rest is not None:
-        r_new = link.restraints(j.shape[1])
+        r_new = link.restraints(n_free)
         chi_new += norm * float(np.sum(r_new[2] * r_new[1] ** 2))
       if np.isfinite(chi_new) and chi_new <= chi:
         chi, lam, accepted = chi_new, max(lam / 3, 1e-9), True
@@ -1393,7 +1629,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
       lam *= 5
     if not accepted:
       set_parameters(xs, flags, p0)
-      _, fc_new, _ = calc.compute(xs)
+      fc_new = _f_sq(calc, xs, max_rows)
     wr2 = math.sqrt(float(np.sum(w * (f_obs_sq - fc_new) ** 2)) / float(np.sum(w * f_obs_sq ** 2)))
     rec = {"cycle": cycle + 1, "wR2": wr2, "R1": r_factors(f_obs_sq, fc_new, m),
            "max_shift": float(np.max(np.abs(step))) if accepted and step.size else 0.0, "lambda": lam}

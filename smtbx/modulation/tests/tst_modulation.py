@@ -723,17 +723,123 @@ def test_calculator_equivalence():
         " q, cell or dispersion" % worst)
 
 
+def _read_hklm_reference(path):
+  """read_hklm as it was: line by line."""
+  rows, bad = [], []
+  with open(path, errors="replace") as f:
+    for n, line in enumerate(f, 1):
+      line = line.rstrip("\r\n")
+      try:
+        if len(line) < 32:
+          raise ValueError
+        v = [int(line[i:i + 4]) for i in (0, 4, 8, 12)] + [float(line[16:24]), float(line[24:32])]
+      except ValueError:
+        t = line.split()
+        if not t:
+          continue
+        try:
+          v = [int(x) for x in t[:4]] + [float(t[4]), float(t[5])]
+        except (ValueError, IndexError):
+          if rows:
+            bad.append((n, line))
+          continue
+      if not any(v[:4]):
+        break
+      rows.append(v)
+  a = np.array(rows, dtype=float).reshape(-1, 6)
+  return a[:, :3].astype(int), a[:, 3].astype(int), a[:, 4], a[:, 5]
+
+
+def test_read_hklm_equivalence():
+  """The numpy paths of read_hklm (fixed-size records; fixed-width fields of the text) against the line-by-line
+  reader, on regular files and on every irregularity that must send it back to the line-by-line one."""
+  import os, tempfile, io, contextlib
+  rng = np.random.RandomState(14)
+  def rows(n):
+    hh = rng.randint(-99, 100, (n, 3)); mm = rng.randint(-3, 4, n); ii = rng.uniform(-50, 99999, n)
+    return ["%4d%4d%4d%4d%8.2f%8.2f" % (a, b, c, k, x, 1 + abs(x) ** 0.5) for (a, b, c), k, x in zip(hh, mm, ii)]
+  end = "   0   0   0   0    0.00    0.00"
+  cases = [(rows(3000) + [end], "\n"), (["TITLE x", "# comment"] + [r + "   1" for r in rows(800)] + [end, ""], "\r\n"),
+           (rows(800) + ["", "  "], "\n"), (rows(300) + [end, "end of data", "1 2"], "\n"),
+           (rows(300) + [""] + rows(300), "\n"), (rows(300) + ["# c"] + rows(300), "\n"),
+           (["1 2 3 0 10.5 1.0", "-4 5 6 1 99.25 2.5", "0 0 0 0 0 0"], "\n"),
+           (rows(300) + ["1 2 3 1 55.5 2.0"] + rows(300), "\n"), (["-100-100-100   1 1234.56   12.34"] * 50 + rows(50), "\n"),
+           ([u"T\u00eftle \u2713"] + rows(300), "\n"), (rows(300) + ["   1   2   3   0   12.0"] + rows(10), "\n")]
+  d = tempfile.mkdtemp()
+  for k, (lines, nl) in enumerate(cases):
+    p = os.path.join(d, "c%d.hklm" % k)
+    with open(p, "w", newline="", encoding="utf-8") as f:
+      f.write(nl.join(lines) + nl)
+    with contextlib.redirect_stdout(io.StringIO()):
+      a, b = _read_hklm_reference(p), mod.read_hklm(p)
+    assert all(np.array_equal(x, y) and x.dtype == y.dtype for x, y in zip(a, b)), k
+  print("  read_hklm, numpy paths = line by line: %d files, regular and irregular" % len(cases))
+
+
+def rng_matrix(n, seed=15):
+  return np.random.RandomState(seed).uniform(-1, 1, (n, n))
+
+
+def test_normal_equations_and_pool_equivalence():
+  """J^T J and J^T r summed over slices of the reflections against the dense product (one slice), and a refine
+  cycle with a budget that forces slices against one that does not: shifts to 1e-10, F to 1e-12. The pool by
+  slices of the reflections against the pool by atoms: F and gradients bit for bit."""
+  from cctbx import adptbx
+  xs = model(n_harmonics=2, amp=0.02)
+  for at in xs.atoms:
+    at.u_star = np.array(adptbx.u_iso_as_u_star(xs.unit_cell, at.u_iso))
+    at.occ_sin, at.occ_cos = np.array([0.05]), np.array([-0.03])
+  xs.atoms[2].crenel = (0.3, 0.6)
+  h, m = reflections(xs, d_min=1.0, m_max=2)
+  flags = {"site": True, "adp": True, "modulation": True, "occ_waves": True, "crenel": True, "scale": True}
+  fl = mod._flags(flags)
+  fsq = mod.calculator(h, m).compute(xs)[1]
+  sig = 0.02 * fsq + 1e-5 * fsq.max()
+  sw = 1 / sig
+  zb = mod._reduction_blocks(xs, fl)
+  project = lambda d: mod._times_blocks(d, zb)
+  calc = mod.calculator(h, m)
+  f1, a1, b1 = mod._normal_equations(calc, xs, fl, fsq * 1.01, sw, project, len(m))
+  f7, a7, b7 = mod._normal_equations(calc, xs, fl, fsq * 1.01, sw, project, len(m) // 7 + 1)
+  e_ne = max(np.max(np.abs(a7 - a1)) / np.max(np.abs(a1)), np.max(np.abs(b7 - b1)) / np.max(np.abs(b1)))
+  assert np.array_equal(f1, f7) and e_ne < 1e-12, e_ne
+  # the in-place mirror of the upper triangle, with blocks smaller than the matrix
+  u = np.triu(rng_matrix(53))
+  for blk in (1, 7, 53, 1024):
+    full = mod._mirror_upper(np.array(u, order="F"), block=blk)
+    assert np.array_equal(full, np.triu(u) + np.triu(u, 1).T), blk
+  import copy
+  p0 = mod.get_parameters(xs, fl)
+  out = []
+  for mb in (1e9, 0.5):
+    x = copy.deepcopy(xs)
+    mod.refine(x, h, m, fsq * 1.01, sig, flags=flags, cycles=1, verbose=False, max_memory_mb=mb)
+    out.append((mod.get_parameters(x, fl) - p0, mod.calculator(h, m).compute(x)[0]))
+  e_shift = np.max(np.abs(out[1][0] - out[0][0])) / np.max(np.abs(out[0][0]))
+  e_f = np.max(np.abs(out[1][1] - out[0][1])) / np.max(np.abs(out[0][1]))
+  assert e_shift < 1e-10 and e_f < 1e-12, (e_shift, e_f)
+  by_atoms, by_rows = mod.calculator(h, m, threads=4), mod.calculator(h, m, threads=4)
+  by_atoms._mode, by_rows._mode = "atoms", "reflections"
+  fa, _, da = by_atoms.compute(xs, flags, gradients=True)
+  fb, _, db = by_rows.compute(xs, flags, gradients=True)
+  assert np.array_equal(fa, fb) and np.array_equal(da, db)
+  print("  normal equations by slices = dense: J^T J, J^T r %.1e, shifts %.1e, F %.1e; pool by reflections ="
+        " by atoms bit for bit" % (e_ne, e_shift, e_f))
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
   test_bessel_single_harmonic()
   test_gradients_finite_difference()
   test_calculator_equivalence()
+  test_normal_equations_and_pool_equivalence()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()
   test_mscif_against_jana()
   test_hklm_files()
+  test_read_hklm_equivalence()
   test_reflection_statistics()
   test_change_of_basis_invariant()
   test_rank_by_absences()
