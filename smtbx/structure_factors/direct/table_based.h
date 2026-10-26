@@ -1058,6 +1058,17 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     af::shared<bool> covered_;
     std::size_t n_smx_;
     mutable std::vector<complex_type> tmp_;
+    /* The spherical half reads the form factors at_d_star_sq set and holds
+       nothing before it is first called: an uncovered atom asked for before
+       that read an empty array. The f_calc loops always call it first; a
+       Python caller of get or get_full may not, and gets an error instead.
+     */
+    bool d_star_sq_set_;
+    void check_d_star_sq() const {
+      SMTBX_ASSERT(d_star_sq_set_)
+        ("at_d_star_sq() must be called before the form factor of an atom"
+         " the table does not cover");
+    }
   public:
     partially_tabulated(const partially_tabulated &other)
       : scatterers_(other.scatterers_),
@@ -1067,7 +1078,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           isotropic_scatterer_contribution<float_type>(scatterers_, registry_)),
         covered_(other.covered_),
         n_smx_(other.n_smx_),
-        tmp_(other.n_smx_)
+        tmp_(other.n_smx_),
+        d_star_sq_set_(false)
     {}
 
     partially_tabulated(base_type *tabulated,
@@ -1081,14 +1093,16 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           isotropic_scatterer_contribution<float_type>(scatterers_, registry_)),
         covered_(covered),
         n_smx_(n_smx),
-        tmp_(n_smx)
+        tmp_(n_smx),
+        d_star_sq_set_(false)
     {}
 
     virtual complex_type get(std::size_t scatterer_idx,
       miller::index<> const &h) const
     {
-      return covered_[scatterer_idx] ? tabulated_->get(scatterer_idx, h)
-                                     : spherical_->get(scatterer_idx, h);
+      if (covered_[scatterer_idx]) return tabulated_->get(scatterer_idx, h);
+      check_d_star_sq();
+      return spherical_->get(scatterer_idx, h);
     }
 
     /* A spherical form factor depends on the reflection only through its
@@ -1101,6 +1115,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       if (covered_[scatterer_idx]) {
         return tabulated_->get_full(scatterer_idx, h);
       }
+      check_d_star_sq();
       tmp_.assign(n_smx_, spherical_->get(scatterer_idx, h));
       return tmp_;
     }
@@ -1108,6 +1123,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     virtual base_type &at_d_star_sq(float_type d_star_sq) {
       tabulated_->at_d_star_sq(d_star_sq);
       spherical_->at_d_star_sq(d_star_sq);
+      d_star_sq_set_ = true;
       return *this;
     }
 

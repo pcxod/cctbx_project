@@ -768,6 +768,30 @@ def exercise_corrupt_files():
         " and %d NaN/inf numbers refused" % (n_cases, n_truncations, n_non_finite))
 
 
+def exercise_uncovered_atom_before_d_star_sq():
+  """ get/get_full from Python on an atom the file misses, before
+  at_d_star_sq: an error, not a read of an empty array (it segfaulted). """
+  rng = random.Random(15)
+  xs = disordered_setup()
+  p = os.path.join(tempfile.mkdtemp(), "part.tshb")
+  tshb.write(p, [keyed(xs, j, random_atom("x", 1, rng)._replace(z=6)) for j in range(3)])
+  c = build_with_fallback(xs.unit_cell(), xs.scatterers(), p, xs.space_group(),
+    True, xs.scattering_type_registry(), allow_spherical_fallback=True)
+  assert list(c.scatterers_not_in_table()) == [3]
+  for call in (c.get_full, c.get):
+    try:
+      call(3, (1, 2, 3))
+    except RuntimeError as e:
+      assert "at_d_star_sq" in str(e)
+    else:
+      raise AssertionError("no error before at_d_star_sq")
+  c.get_full(0, (1, 2, 3))              # a covered atom needs nothing
+  c.at_d_star_sq(xs.unit_cell().d_star_sq((1, 2, 3)))
+  f = c.get_full(3, (1, 2, 3))[0]
+  assert f.real > 0 and f.imag == 0
+  print("\tuncovered atom before at_d_star_sq: refused, not a crash")
+
+
 def run():
   exercise_transform_against_numerical_integral()
   exercise_spherical_records()
@@ -781,6 +805,7 @@ def run():
   exercise_fractional_slater_n()
   exercise_disorder_gradients()
   exercise_corrupt_files()
+  exercise_uncovered_atom_before_d_star_sq()
   exercise_spherical_equivalence()
   exercise_least_squares_build()
   print("OK")
