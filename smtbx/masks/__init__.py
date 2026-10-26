@@ -53,22 +53,30 @@ class solvent_accessible_volume(object):
           use_space_group_symmetry=use_space_group_symmetry))
     else:
       self.crystal_gridding = crystal_gridding
+    # ignore_hydrogen_atoms was accepted and silently ignored before. With H
+    # in, an aspherical model's longer X-H bonds take ~220 A^3 out of the
+    # solvent of 1EJG against IAM, and that alone is why its mask holds fewer
+    # electrons. Leaving H out (as mmtbx does) still measured worse on held-out
+    # reflections there (R1_free +1.3 %), so it stays off by default.
+    region = xray_structure
+    if ignore_hydrogen_atoms:
+      region = xray_structure.select(~xray_structure.hd_selection())
     if use_space_group_symmetry:
       atom_radii = cctbx.masks.vdw_radii(
-        xray_structure, table=atom_radii_table).atom_radii
-      asu_mappings = xray_structure.asu_mappings(
+        region, table=atom_radii_table).atom_radii
+      asu_mappings = region.asu_mappings(
         buffer_thickness=flex.max(atom_radii)+solvent_radius)
       scatterers_asu_plus_buffer = flex.xray_scatterer()
-      frac = xray_structure.unit_cell().fractionalize
+      frac = region.unit_cell().fractionalize
       for sc, mappings in zip(
-        xray_structure.scatterers(), asu_mappings.mappings()):
+        region.scatterers(), asu_mappings.mappings()):
         for mapping in mappings:
           scatterers_asu_plus_buffer.append(
             sc.customized_copy(site=frac(mapping.mapped_site())))
-      xs = xray.structure(crystal_symmetry=xray_structure,
+      xs = xray.structure(crystal_symmetry=region,
                           scatterers=scatterers_asu_plus_buffer)
     else:
-      xs = xray_structure.expand_to_p1()
+      xs = region.expand_to_p1()
     self.vdw_radii = cctbx.masks.vdw_radii(xs, table=atom_radii_table)
     self.mask = cctbx.masks.around_atoms(
       unit_cell=xs.unit_cell(),
@@ -234,6 +242,8 @@ class mask(object):
     self.crystal_gridding = result.crystal_gridding
     self.vdw_radii = result.vdw_radii
     self.solvent_radius = solvent_radius
+    # kept for occupancy_weight_map, which leaves out the same atoms
+    self.ignore_hydrogen_atoms = ignore_hydrogen_atoms
     self.mask = result.mask
     self.flood_fill = result.flood_fill
     self.exclude_void_flags = [False] * self.flood_fill.n_voids()
@@ -334,7 +344,12 @@ class mask(object):
     """
     xs = self.xray_structure
     occupancies = flex.double([sc.occupancy for sc in xs.scatterers()])
-    partial = occupancies < 1 - self.occupancy_full_tolerance
+    # atoms the main region was not drawn around take no part here either
+    if getattr(self, 'ignore_hydrogen_atoms', False):
+      considered = ~xs.hd_selection()
+    else:
+      considered = flex.bool(xs.scatterers().size(), True)
+    partial = (occupancies < 1 - self.occupancy_full_tolerance) & considered
     if partial.count(True) == 0:
       # flex reshape works in place and answers None, so it is never the last
       # thing in an expression
@@ -356,6 +371,10 @@ class mask(object):
       combined pointwise.
       """
       group = xs.select(selection).expand_to_p1()
+      # cctbx default radii (C 1.775) even when the main region was drawn with
+      # a caller's table (Olex2: C 1.70). Handing the caller's table on here
+      # was tried and judged on held-out reflections of 1EJG: R1_free 0.4 %
+      # worse for both IAM and GARLIC models, so the larger radii stay.
       radii = cctbx.masks.vdw_radii(group).atom_radii
       r = cctbx.masks.around_atoms(
         unit_cell=group.unit_cell(),
@@ -373,11 +392,12 @@ class mask(object):
     # so the correction has to be switched off wherever one reaches. Without
     # this term every point of the model region untouched by a partial group -
     # which is most of the protein - would come back as full solvent.
-    if partial.count(False) == 0:
+    full = ~partial & considered
+    if full.count(True) == 0:
       free_of_full = flex.double(self.mask.data.size(), 1)
       free_of_full.reshape(self.mask.data.accessor())
     else:
-      free_of_full = outside(~partial)
+      free_of_full = outside(full)
 
     # Occupancies **add**, they do not multiply. Two alternate conformers of
     # one side chain at 0.6 and 0.4 are mutually exclusive: their shared volume
@@ -393,7 +413,7 @@ class mask(object):
       if q <= 0:
         continue
       inside = 1. - outside(
-        flex.bool([round(o, 3) == q for o in occupancies]))
+        flex.bool([round(o, 3) == q for o in occupancies]) & considered)
       covered = covered + q*inside
     covered.set_selected(covered > 1., 1.)
     absent = 1. - covered
@@ -467,19 +487,37 @@ class mask(object):
     scaled = f_obs.customized_copy(data=f_obs.data()/self.scale_factor)
     return bias.difference_coefficients(scaled, f_calc)
 
-  def structure_factors(self, max_cycles=10):
-    """P. van der Sluis and A. L. Spek, Acta Cryst. (1990). A46, 194-201."""
+  def structure_factors(self, max_cycles=10, f_calc=None, scale_factor=None,
+                        convergence=0.0001):
+    """P. van der Sluis and A. L. Spek, Acta Cryst. (1990). A46, 194-201.
+
+    f_calc: the model's structure factors, covering the set the mask works on
+    (complete_set with use_set_completion, fo2 otherwise). Left out, they are
+    computed here from spherical atoms - which is wrong for a model refined
+    with aspherical form factors, since the void then soaks up whatever the
+    IAM misses and the refinement gets that back on top of its own model.
+    scale_factor: a starting scale; by default sum(Fo)/sum(|Fc|).
+    """
     assert self.mask is not None
     if self.n_voids() == 0: return
     if self.use_set_completion:
       f_calc_set = self.complete_set
     else:
       f_calc_set = self.fo2.set()
-    self.f_calc = f_calc_set.structure_factors_from_scatterers(
-      self.xray_structure, algorithm=self.f_calc_algorithm).f_calc()
+    if f_calc is None:
+      f_calc = f_calc_set.structure_factors_from_scatterers(
+        self.xray_structure, algorithm=self.f_calc_algorithm).f_calc()
+    elif not f_calc.indices().all_eq(f_calc_set.indices()):
+      # put into the mask's order; asserts if f_calc misses any reflection
+      permutation = miller.match_indices(
+        f_calc_set.indices(), f_calc.indices()).permutation()
+      f_calc = f_calc_set.array(data=f_calc.data().select(permutation))
+    self.f_calc = f_calc
     f_obs = self.f_obs()
-    self.scale_factor = flex.sum(f_obs.data())/flex.sum(
-      flex.abs(self.f_calc.data()))
+    if scale_factor is None:
+      scale_factor = flex.sum(f_obs.data())/flex.sum(
+        flex.abs(self.f_calc.data()))
+    self.scale_factor = scale_factor
     f_obs_minus_f_calc = self._difference_coefficients(f_obs, self.f_calc)
     self.fft_scale = self.xray_structure.unit_cell().volume()\
         / self.crystal_gridding.n_grid_points()
@@ -551,7 +589,7 @@ class mask(object):
           epsilon_for_min_residual = epsilon
       self.scale_factor = scale_for_min_residual
       if (previous_f_000_s is not None and
-          approx_equal_relatively(previous_f_000_s, f_000_s, 0.0001)):
+          approx_equal_relatively(previous_f_000_s, f_000_s, convergence)):
         break # we have reached convergence
       f_model = self.f_model(epsilon=epsilon_for_min_residual)
       f_obs = self.f_obs()
