@@ -78,7 +78,8 @@
         int32  PART
       An id is matched through scatterer_ID_lookup, by identity and, after the
       structure has moved, by position, as for a .tscb; a label by name, as in
-      versions 1-3. A key may occur once in a file, and two records may not
+      versions 1-3. All records of a file are keyed the same way, label or
+      id. A key may occur once in a file, and two records may not
       resolve to the same atom: either is an error naming them. Records that
       match no atom are kept in unmatched for the caller to report.
 
@@ -289,6 +290,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       boost::shared_ptr<cctbx::xray::scatterer_ID_lookup<FloatType> > lookup;
       std::map<std::string, std::string> keys;         // key -> its record
       std::vector<std::string> matched_by(scatterers.size());
+      unsigned char first_tag = 0;
       std::uint32_t n_atoms = read_u32(in);
       for (std::uint32_t a = 0; a < n_atoms; a++) {
         std::string const record_label = read_string(in);
@@ -299,6 +301,15 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           unsigned char tag;
           read(in, reinterpret_cast<char *>(&tag), 1);
           SMTBX_ASSERT(tag <= 1)(record_label)(int(tag));
+          // all records keyed one way, as NoSpherA2's -merge refuses a
+          // table mixing labels and ids
+          if (a == 0) first_tag = tag;
+          else if (tag != first_tag) {
+            throw SMTBX_ERROR("the .tshb mixes label and scatterer id keys: "
+              "record " + record_label + " is keyed by "
+              + (tag ? "id" : "label") + ", the first by "
+              + (first_tag ? "id" : "label"));
+          }
           if (tag == 1) {
             id.reset(new id_t(in));
             key = "id " + id->to_hex_string();

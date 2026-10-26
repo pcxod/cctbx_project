@@ -417,10 +417,16 @@ def exercise_version_4_errors():
     raise AssertionError("tshb_block.read accepted a repeated key")
   except ValueError:
     pass
-  # an id and a label resolving to one atom
+  # two ids resolving to one atom: O1's, and O1's shifted 0.01 in x
+  near = xs.scatterers()[0].customized_copy(
+    site=tuple(x + d_x for x, d_x in zip(xs.scatterers()[0].site, (0.01, 0, 0))))
   p = os.path.join(d, "two.tshb")
-  tshb.write(p, recs + [recs[0]._replace(key=None)])
+  tshb.write(p, recs + [recs[0]._replace(key=tshb.scatterer_id(near))])
   expect_error(p, ["resolve to the atom O1"])
+  # labels and ids mixed in one file
+  p = os.path.join(d, "mixed.tshb")
+  tshb.write(p, recs + [recs[0]._replace(label="X9", key=None)])
+  expect_error(p, ["mixes label and scatterer id keys"])
   # the second part's C3 missing: refused, named with its PART
   p = os.path.join(d, "short.tshb")
   tshb.write(p, recs[:3])
@@ -437,7 +443,7 @@ def exercise_version_4_errors():
     True, xs.scattering_type_registry())
   extra = list(c.records_not_in_structure())
   assert len(extra) == 1 and extra[0].startswith("S9 (id "), extra
-  print("\tversion 4 errors: repeated key, two records on one atom, unmatched record"
+  print("\tversion 4 errors: repeated key, two records on one atom, mixed keys, unmatched record"
         " reported, missing atom refused: '...%s'" % msg[msg.index("has no density"):])
 
 
