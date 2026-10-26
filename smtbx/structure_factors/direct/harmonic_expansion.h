@@ -366,7 +366,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
        reflection and not once per atom; each thread works through its own
        fork.
      */
-    mutable std::vector<float_type> ylm;       // n_smx x n_lm
+    mutable std::vector<float_type> ylm_re, ylm_im;   // n_smx x n_lm, i^l in
     mutable std::vector<float_type> radial;    // per (alpha, l) pair
     mutable float_type s;
     mutable miller::index<> cached_h;
@@ -415,7 +415,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         tables(make_tables(*data_)),
         frac(unit_cell.fractionalization_matrix()),
         n_lm((data_->lmax + 1)*(data_->lmax + 1)),
-        ylm(space_group.n_smx()*n_lm),
+        ylm_re(space_group.n_smx()*n_lm),
+        ylm_im(space_group.n_smx()*n_lm),
         radial(tables->alpha.size()),
         s(0),
         cache_valid(false),
@@ -436,7 +437,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         rotations(other.rotations),
         n_lm(other.n_lm),
         l_mod_4(other.l_mod_4),
-        ylm(other.ylm.size()),
+        ylm_re(other.ylm_re.size()),
+        ylm_im(other.ylm_im.size()),
         radial(other.radial.size()),
         s(0),
         cache_valid(false),
@@ -457,7 +459,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         }
         double norm = std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]);
         if (i == 0) s = norm;
-        float_type *y = &ylm[i*n_lm];
+        float_type *y = &ylm_re[i*n_lm], *yi = &ylm_im[i*n_lm];
         if (norm > 0) {
           real_spherical_harmonics<float_type>(data->lmax,
             v[0]/norm, v[1]/norm, v[2]/norm, y);
@@ -465,6 +467,17 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         else {
           // only l = 0 survives at s = 0, whatever direction is taken
           real_spherical_harmonics<float_type>(data->lmax, 0, 0, 1, y);
+        }
+        /* i^l folded in, in place: the real part keeps l = 0, 2 mod 4 with
+           signs +, -, the imaginary part takes l = 1, 3 with +, -. Two plain
+           dot products per operator then, which vectorise, instead of a sum
+           indexed by l mod 4.
+         */
+        for (int k = 0; k < n_lm; k++) {
+          int const q = l_mod_4[k];
+          float_type const v = y[k];
+          y[k] = q == 0 ? v : (q == 2 ? -v : 0);
+          yi[k] = q == 1 ? v : (q == 3 ? -v : 0);
         }
       }
       // (pi/alpha)^(3/2) (pi s/alpha)^l exp(-pi^2 s^2/alpha), i^l applied later
@@ -501,12 +514,19 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         l_block const &bl = blocks[b];
         int const w = 2*bl.l + 1;
         float_type *out = a + bl.l*bl.l;
-        for (int m = 0; m < w; m++) out[m] = 0;
-        float_type const *c = bl.c.empty() ? 0 : &bl.c[0];
         int const n_p = static_cast<int>(bl.u.size());
-        // two primitives at a time: two independent chains of multiply-adds
-        // instead of one, which is what bounds a short sum like this one
-        int p = 0;
+        if (n_p == 0) {
+          for (int m = 0; m < w; m++) out[m] = 0;
+          continue;
+        }
+        float_type const *c = &bl.c[0];
+        // the first primitive assigns, the rest add two at a time: two
+        // independent chains of multiply-adds instead of one, which is what
+        // bounds a short sum like this one
+        float_type const g = radial[bl.u[0]];
+        for (int m = 0; m < w; m++) out[m] = g*c[m];
+        c += w;
+        int p = 1;
         for (; p + 1 < n_p; p += 2, c += 2*w) {
           float_type const g0 = radial[bl.u[p]], g1 = radial[bl.u[p + 1]];
           for (int m = 0; m < w; m++) out[m] += g0*c[m] + g1*c[w + m];
@@ -519,11 +539,13 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       int const n = static_cast<int>(blocks.size()*blocks.size());
       std::size_t const n_smx = rotations.size();
       for (std::size_t i = 0; i < n_smx; i++) {
-        float_type const *y = &ylm[i*n_lm];
-        // by l mod 4, for i^l; four independent sums
-        float_type part[4] = {0, 0, 0, 0};
-        for (int k = 0; k < n; k++) part[l_mod_4[k]] += a[k]*y[k];
-        tmp[i] = complex_type(part[0] - part[2], part[1] - part[3]);
+        float_type const *yr = &ylm_re[i*n_lm], *yi = &ylm_im[i*n_lm];
+        float_type re = 0, im = 0;
+        for (int k = 0; k < n; k++) {
+          re += a[k]*yr[k];
+          im += a[k]*yi[k];
+        }
+        tmp[i] = complex_type(re, im);
       }
       // the spherical records, the same for every symmetry equivalent
       float_type const extra = spherical_records(scatterer_idx);
@@ -568,12 +590,19 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           }
         }
         else {
-          complex_type const w = float_type(1)/complex_type(grp.zeta, -k);
-          complex_type p = w;
+          // 1/(zeta - ik) = (zeta + ik)/(zeta^2 + k^2), its powers by hand:
+          // std::complex guards against infinities and NaN in every
+          // multiplication, which cost a third of this
+          float_type const d = 1/(grp.zeta*grp.zeta + k*k);
+          float_type const wr = grp.zeta*d, wi = k*d;
+          float_type pr = wr, pi_ = wi, acc = 0;
           for (std::size_t m = 2; m < n_m; m++) {
-            p *= w;
-            sum += grp.w[m]*p.imag()/k;
+            float_type const t = pr*wr - pi_*wi;
+            pi_ = pr*wi + pi_*wr;
+            pr = t;
+            acc += grp.w[m]*pi_;
           }
+          sum += acc/k;
         }
       }
       return f + 4*pi*sum;
