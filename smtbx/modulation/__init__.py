@@ -21,6 +21,7 @@ w = site multiplicity / group order for atoms on special positions (1 otherwise)
 from __future__ import absolute_import, division, print_function
 
 import concurrent.futures
+import threading
 import math
 import os
 from fractions import Fraction
@@ -795,6 +796,33 @@ class form_factor_table(object):
     return f
 
 
+def auto_n_x4(xs, h, m, headroom=1.0):
+  """n_x4 for the reflections (h, m) and the waves of xs: |m|max + n_h (e z / 2 + 6), a multiple of 4, at least 12,
+  with z = 2 pi max |S| . (|A| + |B|) + 2 pi^2 max |q6| . (|U_sin| + |U_cos|) over atoms and reflections (A, B
+  the largest displacive amplitudes of each component over the harmonics, U the ADP waves, q6 the six products of
+  S that multiply U*) and n_h the largest harmonic order of any wave. The integrand of the x4 integral then has no
+  harmonic the uniform rule cannot resolve above a Bessel tail J_k (I_k for the Debye-Waller factor) of
+  k > e z / 2 + 6, which measured against n_x4 = 128 keeps every block family within 1e-10 (tst_modulation).
+  headroom scales z, so that a refinement whose amplitudes grow keeps the rule it started with for longer.
+  Returns (n_x4, z)."""
+  s = np.abs(np.asarray(h, dtype=float) + np.outer(np.asarray(m, dtype=float), xs.q))
+  q6 = np.column_stack([s[:, 0] ** 2, s[:, 1] ** 2, s[:, 2] ** 2,
+                        2 * s[:, 0] * s[:, 1], 2 * s[:, 0] * s[:, 2], 2 * s[:, 1] * s[:, 2]])
+  z, nh = 0.0, 1
+  for at in xs.atoms:
+    nh = max(nh, at.n_harmonics, len(at.occ_sin), len(at.u_sin))
+    za = 0.0
+    if at.n_harmonics:
+      w = np.abs(at.a).max(axis=0) + np.abs(at.b).max(axis=0)
+      za = TWO_PI * float(np.max(s.dot(w)))
+    if len(at.u_sin):
+      u = np.abs(at.u_sin).max(axis=0) + np.abs(at.u_cos).max(axis=0)
+      za += TWO_PI_SQ * float(np.max(q6.dot(u)))
+    z = max(z, za)
+  n = int(np.max(np.abs(m))) + nh * (math.e * z * headroom / 2 + 6) if len(m) else 12
+  return max(12, int(4 * math.ceil(n / 4.0))), z
+
+
 def _sum_waves(sin_c, cos_c, sin_t, cos_t):
   """sum_n s_n sin_t[n] + c_n cos_t[n] for coefficient arrays (n, ...) and node tables (n, K) -> (K, ...)."""
   n = len(sin_c)
@@ -823,7 +851,11 @@ class calculator(object):
     self.radiation = radiation
     self.h = np.asarray(h, dtype=float).reshape(-1, 3)
     self.m = np.asarray(m, dtype=float).ravel()
-    self.n_x4 = n_x4
+    # "auto": auto_n_x4 decides at the first compute(), and again whenever the amplitudes outgrow the z it was set
+    # for (see _resolve_n_x4); a number is used as given
+    self.auto = n_x4 == "auto"
+    self.n_x4 = 32 if self.auto else n_x4
+    self._auto_z = None
     self.table, self._table_f = table, {}
     self.threads = threads   # None: one per CPU, capped by the atom count and a 2 GB working set
     # what depends on the reflections, q, the operations, the cell and the dispersion only, kept across the
@@ -832,6 +864,7 @@ class calculator(object):
     self._share_classes = True   # False: every operation evaluates its own x4 sums (the reference path)
     self._mode = None            # None: pool_mode decides; "atoms" or "reflections" forces it
     self._sub = {}               # reflection-slice calculators, by number of slices (_chunks)
+    self._tables = {"lock": threading.Lock()}   # the per-atom x4 tables, shared with the slices (_atom_tables)
 
   def table_indices(self, ssg):
     """The rows a NoSpherA2 table needs for these reflections (-hkl_scale TABLE_SCALE): round(TABLE_SCALE S R)
@@ -913,6 +946,7 @@ class calculator(object):
       for a, b in zip(bounds[:-1], bounds[1:]):
         c = calculator(self.h[a:b], self.m[a:b], self.n_x4, self.table, threads=threads, radiation=self.radiation)
         c._share_classes, c._mode = self._share_classes, "atoms"
+        c._tables = self._tables
         subs.append(c)
       self._sub[key] = subs
     return self._sub[key]
@@ -927,7 +961,58 @@ class calculator(object):
       return "atoms"
     return "reflections"
 
+  @staticmethod
+  def _atom_key(xs, n_x4):
+    """Everything the per-atom x4 tables depend on: every wave and crenel of every atom, the average occupancy,
+    n_x4. Not the site or the ADPs (they do not enter the tables)."""
+    parts = [n_x4, XHARM_MODE]
+    for at in xs.atoms:
+      parts.append((at.a.tobytes(), at.b.tobytes(), at.occ_sin.tobytes(), at.occ_cos.tobytes(),
+                    at.u_sin.tobytes(), at.u_cos.tobytes(), at.legendre.tobytes(), at.xharm.tobytes(),
+                    at.u_xharm.tobytes(), at.crenel, at.occupancy,
+                    None if at.sawtooth is None else (at.sawtooth[0].tobytes(),) + tuple(at.sawtooth[1:])))
+    return tuple(parts)
+
+  def _atom_tables(self, xs, gradients):
+    """Per atom: the x4 nodes and weights, sin/cos tables, u, p(x4), the ADP-wave sum at the nodes (pre) and
+    the gradients' local tables (extra). They do not depend on the reflections, so the slices of a refinement
+    share one set (self._tables, one dict for a calculator and all its slices), rebuilt when _atom_key changes -
+    after every parameter update - and kept while only sites, ADPs or the scale move."""
+    key = self._atom_key(xs, self.n_x4)
+    t = self._tables
+    with t["lock"]:
+      if t.get("key") == key and (t["gradients"] or not gradients):
+        return t["value"]
+      pre, extra = [], []
+      for at in xs.atoms:
+        x4, wt = at.nodes(self.n_x4)
+        n_max = max(1, at.n_harmonics, len(at.occ_sin), len(at.u_sin))
+        sin_t = np.array([np.sin(TWO_PI * (n + 1) * x4) for n in range(n_max)])
+        cos_t = np.array([np.cos(TWO_PI * (n + 1) * x4) for n in range(n_max)])
+        uw = _sum_waves(at.u_sin, at.u_cos, sin_t, cos_t) if len(at.u_sin) else None
+        ux = at.u_xharm_at(x4)
+        if ux is not None:
+          uw = ux if uw is None else uw + ux
+        pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
+                    1.0 / at.crenel[1] if at.crenel else 1.0))
+        extra.append(_local_tables(at, x4, sin_t, cos_t) if gradients else None)
+      t.update(key=key, gradients=gradients, value=(pre, extra))
+      return pre, extra
+
+  def _resolve_n_x4(self, xs):
+    """With n_x4 = "auto": the rule's n_x4, set with 25 % headroom on z, and set again (slices dropped, so that
+    they take the new value) only when the current z exceeds the one it was set for. Within a refinement step the
+    value therefore does not change between the gradient pass and its trial passes unless the waves have grown."""
+    if not self.auto:
+      return
+    z = auto_n_x4(xs, self.h, self.m)[1]
+    if self._auto_z is None or z > self._auto_z:
+      self.n_x4, _ = auto_n_x4(xs, self.h, self.m, headroom=1.25)
+      self._auto_z = 1.25 * z
+      self._sub = {}
+
   def compute(self, xs, flags=None, gradients=False):
+    self._resolve_n_x4(xs)
     if self.pool_mode(xs) == "reflections":
       subs = self._chunks(self._threads())
       for c in subs:
@@ -967,20 +1052,7 @@ class calculator(object):
                       "leg": np.zeros((nref, len(at.legendre), 3), complex),
                       "xh": np.zeros((nref, len(at.xharm), 3), complex),
                       "ux": np.zeros((nref, len(at.u_xharm), 6), complex)})
-    # per atom: x4 nodes and weights, sin/cos tables, u, p(x4), ADP-wave sum at the nodes
-    pre, extra = [], []
-    for at in xs.atoms:
-      x4, wt = at.nodes(self.n_x4)
-      n_max = max(1, at.n_harmonics, len(at.occ_sin), len(at.u_sin))
-      sin_t = np.array([np.sin(TWO_PI * (n + 1) * x4) for n in range(n_max)])
-      cos_t = np.array([np.cos(TWO_PI * (n + 1) * x4) for n in range(n_max)])
-      uw = _sum_waves(at.u_sin, at.u_cos, sin_t, cos_t) if len(at.u_sin) else None
-      ux = at.u_xharm_at(x4)
-      if ux is not None:
-        uw = ux if uw is None else uw + ux
-      pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
-                  1.0 / at.crenel[1] if at.crenel else 1.0))
-      extra.append(_local_tables(at, x4, sin_t, cos_t) if gradients else None)
+    pre, extra = self._atom_tables(xs, gradients)
 
     def atom_sum(ia):
       """One atom's share of F over every operation; it touches only its own gradient blocks."""
@@ -1001,7 +1073,10 @@ class calculator(object):
         np.cos(th, out=e.real)   # 1.5x faster than exp(1j th) on (17754, 32), the same bits
         np.sin(th, out=e.imag)
         if uw is not None:
-          np.multiply(e, np.exp(dw6.dot(uw.T)), out=e)
+          # a real factor on the real and imaginary parts: not a complex product (numpy would promote it)
+          dw = np.exp(dw6.dot(uw.T))
+          e.real *= dw
+          e.imag *= dw
         r = {"pw": e.dot(pw)}
         if gradients:
           r["wt"] = e.dot(wt)
@@ -1453,21 +1528,22 @@ def _blocks_times(blocks, x):
   return np.concatenate(out)
 
 
-def _solve_in_place(a_mat, rhs, jtj, lam, diag):
-  """(J^T J + lam D) x = J^T r with a_mat holding the matrix, which it may overwrite; least squares on a fresh
-  copy when it is singular."""
+def _lm_factor_solve(buf, jtj_diag, damp, rhs):
+  """(J^T J + damp) x = rhs, J^T J held in the upper triangle of buf (Fortran order) and its diagonal in jtj_diag.
+  The lower triangle is refilled from the upper one with J^T J + damp on the diagonal and Cholesky-factorised in
+  place (LAPACK potrf, lower), so the upper triangle - J^T J - survives for the next damping and no second n x n
+  matrix is ever made. None without scipy or when the matrix is not positive definite (the caller falls back)."""
   try:
-    from scipy.linalg import solve, LinAlgError as ScipyError
+    from scipy.linalg import lapack
   except ImportError:
-    solve, ScipyError = None, np.linalg.LinAlgError
-  try:
-    if solve is not None:
-      return solve(a_mat, rhs, overwrite_a=True, check_finite=False)
-    return np.linalg.solve(a_mat, rhs)
-  except (np.linalg.LinAlgError, ScipyError):
-    np.copyto(a_mat, jtj)
-    a_mat[np.diag_indices_from(a_mat)] += lam * diag
-    return np.linalg.lstsq(a_mat, rhs, rcond=None)[0]
+    return None
+  _mirror_upper(buf)
+  buf[np.diag_indices_from(buf)] = jtj_diag + damp
+  c, info = lapack.dpotrf(buf, lower=1, clean=0, overwrite_a=1)
+  if info != 0:
+    return None
+  x, info = lapack.dpotrs(c, rhs, lower=1)
+  return x if info == 0 else None
 
 
 def _slices(calc, n, max_rows):
@@ -1479,6 +1555,7 @@ def _slices(calc, n, max_rows):
 def _f_sq(calc, xs, max_rows):
   """F^2 through the same slices as the normal equations, so that the full set of reflections never has its own
   per-operation arrays next to the slices' ones."""
+  calc._resolve_n_x4(xs)
   return np.concatenate([c.compute(xs)[1] for c in _slices(calc, len(calc.m), max_rows)])
 
 
@@ -1486,6 +1563,7 @@ def _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows):
   """F^2 and J^T J, J^T r of the weighted residuals r = sw (Fo^2 - Fc^2), J = project(sw dFc^2/dp), with the
   reflections taken max_rows at a time: the design matrix (reflections x parameters) is never held whole.
   One slice is exactly the dense product."""
+  calc._resolve_n_x4(xs)
   subs = _slices(calc, len(f_obs_sq), max_rows)
   n_chunks = len(subs)
   try:
@@ -1529,16 +1607,23 @@ def _mirror_upper(a, block=1024):
 
 
 def _rows_per_slice(xs, flags, max_memory_mb):
-  """How many reflections a slice of the normal equations may hold: per reflection about 40 bytes per parameter
-  (the complex per-atom gradients, the real dF^2/dp, its projection)."""
+  """How many reflections a slice of the normal equations may hold. The peak is inside calculator.compute: per
+  reflection 16 bytes for every column of the atoms' complex gradient blocks (all of an atom's blocks, refined or
+  not) and 8 for every refined parameter's real dF^2/dp, 5 % on top for the node buffers and block temporaries.
+  On the large test problem that is 25 bytes per parameter against 24.4 measured (tracemalloc); the projection
+  that follows needs 16."""
   n_p = len(get_parameters(xs, flags))
-  return max(256, int(max_memory_mb * 2 ** 20 // (40 * max(n_p, 1))))
+  n_c = sum(3 + (1 if at.u_star is None else 6) + 1 + 6 * at.n_harmonics + 2 * len(at.occ_sin) + 12 * len(at.u_sin)
+            + (2 if at.crenel else 0) + 3 * len(at.legendre) + 3 * len(at.xharm) + 6 * len(at.u_xharm)
+            for at in xs.atoms)
+  return max(256, int(max_memory_mb * 2 ** 20 // (1.05 * (16 * n_c + 8 * max(n_p, 1)))))
 
 
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True,
            table=None, radiation="xray", average=None, max_memory_mb=512):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
   table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
+  n_x4: x4 nodes per atom, or "auto" (auto_n_x4, raised during the refinement if the amplitudes grow).
 
   The x4 origin of a wave is free unless an eps = -1 operation fixes it; the damping keeps that direction
   (a rotation of every (A_n, B_n) pair together) from running away.
@@ -1601,15 +1686,24 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
       jtj += rest[0].T.dot(rw[:, None] * rest[0])
       jtr -= rest[0].T.dot(rw * rest[1])
     p0 = get_parameters(xs, flags)
-    diag = np.diag(jtj).copy()
+    jtj_diag = np.diag(jtj).copy()
+    diag = jtj_diag.copy()
     diag[diag <= 1e-12 * max(diag.max(), 1e-300)] = max(diag.max(), 1.0)
     accepted, step = False, np.zeros_like(p0)
-    a_mat = np.empty_like(jtj)     # one buffer for every damping tried: no new n x n matrix per try
-    on_diag = np.diag_indices_from(jtj)
+    # J^T J stays in the upper triangle, every damping is factorised in the lower one: one n x n matrix in all.
+    # J^T J is symmetric, so a C-ordered one is its own Fortran-ordered transpose (no copy)
+    if not jtj.flags.f_contiguous:
+      jtj = jtj.T
     for _ in range(16):
-      np.copyto(a_mat, jtj)
-      a_mat[on_diag] += lam * diag
-      x = _solve_in_place(a_mat, jtr, jtj, lam, diag)
+      x = _lm_factor_solve(jtj, jtj_diag, lam * diag, jtr)
+      if x is None:   # no scipy, or not positive definite: a full copy, rebuilt from the upper triangle
+        a_mat = _mirror_upper(np.array(jtj))
+        a_mat[np.diag_indices_from(a_mat)] = jtj_diag + lam * diag
+        try:
+          x = np.linalg.solve(a_mat, jtr)
+        except np.linalg.LinAlgError:
+          x = np.linalg.lstsq(a_mat, jtr, rcond=None)[0]
+        del a_mat
       if link is None:
         set_parameters(xs, flags, p0 + _blocks_times(zb, x))
       else:

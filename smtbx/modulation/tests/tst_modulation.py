@@ -827,6 +827,130 @@ def test_normal_equations_and_pool_equivalence():
         " by atoms bit for bit" % (e_ne, e_shift, e_f))
 
 
+def _medium_like(seed=16):
+  """A small stand-in for the medium problem: C2/c, two harmonics, occupancy and ADP waves, a crenel atom with
+  Legendre and x-harmonic terms."""
+  from cctbx import adptbx
+  rng = np.random.RandomState(seed)
+  uc = uctbx.unit_cell((14.2, 10.6, 18.4, 90, 101.3, 90))
+  ssg = mod.superspace_group(sgtbx.space_group_info("C 1 2/c 1").group(), (0.31, 0.0, 0.23))
+  atoms = []
+  for i, t in enumerate(["Cu", "O", "N", "C", "C", "S"]):
+    at = mod.modulated_atom("%s%d" % (t, i), t, rng.uniform(0.02, 0.48, 3), 0.012, 1.0, 2,
+                            0.01 * rng.uniform(-1, 1, (2, 3)), 0.01 * rng.uniform(-1, 1, (2, 3)))
+    at.u_star = np.array(adptbx.u_iso_as_u_star(uc, at.u_iso))
+    at.occ_sin, at.occ_cos = 0.05 * rng.uniform(-1, 1, 2), 0.05 * rng.uniform(-1, 1, 2)
+    at.u_sin = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+    at.u_cos = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+    if i == 3:
+      at.crenel = (0.3, 0.6)
+      at.legendre = 0.01 * rng.uniform(-1, 1, (2, 3))
+      at.xharm = 0.01 * rng.uniform(-1, 1, (2, 3))
+      at.u_xharm = at.u_star[None, :] * 0.05 * rng.uniform(-1, 1, (1, 6))
+    atoms.append(at)
+  xs = mod.modulated_structure(uc, ssg, atoms)
+  flags = {"site": True, "adp": True, "modulation": True, "occ_waves": True, "adp_waves": True,
+           "crenel": True, "legendre": True, "xharm": True, "u_xharm": True, "scale": True}
+  return xs, flags
+
+
+def test_shared_tables_equivalence():
+  """The per-atom x4 tables built once and shared by every slice against each slice building its own (a fresh
+  calculator per slice): F^2 and J^T r bit for bit, J^T J to rounding (syrk against gemm), small and medium-like."""
+  for xs, flags in ((model(n_harmonics=2, amp=0.02), {"site": True, "u_iso": True, "modulation": True, "scale": True}),
+                    _medium_like()):
+    fl = mod._flags(flags)
+    h, m = reflections(xs, d_min=1.4, m_max=2)
+    fo = mod.calculator(h, m).compute(xs)[1] * 1.01
+    sw = np.full(len(m), 0.3)
+    zb = mod._reduction_blocks(xs, fl)
+    project = lambda d: mod._times_blocks(d, zb)
+    shared = mod._normal_equations(mod.calculator(h, m), xs, fl, fo, sw, project, len(m) // 5 + 1)
+    # the reference: every slice a calculator of its own, so nothing is shared
+    bounds = np.linspace(0, len(m), 6).astype(int)
+    jtj = jtr = None
+    fcs = []
+    for a, b in zip(bounds[:-1], bounds[1:]):
+      _, fc, d = mod.calculator(h[a:b], m[a:b]).compute(xs, flags, gradients=True)
+      j = project(sw[a:b, None] * d)
+      r = sw[a:b] * (fo[a:b] - fc)
+      jtj = j.T.dot(j) if jtj is None else jtj + j.T.dot(j)
+      jtr = j.T.dot(r) if jtr is None else jtr + j.T.dot(r)
+      fcs.append(fc)
+    assert np.array_equal(shared[0], np.concatenate(fcs)) and np.array_equal(shared[2], jtr)
+    assert np.max(np.abs(shared[1] - jtj)) <= 1e-13 * np.max(np.abs(jtj))     # syrk against gemm: rounding
+  print("  per-atom x4 tables shared by the slices = built by each slice: F^2 and J^T r bit for bit")
+
+
+def _lm_solve_reference(jtj, jtr, lam, diag):
+  """The damped solve as it was: J^T J + lam D formed in a second matrix and solved by LU."""
+  return np.linalg.solve(jtj + lam * np.diag(diag), jtr)
+
+
+def test_lm_factor_solve_equivalence():
+  """The damped normal equations solved by Cholesky in the lower triangle of the one matrix that holds J^T J in
+  its upper triangle, against forming J^T J + lam D apart and solving it by LU: several dampings in a row on the
+  same buffer (J^T J must survive each), small and medium-like, to 1e-10; and None for a matrix that is not
+  positive definite (refine then solves a full copy by LU or least squares)."""
+  worst = 0.0
+  for xs, flags in ((model(n_harmonics=2, amp=0.02), {"site": True, "u_iso": True, "modulation": True, "scale": True}),
+                    _medium_like()):
+    fl = mod._flags(flags)
+    h, m = reflections(xs, d_min=1.4, m_max=2)
+    fo = mod.calculator(h, m).compute(xs)[1] * 1.01
+    sw = np.full(len(m), 0.3)
+    zb = mod._reduction_blocks(xs, fl)
+    _, jtj, jtr = mod._normal_equations(mod.calculator(h, m), xs, fl, fo, sw, lambda d: mod._times_blocks(d, zb), len(m))
+    jtj0 = jtj.copy()
+    diag = np.diag(jtj).copy()
+    buf = np.asfortranarray(jtj)
+    for lam in (1e-3, 5e-3, 2.5e-2, 1e-4):
+      x = mod._lm_factor_solve(buf, diag, lam * diag, jtr)
+      y = _lm_solve_reference(jtj0, jtr, lam, diag)
+      worst = max(worst, np.max(np.abs(x - y)) / np.max(np.abs(y)))
+    assert np.array_equal(np.triu(buf, 1), np.triu(jtj0, 1))      # J^T J kept in the upper triangle
+  assert worst < 1e-10, worst
+  bad = np.asfortranarray(np.diag([1.0, -1.0, 2.0]))
+  assert mod._lm_factor_solve(bad, np.diag(bad).copy(), np.zeros(3), np.ones(3)) is None
+  print("  damped solve in one matrix (Cholesky in the lower triangle) = LU on a second matrix: %.1e" % worst)
+
+
+def test_auto_n_x4():
+  """n_x4 = "auto" against n_x4 = 128 for every block family and a large displacive amplitude at |m| <= 3: F^2 to
+  1e-10; and the rule set again when the amplitudes outgrow the z it was set for."""
+  rng = np.random.RandomState(17)
+  worst = 0.0
+  chosen = []
+  for kind in ("displacive", "occupancy", "adp", "crenel", "xharm", "large amplitude"):
+    xs = model(n_harmonics=2, amp=0.03 if kind == "large amplitude" else 0.01)
+    for at in xs.atoms:
+      if kind == "occupancy":
+        at.occ_sin, at.occ_cos = 0.05 * rng.uniform(-1, 1, 2), 0.05 * rng.uniform(-1, 1, 2)
+      elif kind == "adp":
+        at.u_sin, at.u_cos = 0.001 * rng.uniform(-1, 1, (2, 6)), 0.001 * rng.uniform(-1, 1, (2, 6))
+      elif kind in ("crenel", "xharm"):
+        at.crenel = (0.3, 0.6)
+        if kind == "xharm":
+          at.xharm, at.legendre = 0.01 * np.ones((2, 3)), 0.01 * np.ones((2, 3))
+    h, m = reflections(xs, d_min=0.9, m_max=3)
+    ref = mod.calculator(h, m, n_x4=128).compute(xs)[1]
+    c = mod.calculator(h, m, n_x4="auto")
+    f = c.compute(xs)[1]
+    worst = max(worst, np.max(np.abs(f - ref)) / ref.max())
+    chosen.append("%s %d" % (kind, c.n_x4))
+  assert worst <= 1e-10, worst
+  # amplitudes grown past the z the rule was set for: a larger n_x4, and the slices remade with it
+  n0 = c.n_x4
+  old = c._chunks(3)
+  for at in xs.atoms:
+    at.a, at.b = at.a * 3, at.b * 3
+  c.compute(xs)
+  subs = [s for v in c._sub.values() for s in v]
+  assert c.n_x4 > n0 and all(s.n_x4 == c.n_x4 for s in subs) and not any(s in subs for s in old), (n0, c.n_x4)
+  print("  n_x4 = auto against 128: %.1e (%s); raised from %d to %d as the amplitudes grew"
+        % (worst, ", ".join(chosen), n0, c.n_x4))
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
@@ -834,6 +958,9 @@ def run():
   test_gradients_finite_difference()
   test_calculator_equivalence()
   test_normal_equations_and_pool_equivalence()
+  test_shared_tables_equivalence()
+  test_lm_factor_solve_equivalence()
+  test_auto_n_x4()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()
