@@ -149,27 +149,88 @@ def exercise_electron_diffraction():
   print("\telectron diffraction (Mott-Bethe) %.1e" % worst)
 
 
+def rotate_shells_py(shells, q):
+  """ shells of rho(r) rewritten for rho(Q^-1 r), Q orthogonal: c'_m =
+  int Y_m(u) sum_n c_n Y_n(Q^T u) du by Gauss-Legendre x equal steps in phi,
+  exact for degree 2l - an independent copy of the C++ rotate_shells. """
+  import numpy
+  out = []
+  for sh in shells:
+    l = sh.l
+    if l == 0:
+      out.append(sh); continue
+    x, w = numpy.polynomial.legendre.leggauss(l + 1)
+    n_phi = 2*l + 1
+    c = [0.]*(2*l + 1)
+    for ct, wt in zip(x, w):
+      st = math.sqrt(max(0., 1 - ct*ct))
+      for p in range(n_phi):
+        phi = 2*math.pi*p/n_phi
+        u = (st*math.cos(phi), st*math.sin(phi), ct)
+        v = [sum(q[3*r + i]*u[r] for r in range(3)) for i in range(3)]   # Q^T u
+        g = sum(sh.c[m + l]*real_ylm(l, m, *v) for m in range(-l, l + 1))
+        for m in range(-l, l + 1):
+          c[m + l] += wt*2*math.pi/n_phi*real_ylm(l, m, *u)*g
+    out.append(sh._replace(c=c))
+  return out
+
+
+def stabiliser_cartesian(cs, site):
+  """ the Cartesian rotations O R O^-1 of the site's stabiliser """
+  from scitbx import matrix
+  ss = sgtbx.site_symmetry(cs.unit_cell(), cs.space_group(), site)
+  o = matrix.sqr(cs.unit_cell().orthogonalization_matrix())
+  f = matrix.sqr(cs.unit_cell().fractionalization_matrix())
+  return [(o*matrix.sqr(op.r().as_double())*f).elems for op in ss.matrices()]
+
+
+def symmetrised(atom, qs):
+  """ the atom's shells averaged over the stabiliser: invariant under it """
+  rotated = [rotate_shells_py(atom.shells, q) for q in qs]
+  shells = [sh._replace(c=[sum(r[k].c[m] for r in rotated)/len(qs)
+                           for m in range(2*sh.l + 1)])
+            for k, sh in enumerate(atom.shells)]
+  return atom._replace(shells=shells)
+
+
 def exercise_cache():
   """ The form factors of every equivalent and Friedel mate of a reflection come
   from one cached orbit: per atom either its n_smx values or its folded
   coefficients, whichever is smaller. Checked against P1, where nothing is
-  shared, for both kinds, X-ray and ED, filled and hit, and with no cache. """
+  shared, for both kinds, X-ray and ED, filled and hit, and with no cache; and
+  the cached values bit for bit against the uncached ones.
+
+  Two atoms sit on the most special position of each group (Wyckoff a): X3
+  with its density averaged over the site's stabiliser, so that operators
+  differing by the stabiliser share one value (and one evaluation), X4 with a
+  density the stabiliser does not leave alone, so that nothing is shared. """
   rng = random.Random(4)
   d = tempfile.mkdtemp()
-  # X1 lmax 3 (16 coefficients), X2 lmax 1 (4) with a Slater record
-  atoms = [random_atom("X1", 3, rng)._replace(z=6),
-           random_atom("X2", 1, rng)._replace(slaters=[(0.3, 1, 2.5)], z=8)]
-  px, pe = os.path.join(d, "x.tshb"), os.path.join(d, "e.tshb")
-  tshb.write(px, atoms)
-  tshb.write(pe, atoms, header={"ED": "true"})
   worst = 0
+  bitwise = True
   for symbol in ("P 1 21/c 1", "P 21 21 21", "R -3 :H", "I 41/a :2",
                  "P 63/m m c", "F m -3 m"):
     sgi = sgtbx.space_group_info(symbol)
     cs = crystal.symmetry(sgi.any_compatible_unit_cell(volume=1500), space_group_info=sgi)
     sg = cs.space_group()
-    xs = xray.structure(crystal_symmetry=cs, scatterers=flex.xray_scatterer(
-      [xray.scatterer(a.label, (0.11, 0.23, 0.37), u=0, scattering_type="C") for a in atoms]))
+    wa = sgi.wyckoff_table().position(sgi.wyckoff_table().lookup_index("a"))
+    special = tuple(float(x) for x in wa.special_op()*(0.11, 0.23, 0.37))
+    # X1 lmax 3 (16 coefficients), X2 lmax 1 (4) with a Slater record
+    atoms = [random_atom("X1", 3, rng)._replace(z=6),
+             random_atom("X2", 1, rng)._replace(slaters=[(0.3, 1, 2.5)], z=8)]
+    sites = [(0.11, 0.23, 0.37), (0.11, 0.23, 0.37)]
+    if wa.multiplicity() < sg.order_z():
+      qs = stabiliser_cartesian(cs, special)
+      atoms += [symmetrised(random_atom("X3", 4, rng), qs)._replace(z=7),
+                random_atom("X4", 2, rng)._replace(z=6)]
+      sites += [special, special]
+    px, pe = os.path.join(d, "x.tshb"), os.path.join(d, "e.tshb")
+    tshb.write(px, atoms)
+    tshb.write(pe, atoms, header={"ED": "true"})
+    xs = xray.structure(special_position_settings=crystal.special_position_settings(
+      cs, min_distance_sym_equiv=0.01), scatterers=flex.xray_scatterer(
+      [xray.scatterer(a.label, site, u=0, scattering_type="C")
+       for a, site in zip(atoms, sites)]))
     p1 = sgtbx.space_group()
     ref_x = build(cs.unit_cell(), xs.scatterers(), px, p1, True)
     ref_e = build(cs.unit_cell(), xs.scatterers(), pe, p1, True)
@@ -181,6 +242,7 @@ def exercise_cache():
         orbit.add(hr); orbit.add(tuple(-v for v in hr))
     orbit = sorted(orbit)
     rng.shuffle(orbit)
+    uncached = {}
     for budget in ("0", None):
       if budget is None: os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
       else: os.environ["SMTBX_TSHB_CACHE_MB"] = budget
@@ -190,7 +252,11 @@ def exercise_cache():
       for h in orbit + orbit[::-1]:     # the second pass hits
         stl2 = cs.unit_cell().stol(h)**2
         for j in range(len(atoms)):
-          fx, fe = cx.get_full(j, h), ce.get_full(j, h)
+          fx, fe = list(cx.get_full(j, h)), list(ce.get_full(j, h))
+          if budget == "0":
+            uncached[(h, j)] = (fx, fe)
+          elif uncached[(h, j)] != (fx, fe):
+            bitwise = False
           for i, op in enumerate(sg.smx()):
             r = op.r().num()
             hr = tuple(sum(h[k]*r[3*k + c] for k in range(3)) for c in range(3))
@@ -199,8 +265,10 @@ def exercise_cache():
             e = complex(0.023934*(atoms[j].z - x.real)/stl2, -0.023934*x.imag/stl2)
             worst = max(worst, abs(fe[i] - e)/max(1, abs(e)),
                         abs(fe[i] - ref_e.get_full(j, hr)[0])/max(1, abs(e)))
+  assert bitwise, "cached and uncached values differ"
   assert worst < 1e-12, worst
-  print("\tcached orbits against P1, six space groups, X-ray and ED: %.1e" % worst)
+  print("\tcached orbits against P1, six space groups, general and special"
+        " positions, X-ray and ED: %.1e; cached = uncached bit for bit" % worst)
 
 
 def spherical_setup():

@@ -117,6 +117,7 @@
 #include <cctbx/sgtbx/space_group.h>
 #include <cctbx/xray/scatterer_lookup.h>
 #include <cctbx/sgtbx/rt_mx.h>
+#include <cctbx/sgtbx/site_symmetry.h>
 #include <scitbx/constants.h>
 #include <boost/shared_ptr.hpp>
 #include <boost/algorithm/string.hpp>
@@ -215,6 +216,9 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     std::vector<std::vector<slater_group> > slater_groups;
     std::vector<std::vector<exponential> > exponentials;
     af::shared<bool> covered;
+    // the structure's sites, indexed like it: for the stabilisers of special
+    // positions (see harmonic_expansion's dedup)
+    std::vector<cctbx::fractional<FloatType> > sites;
     std::vector<int> z;      // nuclear charges, version 3
     // records that matched no atom of the structure, by label and, for an id
     // key, the id in hex
@@ -243,6 +247,9 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         electron(false),
         lmax(0)
     {
+      for (std::size_t i = 0; i < scatterers.size(); i++) {
+        sites.push_back(scatterers[i].site);
+      }
       std::ifstream in(file_name.c_str(), std::ios::in | std::ios::binary);
       SMTBX_ASSERT(in.good())(file_name);
       /* Every count read from the file is checked against what is left of
@@ -729,6 +736,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     mutable std::vector<complex_type> f_c, tmp;  // f(c R_k), f(h R_i)
     // every atom's coefficients for the reflection, and a group's sums
     mutable std::vector<float_type> coef, row;
+    /* Per atom on a special position whose density its stabiliser leaves
+       unchanged: for each operator k the first operator with the same value,
+       k' with R_k = R_k' S for an S of the stabiliser, so that f(h R_k) =
+       f(h R_k' S) = f(h R_k'); empty for every other atom. Shared by forks.
+     */
+    boost::shared_ptr<std::vector<std::vector<int> > const> same_as;
 
     static boost::shared_ptr<shared_tables const> make_tables(data_type const &d) {
       boost::shared_ptr<shared_tables> t(new shared_tables);
@@ -882,8 +895,80 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         SMTBX_ASSERT(space_group.smx(i).r().den() == 1);
         rotations.push_back(space_group.smx(i).r().num());
       }
+      /* Nothing here depends on where the identity is - the canonical member
+         of an orbit is the largest of +-h R_i over all i, and f(h R_i) is
+         found through R_m R_k = tau R_i for any order - but the structure
+         factor code pairs get_full's values with smx(i) one for one, and
+         cctbx keeps the identity first (space_group::reset). Said here, so
+         that a group built otherwise fails loudly rather than quietly.
+       */
+      SMTBX_ASSERT(rotations.size() && rotations[0] == scitbx::mat3<int>(1, 0, 0, 0, 1, 0, 0, 0, 1))
+        ("the first operator of the space group must be the identity");
       cache = make_cache(*tables, rotations);
+      same_as = make_same_as(*data_, unit_cell, space_group, rotations);
     }
+
+  private:
+    static boost::shared_ptr<std::vector<std::vector<int> > const> make_same_as(
+      data_type const &d, uctbx::unit_cell const &unit_cell,
+      sgtbx::space_group const &space_group,
+      std::vector<scitbx::mat3<int> > const &rotations)
+    {
+      boost::shared_ptr<std::vector<std::vector<int> > > r(
+        new std::vector<std::vector<int> >(d.atoms.size()));
+      std::size_t const n = rotations.size();
+      if (n == 1) return r;
+      for (std::size_t j = 0; j < d.atoms.size() && j < d.sites.size(); j++) {
+        // only a site that is special exactly: one merely near a special
+        // position is a general position here
+        sgtbx::site_symmetry ss(unit_cell, space_group, d.sites[j], 0.01, false);
+        if (ss.is_point_group_1() || ss.distance_moved() > 1e-6) continue;
+        std::vector<scitbx::mat3<int> > stab;
+        for (std::size_t k = 0; k < ss.matrices().size(); k++) {
+          sgtbx::rot_mx const rm = ss.matrices()[k].r();
+          if (rm.is_unit_mx() || rm.den() != 1) continue;
+          stab.push_back(rm.num());
+        }
+        if (stab.empty()) continue;
+        // and only a density that is in fact invariant: a numerical one need
+        // not be exactly, and then every value is computed as before
+        bool invariant = true;
+        for (std::size_t k = 0; k < stab.size() && invariant; k++) {
+          scitbx::mat3<double> sf;
+          for (int q = 0; q < 9; q++) sf[q] = stab[k][q];
+          scitbx::mat3<double> const qm = unit_cell.orthogonalization_matrix()
+            *sf*unit_cell.fractionalization_matrix();
+          std::vector<typename data_type::shell> rotated = d.atoms[j];
+          data_type::rotate_shells(rotated, qm);
+          for (std::size_t sh = 0; sh < rotated.size() && invariant; sh++) {
+            for (std::size_t m = 0; m < rotated[sh].c.size(); m++) {
+              FloatType const a = d.atoms[j][sh].c[m];
+              if (std::abs(rotated[sh].c[m] - a) > 1e-12*std::max(FloatType(1), std::abs(a))) {
+                invariant = false; break;
+              }
+            }
+          }
+        }
+        if (!invariant) continue;
+        std::vector<int> map(n);
+        bool any = false;
+        for (std::size_t k = 0; k < n; k++) {
+          map[k] = static_cast<int>(k);
+          for (std::size_t kk = 0; kk < k && map[k] == int(k); kk++) {
+            if (map[kk] != int(kk)) continue;
+            for (std::size_t q = 0; q < stab.size(); q++) {
+              if (rotations[kk]*stab[q] == rotations[k]) {
+                map[k] = static_cast<int>(kk); any = true; break;
+              }
+            }
+          }
+        }
+        if (any) (*r)[j].swap(map);
+      }
+      return r;
+    }
+
+  public:
 
     harmonic_expansion(harmonic_expansion const &other)
       : data(other.data),
@@ -906,7 +991,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         f_c(other.f_c.size()),
         tmp(other.tmp.size()),
         coef(other.coef.size()),
-        row(other.row.size())
+        row(other.row.size()),
+        same_as(other.same_as)
     {}
 
   private:
@@ -1065,7 +1151,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       int const n_e = tables->n_even[j], n_o = cache->n_coef[j] - n_e;
       int const n_lm_odd = n_lm - n_lm_even;
       float_type const *a_o = a + n_e;
+      std::vector<int> const &same = (*same_as)[j];
       for (std::size_t k = 0; k < f_c.size(); k++) {
+        if (!same.empty() && same[k] != int(k)) {
+          f_c[k] = f_c[same[k]];
+          continue;
+        }
         float_type const *ye = &ylm_even[k*n_lm_even];
         float_type const *yo = &ylm_odd[k*n_lm_odd];
         float_type re0 = 0, re1 = 0, im0 = 0, im1 = 0;
