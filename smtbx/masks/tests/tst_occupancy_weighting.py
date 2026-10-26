@@ -104,6 +104,35 @@ def exercise_two_conformers_multiply():
   print("\toverlapping groups multiply and never give back more than they took")
 
 
+def exercise_alternates_grouped_by_part():
+  """ Two coincident conformers at 0.5/0.5 in PART 1 and PART 2, and a lone
+  0.3 atom elsewhere. By value the two conformers are one group, counted once,
+  and their shared volume gets 0.5 back; by part they add up to one and it gets
+  nothing. The lone atom gives back 0.7 either way. """
+  xs = structure_with([1.0, 0.5, 0.5, 0.3],
+                      sites=[(0.15, 0.5, 0.5), (0.5, 0.5, 0.5),
+                             (0.5, 0.5, 0.5), (0.8, 0.5, 0.5)])
+  for sc, part in zip(xs.scatterers(), (0, 1, 2, 0)):
+    sc.set_part(part)
+  m = mask_for(xs)
+  m.occupancy_weighting = True
+
+  m.occupancy_groups = 'value'
+  by_value = m.occupancy_weight_map()
+  m.occupancy_groups = 'part'
+  by_part = m.occupancy_weight_map()
+  # grid points by x only: the conformers sit at 0.5, the lone atom at 0.8
+  n = by_value.all()
+  def at(map_, x):
+    return map_[(int(round(x*n[0])) % n[0], n[1]//2, n[2]//2)]
+  assert approx_equal(at(by_value, 0.5), 0.5, eps=1e-9), at(by_value, 0.5)
+  assert approx_equal(at(by_part, 0.5), 0.0, eps=1e-9), at(by_part, 0.5)
+  assert approx_equal(at(by_value, 0.8), 0.7, eps=1e-9), at(by_value, 0.8)
+  assert approx_equal(at(by_part, 0.8), 0.7, eps=1e-9), at(by_part, 0.8)
+  print("\talternates at 0.5/0.5: 0.5 given back by value, none by part;"
+        " a lone 0.3 atom gives 0.7 either way")
+
+
 def exercise_the_weight_stays_in_range():
   """ solvent_weight_map shall remain a weight. """
   xs = random_structure.xray_structure(
@@ -154,6 +183,7 @@ def run():
   exercise_full_occupancy_is_untouched()
   exercise_a_partial_atom_gives_back_one_minus_q()
   exercise_two_conformers_multiply()
+  exercise_alternates_grouped_by_part()
   exercise_the_weight_stays_in_range()
   print("OK")
 

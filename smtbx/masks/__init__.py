@@ -179,7 +179,10 @@ class solvent_accessible_volume(object):
     return self._void_isel[i]
 
   def n_solvent_grid_points(self):
-    return sum([self.void_iselection(i).size() for i in range(self.n_voids())
+    # the flood fill has counted them already; counting label by label is a
+    # pass over the grid per void
+    per_void = self.flood_fill.grid_points_per_void()
+    return sum([per_void[i] for i in range(self.n_voids())
                 if not self.exclude_void_flags[i]])
 
   def show_summary(self, log=None):
@@ -261,6 +264,12 @@ class mask(object):
     # five structures, best where the correction is large (R_free 0.1922 to
     # 0.1855) and never worse. A structure with no partial atoms takes the
     # early return below and is untouched.
+    # Since then measured worse on two proteins, the mask built from the
+    # working set and judged on held-out reflections with the models fixed:
+    # switching it off changed R1_free by -1.3/-0.8 % on 1EJG (IAM/GARLIC, a
+    # random 5 %) and -2.8/-2.2 % on 30OR (the depositors' free set; 64 % of
+    # its atoms partial). The volume it gives back lies against the atoms,
+    # where the difference map holds the model's residual and not solvent.
     self.occupancy_weighting = True
     # How far below one an occupancy has to be before the atom counts as
     # partial. Refined free variables land a little off exact values, and a
@@ -275,6 +284,13 @@ class mask(object):
     # map it feeds is only cut into solvent regions, so the FFT's accuracy is
     # ample - but it is a change of numbers, hence not the default.
     self.f_calc_algorithm = "direct"
+    # What counts as one disorder group in occupancy_weight_map: 'value' takes
+    # every atom of one occupancy as one group, 'part' every atom of one PART
+    # and occupancy. With 'value', two alternates at 0.5/0.5 are one group
+    # counted once, so their overlap gets 0.5 back instead of nothing. 'part'
+    # is the correct bookkeeping but measured no better on 30OR (R1_free
+    # +0.02/+0.03 %, IAM/GARLIC), so 'value' stays the default.
+    self.occupancy_groups = 'value'
     self._f_mask = None
     self._masked_diff_map = None
     self.f_000 = None
@@ -409,10 +425,9 @@ class mask(object):
 
     The correction is a weight rather than a second region. For a grid point
     covered only by a disorder group of occupancy q, the solvent weight should
-    be 1 - q, not 0. Groups are taken as the distinct occupancy values present,
-    which for a SHELX model is what PART and its free variable produce anyway,
-    and the weight multiplies over groups so that two overlapping conformers
-    leave (1-q1)(1-q2).
+    be 1 - q, not 0. Groups are the distinct occupancy values present, or with
+    occupancy_groups 'part' the distinct (PART, occupancy) pairs, and their
+    occupancies add over groups (see below), clamped at one.
 
     Returns the amount to be **added** to the hard region, so it is zero
     wherever a full-occupancy atom sits and wherever the region already counts
@@ -437,9 +452,13 @@ class mask(object):
     # the region as it stands: 1 where solvent is already counted
     hard = self.mask.data.as_double()
     hard.set_selected(hard > 0, 1.)
-    # distinct occupancies, rounded so that a free variable refined to
-    # 0.2499998 and 0.25 are one group rather than two
-    values = sorted(set(round(q, 3) for q in occupancies.select(partial)))
+    # one key per atom: its occupancy, rounded so that a free variable refined
+    # to 0.2499998 and 0.25 are one group rather than two, and with
+    # occupancy_groups 'part' its PART as well
+    by_part = getattr(self, 'occupancy_groups', 'value') == 'part'
+    keys = [(sc.get_part() if by_part else 0, round(sc.occupancy, 3))
+            for sc in xs.scatterers()]
+    groups = sorted(set(k for k, p in zip(keys, partial) if p))
 
     def outside(selection):
       """ 1 where no atom of this selection reaches, 0 where one does.
@@ -487,11 +506,11 @@ class mask(object):
     # partial group sits, which is the case this exists for.
     covered = flex.double(self.mask.data.size(), 0)
     covered.reshape(self.mask.data.accessor())
-    for q in values:
+    for group in groups:
+      q = group[1]
       if q <= 0:
         continue
-      inside = 1. - outside(
-        flex.bool([round(o, 3) == q for o in occupancies]) & considered)
+      inside = 1. - outside(flex.bool([k == group for k in keys]) & considered)
       covered = covered + q*inside
     covered.set_selected(covered > 1., 1.)
     absent = 1. - covered
@@ -732,7 +751,10 @@ class mask(object):
     return self._void_isel[i]
 
   def n_solvent_grid_points(self):
-    return sum([self.void_iselection(i).size() for i in range(self.n_voids())
+    # the flood fill has counted them already; counting label by label is a
+    # pass over the grid per void
+    per_void = self.flood_fill.grid_points_per_void()
+    return sum([per_void[i] for i in range(self.n_voids())
                 if not self.exclude_void_flags[i]])
 
   def electron_counts_per_void(self):
