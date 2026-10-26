@@ -685,8 +685,14 @@ class calculator(object):
 
   Parameter blocks, in order, for each atom (each present when its flag is set): site (3); ADP (u_iso 1 or
   u_star 6); occupancy (1); displacive waves A, B (3 per harmonic each); occupancy waves sin, cos (1 per
-  harmonic each); ADP waves sin, cos (6 per harmonic each). Then the scale. flags: 'site', 'adp', 'occupancy',
-  'modulation', 'occ_waves', 'adp_waves', 'scale'; all True except 'occupancy'.
+  harmonic each); ADP waves sin, cos (6 per harmonic each); crenel (c, w); Legendre displacements (3 per
+  order); displacive x-harmonics (3 per order); ADP x-harmonics (6 per order). Then the scale. flags: 'site',
+  'adp', 'occupancy', 'modulation', 'occ_waves', 'adp_waves', 'crenel', 'legendre', 'xharm', 'u_xharm',
+  'scale'; all True except 'occupancy' and the last four, which are asked for.
+
+  The crenel gradients are those of the x4 quadrature as computed: its nodes sit at fixed local coordinates
+  (x4 - c) / w, so c and w move the nodes and scale the weights, and the Legendre and x-harmonic terms, which
+  depend on the local coordinate alone, do not change with them.
   table: a form_factor_table replacing the WK1995 f0 by aspherical f_j(S R) for each operation R.
   radiation: "xray" or "electron" (kinematical electron diffraction, ITC electron f0 and no f', f'').
   """
@@ -738,9 +744,13 @@ class calculator(object):
                       "occ": np.zeros(nref, complex),
                       "a": np.zeros((nref, at.n_harmonics, 3), complex), "b": np.zeros((nref, at.n_harmonics, 3), complex),
                       "os": np.zeros((nref, len(at.occ_sin)), complex), "oc": np.zeros((nref, len(at.occ_sin)), complex),
-                      "us": np.zeros((nref, len(at.u_sin), 6), complex), "uc": np.zeros((nref, len(at.u_sin), 6), complex)})
+                      "us": np.zeros((nref, len(at.u_sin), 6), complex), "uc": np.zeros((nref, len(at.u_sin), 6), complex),
+                      "cren": np.zeros((nref, 2 if at.crenel else 0), complex),
+                      "leg": np.zeros((nref, len(at.legendre), 3), complex),
+                      "xh": np.zeros((nref, len(at.xharm), 3), complex),
+                      "ux": np.zeros((nref, len(at.u_xharm), 6), complex)})
     # per atom: x4 nodes and weights, sin/cos tables, u, p(x4), ADP-wave sum at the nodes
-    pre = []
+    pre, extra = [], []
     for at in xs.atoms:
       x4, wt = at.nodes(self.n_x4)
       n_max = max(1, at.n_harmonics, len(at.occ_sin), len(at.u_sin))
@@ -752,6 +762,7 @@ class calculator(object):
         uw = ux if uw is None else uw + ux
       pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
                   1.0 / at.crenel[1] if at.crenel else 1.0))
+      extra.append(_local_tables(at, x4, sin_t, cos_t) if gradients else None)
     ops = []
     for op in xs.ssg.ops:
       sp = s_vec.dot(op.r)
@@ -802,6 +813,30 @@ class calculator(object):
           for n in range(len(at.u_sin)):
             gr["us"][:, n, :] += (base * ps[:, n])[:, None] * (-TWO_PI_SQ * q6)
             gr["uc"][:, n, :] += (base * pc[:, n])[:, None] * (-TWO_PI_SQ * q6)
+          ex = extra[ia]
+          if len(at.legendre):
+            pl = e.dot((pw * ex["leg"]).T)
+            for n in range(len(at.legendre)):
+              gr["leg"][:, n, :] += (1j * TWO_PI) * (base * pl[:, n])[:, None] * sp
+          if len(at.xharm):
+            px = e.dot((pw * ex["xh"]).T)
+            for n in range(len(at.xharm)):
+              gr["xh"][:, n, :] += (1j * TWO_PI) * (base * px[:, n])[:, None] * sp
+          if len(at.u_xharm):
+            pu = e.dot((pw * ex["ux"]).T)
+            for n in range(len(at.u_xharm)):
+              gr["ux"][:, n, :] += (base * pu[:, n])[:, None] * (-TWO_PI_SQ * q6)
+          if at.crenel:
+            # d/dx4 of the integrand at a node, its local coordinate held: the phase through the Fourier and
+            # sawtooth displacements and m x4, the Debye-Waller factor through the ADP waves, and p
+            rate = (1j * TWO_PI) * (sp.dot(ex["du"].T) + mp[:, None])
+            if ex["duw"] is not None:
+              rate -= TWO_PI_SQ * q6.dot(ex["duw"].T)
+            de = e * rate
+            loc, dp = ex["loc"], ex["dp"]
+            gr["cren"][:, 0] += base * (de.dot(pw) + e.dot(wt * dp))
+            gr["cren"][:, 1] += base * (e.dot(wt * ex["p_waves"] * dp_docc) + de.dot(pw * loc)
+                                        + e.dot(wt * dp * loc))
       return out
 
     # numpy's ufuncs and dots release the GIL, so atoms run in threads; summed in atom order, so the result does
@@ -822,7 +857,8 @@ class calculator(object):
     for gr in grads:
       for key, flag in (("site", "site"), ("adp", "adp"), ("occ", "occupancy"), ("a", "modulation"),
                         ("b", "modulation"), ("os", "occ_waves"), ("oc", "occ_waves"), ("us", "adp_waves"),
-                        ("uc", "adp_waves")):
+                        ("uc", "adp_waves"), ("cren", "crenel"), ("leg", "legendre"), ("xh", "xharm"),
+                        ("ux", "u_xharm")):
         if flags[flag]:
           cols.append(gr[key].reshape(nref, -1))
     # d|F|^2/dp = 2 Re(F* dF/dp), block by block into one real array: no (N, n_params) complex temporary
@@ -836,9 +872,48 @@ class calculator(object):
     return f_calc, xs.scale * f_sq, d_fsq
 
 
+def _local_tables(at, x4, sin_t, cos_t):
+  """Per node, for the gradients: the Legendre polynomials and x-harmonics of the local coordinate; for a
+  crenel atom also that coordinate, and the x4 derivatives of the displacement (Fourier and sawtooth parts),
+  of the occupancy waves and of the ADP waves, and the occupancy-wave part of p."""
+  out = {"leg": None, "xh": None, "ux": None}
+  if len(at.legendre):
+    from numpy.polynomial import legendre as L
+    xi = 2 * at._local(x4)
+    out["leg"] = np.array([L.legval(xi, [0] * (n + 1) + [1]) for n in range(len(at.legendre))])
+  if len(at.xharm):
+    out["xh"] = np.array([xharm_basis(n + 1, at._local(x4)) for n in range(len(at.xharm))])
+  if len(at.u_xharm):
+    out["ux"] = np.array([xharm_basis(n + 1, at._local(x4)) for n in range(len(at.u_xharm))])
+  if at.crenel:
+    out["loc"] = at._local(x4)
+    du = np.zeros((len(x4), 3))
+    for n in range(at.n_harmonics):
+      k = TWO_PI * (n + 1)
+      du += k * (np.outer(cos_t[n], at.a[n]) - np.outer(sin_t[n], at.b[n]))
+    if at.sawtooth is not None:
+      a, _, w_s = at.sawtooth
+      du += np.outer(np.ones(len(x4)), 2 * a / w_s)
+    out["du"] = du
+    dp, pwv = np.zeros(len(x4)), np.zeros(len(x4))
+    for n in range(len(at.occ_sin)):
+      k = TWO_PI * (n + 1)
+      dp += k * (at.occ_sin[n] * cos_t[n] - at.occ_cos[n] * sin_t[n])
+      pwv += at.occ_sin[n] * sin_t[n] + at.occ_cos[n] * cos_t[n]
+    out["dp"], out["p_waves"] = dp, pwv
+    duw = None
+    for n in range(len(at.u_sin)):
+      k = TWO_PI * (n + 1)
+      t = k * (np.outer(cos_t[n], at.u_sin[n]) - np.outer(sin_t[n], at.u_cos[n]))
+      duw = t if duw is None else duw + t
+    out["duw"] = duw
+  return out
+
+
 def _flags(flags):
   out = {"site": True, "adp": True, "occupancy": False, "modulation": True, "occ_waves": True,
-         "adp_waves": True, "scale": True}
+         "adp_waves": True, "crenel": False, "legendre": False, "xharm": False, "u_xharm": False,
+         "scale": True}
   for k, v in (flags or {}).items():
     out["adp" if k == "u_iso" else k] = v
   return out
@@ -899,6 +974,15 @@ def _atom_map(at, op, flags):
   pair("a", "b", 3, op.r)
   pair("occ_sin", "occ_cos", 1, np.eye(1))
   pair("u_sin", "u_cos", 6, r6)
+  # how a site-symmetry operation maps a crenel and the functions defined on it is not worked out here: under
+  # any operation but the identity those parameters are held, not left free to break the symmetry
+  identity = (np.allclose(op.r, np.eye(3)) and op.eps == 1 and not np.any(op.m)
+              and abs(op.tau) < 1e-12 and np.allclose(op.t, np.round(op.t)))
+  if not identity:
+    for name in ("crenel", "legendre", "xharm", "u_xharm"):
+      if name in off:
+        sb, lb = off[name]
+        t[sb:sb + lb, sb:sb + lb] = 0
   return t
 
 
@@ -962,6 +1046,10 @@ def _blocks(at, flags):
          ("occupancy", "occupancy", lambda: [at.occupancy], lambda v: setattr(at, "occupancy", float(v[0])))]
   for flag, name in (("modulation", "a"), ("modulation", "b"), ("occ_waves", "occ_sin"), ("occ_waves", "occ_cos"),
                      ("adp_waves", "u_sin"), ("adp_waves", "u_cos")):
+    out.append((name, flag) + arr(name))
+  out.append(("crenel", "crenel", lambda: list(at.crenel) if at.crenel else [],
+              lambda v: setattr(at, "crenel", (float(v[0]), float(v[1])) if len(v) else at.crenel)))
+  for flag, name in (("legendre", "legendre"), ("xharm", "xharm"), ("u_xharm", "u_xharm")):
     out.append((name, flag) + arr(name))
   return [b for b in out if flags[b[1]]]
 

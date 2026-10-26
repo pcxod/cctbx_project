@@ -459,12 +459,68 @@ def test_electron():
         "differences to %.1e" % (err, len(p0), worst))
 
 
+def test_gradients_all_wave_blocks():
+  """Every wave block against central differences, parameter by parameter, relative error <= 1e-6: occupancy
+  and ADP waves; crenel c and w on atoms carrying Fourier displacements, occupancy and ADP waves, Legendre
+  terms, x-harmonics and (one) a sawtooth; Legendre and displacive and ADP x-harmonic coefficients."""
+  from cctbx import adptbx
+  xs = model(n_harmonics=2, amp=0.02)
+  rng = np.random.RandomState(7)
+  for i, at in enumerate(xs.atoms):
+    at.u_star = np.array(adptbx.u_iso_as_u_star(xs.unit_cell, at.u_iso))
+    at.occ_sin, at.occ_cos = 0.1 * rng.uniform(-1, 1, 2), 0.1 * rng.uniform(-1, 1, 2)
+    at.u_sin = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+    at.u_cos = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+  for i, (c, w) in ((2, (0.3, 0.6)), (3, (0.71, 0.45))):
+    at = xs.atoms[i]
+    at.crenel = (c, w)
+    at.legendre = 0.01 * rng.uniform(-1, 1, (3, 3))
+    at.xharm = 0.01 * rng.uniform(-1, 1, (3, 3))
+    at.u_xharm = at.u_star[None, :] * 0.05 * rng.uniform(-1, 1, (2, 6))
+  xs.atoms[3].sawtooth = (0.01 * rng.uniform(-1, 1, 3), 0.65, 0.5)
+  xs.dispersion = {"Cu": (0.3, 1.2)}
+  h, m = reflections(xs, d_min=1.5)
+  flags = {"site": False, "adp": False, "modulation": False, "occ_waves": True, "adp_waves": True,
+           "crenel": True, "legendre": True, "xharm": True, "u_xharm": True, "scale": False}
+  names = []
+  for at in xs.atoms:
+    for name, _, get, _ in mod._blocks(at, mod._flags(flags)):
+      names += [(name, at.label)] * len(get())
+  calc = mod.calculator(h, m)
+  _, _, d = calc.compute(xs, flags, gradients=True)
+  p0 = mod.get_parameters(xs, flags)
+  assert len(p0) == len(names) == d.shape[1], (len(p0), len(names), d.shape)
+  worst = {}
+  for k in range(len(p0)):
+    # large enough that rounding stays below 1e-7 for coefficients of 0.01 and less
+    step = 1e-5 * max(1e-2, abs(p0[k]))
+    p = p0.copy(); p[k] += step
+    mod.set_parameters(xs, flags, p)
+    _, fp, _ = calc.compute(xs)
+    p[k] -= 2 * step
+    mod.set_parameters(xs, flags, p)
+    _, fm, _ = calc.compute(xs)
+    mod.set_parameters(xs, flags, p0)
+    num = (fp - fm) / (2 * step)
+    scale = max(np.max(np.abs(num)), np.max(np.abs(d[:, k])), 1e-300)
+    err = np.max(np.abs(num - d[:, k])) / scale
+    block = names[k][0]
+    if names[k][0] == "crenel":
+      block = "crenel c" if (k == 0 or names[k - 1] != names[k]) else "crenel w"
+    worst[block] = max(worst.get(block, 0.0), err)
+  for block in ("occ_sin", "occ_cos", "u_sin", "u_cos", "crenel c", "crenel w", "legendre", "xharm", "u_xharm"):
+    assert worst[block] <= 1e-6, (block, worst[block])
+  print("  wave gradients = central differences, %d parameters: %s" % (len(p0), ", ".join(
+    "%s %.1e" % (b, e) for b, e in sorted(worst.items()))))
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
   test_bessel_single_harmonic()
   test_gradients_finite_difference()
   test_gradients_aniso_occ_adp_crenel()
+  test_gradients_all_wave_blocks()
   test_mscif_against_jana()
   test_hklm_files()
   test_reflection_statistics()
