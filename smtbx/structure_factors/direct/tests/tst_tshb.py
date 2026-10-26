@@ -146,6 +146,60 @@ def exercise_electron_diffraction():
   print("\telectron diffraction (Mott-Bethe) %.1e" % worst)
 
 
+def exercise_cache():
+  """ The form factors of every equivalent and Friedel mate of a reflection come
+  from one cached orbit: per atom either its n_smx values or its folded
+  coefficients, whichever is smaller. Checked against P1, where nothing is
+  shared, for both kinds, X-ray and ED, filled and hit, and with no cache. """
+  rng = random.Random(4)
+  d = tempfile.mkdtemp()
+  # X1 lmax 3 (16 coefficients), X2 lmax 1 (4) with a Slater record
+  atoms = [random_atom("X1", 3, rng)._replace(z=6),
+           random_atom("X2", 1, rng)._replace(slaters=[(0.3, 1, 2.5)], z=8)]
+  px, pe = os.path.join(d, "x.tshb"), os.path.join(d, "e.tshb")
+  tshb.write(px, atoms)
+  tshb.write(pe, atoms, header={"ED": "true"})
+  worst = 0
+  for symbol in ("P 1 21/c 1", "P 21 21 21", "R -3 :H", "I 41/a :2",
+                 "P 63/m m c", "F m -3 m"):
+    sgi = sgtbx.space_group_info(symbol)
+    cs = crystal.symmetry(sgi.any_compatible_unit_cell(volume=1500), space_group_info=sgi)
+    sg = cs.space_group()
+    xs = xray.structure(crystal_symmetry=cs, scatterers=flex.xray_scatterer(
+      [xray.scatterer(a.label, (0.11, 0.23, 0.37), u=0, scattering_type="C") for a in atoms]))
+    p1 = sgtbx.space_group()
+    ref_x = build(cs.unit_cell(), xs.scatterers(), px, p1, True)
+    ref_e = build(cs.unit_cell(), xs.scatterers(), pe, p1, True)
+    orbit = set()
+    for h in [(1, 2, 3), (4, -1, 2), (0, 3, 5), (2, 2, 7)]:
+      for op in sg.smx():
+        r = op.r().num()
+        hr = tuple(sum(h[k]*r[3*k + c] for k in range(3)) for c in range(3))
+        orbit.add(hr); orbit.add(tuple(-v for v in hr))
+    orbit = sorted(orbit)
+    rng.shuffle(orbit)
+    for budget in ("0", None):
+      if budget is None: os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
+      else: os.environ["SMTBX_TSHB_CACHE_MB"] = budget
+      cx = build(cs.unit_cell(), xs.scatterers(), px, sg, True)
+      ce = build(cs.unit_cell(), xs.scatterers(), pe, sg, True)
+      os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
+      for h in orbit + orbit[::-1]:     # the second pass hits
+        stl2 = cs.unit_cell().stol(h)**2
+        for j in range(len(atoms)):
+          fx, fe = cx.get_full(j, h), ce.get_full(j, h)
+          for i, op in enumerate(sg.smx()):
+            r = op.r().num()
+            hr = tuple(sum(h[k]*r[3*k + c] for k in range(3)) for c in range(3))
+            x = ref_x.get_full(j, hr)[0]
+            worst = max(worst, abs(fx[i] - x)/max(1, abs(x)))
+            e = complex(0.023934*(atoms[j].z - x.real)/stl2, -0.023934*x.imag/stl2)
+            worst = max(worst, abs(fe[i] - e)/max(1, abs(e)),
+                        abs(fe[i] - ref_e.get_full(j, hr)[0])/max(1, abs(e)))
+  assert worst < 1e-12, worst
+  print("\tcached orbits against P1, six space groups, X-ray and ED: %.1e" % worst)
+
+
 def spherical_setup():
   random.seed(3)
   flex.set_random_seed(3)
@@ -254,6 +308,7 @@ def run():
   exercise_spherical_records()
   exercise_symmetry_and_structure_factor()
   exercise_electron_diffraction()
+  exercise_cache()
   exercise_spherical_equivalence()
   exercise_least_squares_build()
   print("OK")
