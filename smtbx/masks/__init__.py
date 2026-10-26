@@ -10,6 +10,64 @@ from libtbx.utils import xfrange
 from six.moves import range
 
 
+def hydrogens_at_common_length(xray_structure, x_h_length, max_bond=1.3):
+  """ A copy with every H moved along its bond to x_h_length from its parent.
+
+  x_h_length is one length for all, or a dict by parent element symbol (any
+  case), e.g. neutron distances; an H whose parent element is not in the dict
+  stays where it is and is listed with those without parent.
+
+  For drawing a solvent region only. The region is filled from the observed
+  difference map, so the volume it covers is volume whose residual it cancels,
+  and where a model puts its H atoms decides that volume. An aspherical model
+  puts them 0.1 A further out than IAM and so is left with ~220 A^3 less
+  region on 1EJG, and a worse R1 and e_gross for it. With one length for every
+  model the region no longer depends on that.
+
+  The parent is the nearest non-H atom within max_bond under any symmetry
+  operation, and of the same PART as the H or of PART 0 (an H in PART 0 takes
+  any). An H with no parent is left where it is; their labels are returned.
+  """
+  xs = xray_structure.deep_copy_scatterers()
+  scatterers = xs.scatterers()
+  hd = xs.hd_selection()
+  unit_cell = xs.unit_cell()
+  sites_frac = xs.sites_frac()
+  pair_sym_table = xs.pair_asu_table(distance_cutoff=max_bond)\
+    .extract_pair_sym_table(skip_j_seq_less_than_i_seq=False,
+                            all_interactions_from_inside_asu=True)
+  if isinstance(x_h_length, dict):
+    by_element = dict((e.capitalize(), l) for e, l in x_h_length.items())
+  else:
+    by_element = None
+  without_parent = []
+  for i_seq in hd.iselection():
+    part = scatterers[i_seq].get_part()
+    best = None
+    for j_seq, sym_ops in pair_sym_table[i_seq].items():
+      if hd[j_seq]: continue
+      part_j = scatterers[j_seq].get_part()
+      if part != 0 and part_j not in (0, part): continue
+      for rt_mx in sym_ops:
+        site = rt_mx * sites_frac[j_seq]
+        d = unit_cell.distance(sites_frac[i_seq], site)
+        if best is None or d < best[0]:
+          best = (d, site, j_seq)
+    length = x_h_length
+    if best is not None and by_element is not None:
+      length = by_element.get(
+        (scatterers[best[2]].element_symbol() or '').capitalize())
+    if best is None or best[0] == 0 or length is None:
+      without_parent.append(scatterers[i_seq].label)
+      continue
+    d, parent, _ = best
+    xh = unit_cell.orthogonalize(sites_frac[i_seq])
+    xp = unit_cell.orthogonalize(parent)
+    scatterers[i_seq].site = unit_cell.fractionalize(
+      [p + length*(h - p)/d for h, p in zip(xh, xp)])
+  return xs, without_parent
+
+
 def _void_iselections(mask_data, n_voids):
   """ The grid points of each void (label j+2), one selection per void.
 
@@ -40,8 +98,15 @@ class solvent_accessible_volume(object):
                d_min=None,
                resolution_factor=1/4,
                atom_radii_table=None,
-               use_space_group_symmetry=False):
+               use_space_group_symmetry=False,
+               x_h_length=None):
     self.xray_structure = xray_structure
+    # what the region is drawn around; H at x_h_length when that is given
+    self.region_structure = xray_structure
+    self.hydrogens_without_parent = []
+    if x_h_length is not None and not ignore_hydrogen_atoms:
+      self.region_structure, self.hydrogens_without_parent = \
+        hydrogens_at_common_length(xray_structure, x_h_length)
     if crystal_gridding is None:
       self.crystal_gridding = maptbx.crystal_gridding(
         unit_cell=xray_structure.unit_cell(),
@@ -58,7 +123,7 @@ class solvent_accessible_volume(object):
     # solvent of 1EJG against IAM, and that alone is why its mask holds fewer
     # electrons. Leaving H out (as mmtbx does) still measured worse on held-out
     # reflections there (R1_free +1.3 %), so it stays off by default.
-    region = xray_structure
+    region = self.region_structure
     if ignore_hydrogen_atoms:
       region = xray_structure.select(~xray_structure.hd_selection())
     if use_space_group_symmetry:
@@ -225,7 +290,14 @@ class mask(object):
               grid_step=None,
               resolution_factor=1/4,
               atom_radii_table=None,
-              use_space_group_symmetry=False):
+              use_space_group_symmetry=False,
+              x_h_length=None):
+    """x_h_length: draw the region with every H at this distance from its
+    parent (see hydrogens_at_common_length), so that models placing their H
+    differently - IAM and aspherical - get the same region. None uses the
+    model's own H positions, as before. On 1EJG with 1.09 the aspherical
+    model's R1 penalty against IAM turned into a gain; untested elsewhere.
+    """
     if grid_step is not None: d_min = None
     else: d_min = self.fo2.d_min()
     result = solvent_accessible_volume(
@@ -238,12 +310,16 @@ class mask(object):
       d_min=d_min,
       resolution_factor=resolution_factor,
       atom_radii_table=atom_radii_table,
-      use_space_group_symmetry=use_space_group_symmetry)
+      use_space_group_symmetry=use_space_group_symmetry,
+      x_h_length=x_h_length)
     self.crystal_gridding = result.crystal_gridding
     self.vdw_radii = result.vdw_radii
     self.solvent_radius = solvent_radius
-    # kept for occupancy_weight_map, which leaves out the same atoms
+    # kept for occupancy_weight_map, which leaves out the same atoms and
+    # draws around the same sites
     self.ignore_hydrogen_atoms = ignore_hydrogen_atoms
+    self.region_structure = result.region_structure
+    self.hydrogens_without_parent = result.hydrogens_without_parent
     self.mask = result.mask
     self.flood_fill = result.flood_fill
     self.exclude_void_flags = [False] * self.flood_fill.n_voids()
@@ -342,7 +418,9 @@ class mask(object):
     wherever a full-occupancy atom sits and wherever the region already counts
     as solvent. Nothing here can make the weight exceed one; the caller clamps.
     """
-    xs = self.xray_structure
+    # the sites the main region was drawn around, H moved if it was asked for;
+    # same scatterers in the same order as xray_structure
+    xs = getattr(self, 'region_structure', self.xray_structure)
     occupancies = flex.double([sc.occupancy for sc in xs.scatterers()])
     # atoms the main region was not drawn around take no part here either
     if getattr(self, 'ignore_hydrogen_atoms', False):
