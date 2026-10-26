@@ -628,11 +628,107 @@ def test_crenel_blocks_under_site_symmetry():
     print("    %-11s %-9s %-8s %.1e" % (key + (table[key],)))
 
 
+def _rank_by_absences_reference(groups, h, m, i_obs, sig, n_sigma=3.0):
+  """rank_by_absences as it was: is_sys_absent reflection by reflection."""
+  ranked = []
+  for g in groups:
+    viol = n_abs = 0
+    for hh, mm, ii, ss in zip(h, m, i_obs, sig):
+      if g.is_sys_absent(hh, mm):
+        n_abs += 1
+        if ii > n_sigma * ss:
+          viol += 1
+    ranked.append((viol, -n_abs, sum(1 for op in g.generators if op.tau), g))
+  ranked.sort(key=lambda x: x[:3])
+  return [(v, -n, g) for v, n, _, g in ranked]
+
+
+def test_rank_by_absences_equivalence():
+  """The vectorised ranking (point-part tests shared between candidates) against the reflection-by-reflection
+  one: the same order, violations and predicted absences, for the candidates of several groups and q, with
+  intensities that leave some absences violated."""
+  rng = np.random.RandomState(12)
+  cases = [("P 1 21/c 1", (0.31, 0.0, 0.23), (7.1, 5.3, 9.2, 90, 101.3, 90), (0.0, 0.5)),
+           ("C 1 2/c 1", (0.31, 0.0, 0.23), (14.2, 10.6, 18.4, 90, 101.3, 90), (0.0, 0.5)),
+           ("P n m a", (0.0, 0.0, 0.29), (8.2, 9.6, 11.4, 90, 90, 90), (0.0, 0.5)),
+           ("P 4/m m m", (0.0, 0.0, 0.29), (6.2, 6.2, 9.4, 90, 90, 90), (0.0, 0.25, 0.5, 0.75)),
+           ("P 63/m", (0.0, 0.0, 0.29), (6.2, 6.2, 9.4, 90, 90, 120), (0.0, 1 / 3., 2 / 3., 0.5))]
+  n_groups = 0
+  for symbol, q, cell, taus in cases:
+    sg = sgtbx.space_group_info(symbol).group()
+    groups = mod.candidate_superspace_groups(sg, q, taus)
+    xs = mod.modulated_structure(uctbx.unit_cell(cell), groups[0], [])
+    h, m = reflections(xs, d_min=1.5, m_max=2)
+    i_obs = rng.exponential(100, len(m)) * (rng.uniform(size=len(m)) > 0.3)
+    sig = np.full(len(m), 5.0)
+    a = _rank_by_absences_reference(groups, h, m, i_obs, sig)
+    b = mod.rank_by_absences(groups, h, m, i_obs, sig)
+    assert [(v, n, g.label()) for v, n, g in a] == [(v, n, g.label()) for v, n, g in b], symbol
+    n_groups += len(groups)
+  print("  ranking by absences, vectorised = reflection by reflection: %d candidates of %d groups" % (n_groups, len(cases)))
+
+
+def test_calculator_equivalence():
+  """The x4 sums shared between operations with the same (R, eps, M) or its negative, and the reflection
+  arrays kept between calls, against every operation on its own and a fresh calculator: F and every gradient
+  block to 1e-12, in centric and acentric groups with all block families on; then the kept arrays rebuilt when
+  q, the cell or the dispersion change."""
+  from cctbx import adptbx
+  rng = np.random.RandomState(13)
+  worst = 0.0
+  for symbol, q, cell in (("C 1 2/c 1", (0.31, 0.0, 0.23), (14.2, 10.6, 18.4, 90, 101.3, 90)),
+                          ("C m c m", (0.0, 0.0, 0.29), (18.2, 20.6, 16.4, 90, 90, 90)),
+                          ("P 21 21 21", (0.0, 0.0, 0.29), (8.2, 9.6, 11.4, 90, 90, 90))):
+    uc = uctbx.unit_cell(cell)
+    ssg = mod.superspace_group(sgtbx.space_group_info(symbol).group(), q)
+    atoms = []
+    for i, t in enumerate(["Cu", "O", "N", "C", "C", "S"]):
+      at = mod.modulated_atom("%s%d" % (t, i), t, rng.uniform(0.02, 0.48, 3), 0.012, 1.0, 2,
+                              0.01 * rng.uniform(-1, 1, (2, 3)), 0.01 * rng.uniform(-1, 1, (2, 3)))
+      at.u_star = np.array(adptbx.u_iso_as_u_star(uc, at.u_iso))
+      at.occ_sin, at.occ_cos = 0.05 * rng.uniform(-1, 1, 2), 0.05 * rng.uniform(-1, 1, 2)
+      at.u_sin = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+      at.u_cos = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+      if i % 3 == 0:
+        at.crenel = (0.3 + 0.05 * i, 0.6)
+        at.legendre = 0.01 * rng.uniform(-1, 1, (2, 3))
+        at.xharm = 0.01 * rng.uniform(-1, 1, (2, 3))
+        at.u_xharm = at.u_star[None, :] * 0.05 * rng.uniform(-1, 1, (1, 6))
+      atoms.append(at)
+    xs = mod.modulated_structure(uc, ssg, atoms)
+    xs.dispersion = {"Cu": (0.3, 1.2)}
+    h, m = reflections(xs, d_min=1.6, m_max=2)
+    flags = {"site": True, "adp": True, "modulation": True, "occ_waves": True, "adp_waves": True,
+             "crenel": True, "legendre": True, "xharm": True, "u_xharm": True, "scale": True}
+    ref = mod.calculator(h, m)
+    ref._share_classes = False
+    fr, sr, dr = ref.compute(xs, flags, gradients=True)
+    calc = mod.calculator(h, m)
+    for k in range(2):        # the second call reads the kept arrays
+      f, sq, d = calc.compute(xs, flags, gradients=True)
+      worst = max(worst, np.max(np.abs(f - fr)) / np.max(np.abs(fr)), np.max(np.abs(d - dr)) / np.max(np.abs(dr)))
+    # a new q, cell and dispersion must not be served the kept arrays
+    for change in ("q", "cell", "dispersion"):
+      if change == "q":
+        xs.ssg = mod.superspace_group(xs.ssg.basic, np.array(q) * 1.01 if q[0] else (0.0, 0.0, 0.31))
+      elif change == "cell":
+        xs.unit_cell = uctbx.unit_cell([v * (1.01 if i < 3 else 1) for i, v in enumerate(cell)])
+      else:
+        xs.dispersion = {"Cu": (0.1, 2.0)}
+      f1 = calc.compute(xs)[0]
+      f2 = mod.calculator(h, m).compute(xs)[0]
+      assert np.array_equal(f1, f2), (symbol, change)
+  assert worst < 1e-12, worst
+  print("  shared x4 sums and kept arrays = every operation on its own: F and gradients to %.1e; rebuilt on a new"
+        " q, cell or dispersion" % worst)
+
+
 def run():
   test_superspace_closure()
   test_main_reflections_match_cctbx()
   test_bessel_single_harmonic()
   test_gradients_finite_difference()
+  test_calculator_equivalence()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()
@@ -641,6 +737,7 @@ def run():
   test_reflection_statistics()
   test_change_of_basis_invariant()
   test_rank_by_absences()
+  test_rank_by_absences_equivalence()
   test_recovery()
   test_average_constraints_and_restraints()
   test_aspherical_table()

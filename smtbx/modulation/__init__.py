@@ -284,13 +284,14 @@ class superspace_group(object):
   and an inconsistent choice raises ValueError.
   """
 
-  def __init__(self, space_group, q, taus=None, tol=1e-5):
+  def __init__(self, space_group, q, taus=None, tol=1e-5, _gens=None, _em=None):
     self.basic = space_group
     self.q = np.asarray(q, dtype=float)
     self.taus = dict(taus or {})
-    em = {op.as_xyz(): (op, e, m) for op, e, m in eps_and_m(space_group, q, tol)}
+    # _gens, _em: what candidate_superspace_groups has worked out once for all its candidates
+    em = _em if _em is not None else {op.as_xyz(): (op, e, m) for op, e, m in eps_and_m(space_group, q, tol)}
     self.generators = []
-    for g in _generators(space_group):
+    for g in (_gens if _gens is not None else _generators(space_group)):
       op, e, m = em[g.as_xyz()]
       r = np.array(op.r().as_double()).reshape(3, 3)
       self.generators.append(superspace_operator(r, op.t().as_double(), e, m, self.taus.get(g.as_xyz(), 0.0),
@@ -389,7 +390,8 @@ def candidate_superspace_groups(space_group, q, tau_values=(0.0, 0.5)):
   shortcut: tau_values (0, 1/2) misses the 1/3, 1/4, 1/6 of 3-, 4- and 6-fold axes with eps = +1; pass them.
   """
   gens = _generators(space_group)
-  em = {op.as_xyz(): e for op, e, m in eps_and_m(space_group, q)}
+  em3 = {op.as_xyz(): (op, e, m) for op, e, m in eps_and_m(space_group, q)}
+  em = {k: v[1] for k, v in em3.items()}
   first_inv = next((g.as_xyz() for g in gens if em[g.as_xyz()] == -1), None)
   free = [g.as_xyz() for g in gens if g.as_xyz() != first_inv]
   out = []
@@ -399,7 +401,7 @@ def candidate_superspace_groups(space_group, q, tau_values=(0.0, 0.5)):
       taus[f] = tau_values[kk % len(tau_values)]
       kk //= len(tau_values)
     try:
-      out.append(superspace_group(space_group, q, taus))
+      out.append(superspace_group(space_group, q, taus, _gens=gens, _em=em3))
     except ValueError:
       continue
   return out
@@ -410,17 +412,39 @@ def rank_by_absences(groups, h, m, i_obs, sig, n_sigma=3.0):
 
   Ties go to more predicted absences (the more specific group), then to fewer non-zero tau.
   """
+  h = np.asarray(h, dtype=float).reshape(-1, 3)
+  m = np.asarray(m, dtype=float).ravel()
+  strong = np.asarray(i_obs, dtype=float) > n_sigma * np.asarray(sig, dtype=float)
+  fixed = {}     # point part (R, M, eps) -> which (h, m) it leaves alone: shared by every candidate
   ranked = []
   for g in groups:
-    viol = n_abs = 0
-    for hh, mm, ii, ss in zip(h, m, i_obs, sig):
-      if g.is_sys_absent(hh, mm):
-        n_abs += 1
-        if ii > n_sigma * ss:
-          viol += 1
-    ranked.append((viol, -n_abs, sum(1 for op in g.generators if op.tau), g))
+    absent = _absent_mask(g, h, m, fixed)
+    ranked.append((int(np.sum(absent & strong)), -int(np.sum(absent)), sum(1 for op in g.generators if op.tau), g))
   ranked.sort(key=lambda x: x[:3])
   return [(v, -n, g) for v, n, _, g in ranked]
+
+
+def _absent_mask(g, h, m, fixed=None):
+  """superspace_group.is_sys_absent for every (h, m) at once, in the same arithmetic: (h, m) fixed by an operation's
+  point part, (h R + m M, eps m) = (h, m), with h.t + m tau not an integer. fixed caches the first test by point
+  part across groups that differ in t and tau only."""
+  out = np.zeros(len(m), dtype=bool)
+  for op in g.ops:
+    key = (op.r.tobytes(), op.m.tobytes(), op.eps)
+    f = None if fixed is None else fixed.get(key)
+    if f is None:
+      hp = h.dot(op.r) + np.outer(m, op.m)
+      # np.allclose(hp, h) and eps m == m, row by row
+      f = np.all(np.abs(hp - h) <= 1e-8 + 1e-5 * np.abs(h), axis=1) & (op.eps * m == m)
+      if fixed is not None:
+        fixed[key] = f
+    if not f.any():
+      continue
+    hs, ms = h[f], m[f]
+    ph = ((hs[:, 0] * op.t[0] + hs[:, 1] * op.t[1]) + hs[:, 2] * op.t[2] + ms * op.tau) % 1.0
+    hit = (ph > 1e-6) & (ph < 1 - 1e-6)
+    out[np.flatnonzero(f)[hit]] = True
+  return out
 
 
 # ---------------------------------------------------------------------------
@@ -705,6 +729,10 @@ class calculator(object):
     self.n_x4 = n_x4
     self.table, self._table_f = table, {}
     self.threads = threads   # None: one per CPU, capped by the atom count and a 2 GB working set
+    # what depends on the reflections, q, the operations, the cell and the dispersion only, kept across the
+    # compute() calls of a refinement; rebuilt when any of those changes (_invariant_key)
+    self._invariants = (None, None)
+    self._share_classes = True   # False: every operation evaluates its own x4 sums (the reference path)
 
   def table_indices(self, ssg):
     """The rows a NoSpherA2 table needs for these reflections (-hkl_scale TABLE_SCALE): round(TABLE_SCALE S R)
@@ -715,20 +743,67 @@ class calculator(object):
     first = keys[np.arange(len(keys)), np.argmax(keys != 0, axis=1)]
     return np.unique(keys * np.sign(first)[:, None], axis=0)
 
-  def compute(self, xs, flags=None, gradients=False):
-    flags = _flags(flags)
+  @staticmethod
+  def _invariant_key(xs):
+    ops = tuple((op.r.tobytes(), op.t.tobytes(), op.m.tobytes(), op.eps, op.tau) for op in xs.ssg.ops)
+    return (tuple(xs.q), ops, tuple(xs.unit_cell.parameters()), tuple(sorted(xs.dispersion.items())),
+            tuple(sorted(set(a.scattering_type for a in xs.atoms))))
+
+  def _key(self, xs):
+    return self._invariant_key(xs) + (self._share_classes, self.radiation)
+
+  def _per_operation(self, xs):
+    """s, |s|^2, the form factors and, per operation, the reflection arrays atom_sum reads: unchanged as long as
+    _invariant_key is, so a refinement builds them once."""
+    key = self._key(xs)
+    if self._invariants[0] == key:
+      return self._invariants[1]
     q = xs.q
     s_vec = self.h + np.outer(self.m, q)
     g6 = xs.unit_cell.reciprocal_metrical_matrix()
     g = np.array([[g6[0], g6[3], g6[4]], [g6[3], g6[1], g6[5]], [g6[4], g6[5], g6[2]]])
     s_sq = np.einsum("ni,ij,nj->n", s_vec, g, s_vec)
-    tab = None
+    ff = None
     if self.table is None:
       f0 = _form_factors([a.scattering_type for a in xs.atoms], np.sqrt(s_sq) / 2, self.radiation)
       dispersion = xs.dispersion if self.radiation == "xray" else {}
       ff = {t: f + complex(*dispersion.get(t, (0.0, 0.0))) for t, f in f0.items()}
-    else:
-      key = (tuple(q), tuple(op.xyz for op in xs.ssg.ops), tuple(a.label for a in xs.atoms))
+    ops = []
+    for op in xs.ssg.ops:
+      sp = s_vec.dot(op.r)
+      q6 = np.column_stack([sp[:, 0] ** 2, sp[:, 1] ** 2, sp[:, 2] ** 2,
+                            2 * sp[:, 0] * sp[:, 1], 2 * sp[:, 0] * sp[:, 2], 2 * sp[:, 1] * sp[:, 2]])
+      # hp, mp, sp, ph0, q6, and the two factors the gradients multiply by: 2 pi i sp and -2 pi^2 q6
+      ops.append((self.h.dot(op.r) + np.outer(self.m, op.m), op.eps * self.m, sp, self.h.dot(op.t) + self.m * op.tau,
+                  q6, (1j * TWO_PI) * sp, -TWO_PI_SQ * q6))
+    # e(x4) = exp(2 pi i (S R.u(x4) + eps m x4)) depends on an operation only through (R, eps, M): operations
+    # that differ in t and tau alone (centring, screws, glides) have the same e, and (-R, -eps, -M) the complex
+    # conjugate. classes[k] = (the first operation with that e or its conjugate, conjugate or not)
+    first, classes = {}, []
+    for k, op in enumerate(xs.ssg.ops):
+      key_p = (op.r.tobytes(), op.eps, op.m.tobytes())
+      key_m = ((-op.r).tobytes(), -op.eps, (-op.m + 0.0).tobytes())
+      if not self._share_classes:
+        classes.append((k, False))
+      elif key_p in first:
+        classes.append((first[key_p], False))
+      elif key_m in first:
+        classes.append((first[key_m], True))
+      else:
+        first[key_p] = k
+        classes.append((k, False))
+    value = (s_vec, s_sq, ff, ops, classes)
+    self._invariants = (key, value)
+    return value
+
+  def compute(self, xs, flags=None, gradients=False):
+    flags = _flags(flags)
+    q = xs.q
+    s_vec, s_sq, ff, ops, classes = self._per_operation(xs)
+    tab = None
+    if self.table is not None:
+      # by the rotations, not op.xyz: every operation but the generators has an empty xyz
+      key = (tuple(q), tuple(op.r.tobytes() for op in xs.ssg.ops), tuple(a.label for a in xs.atoms))
       if key not in self._table_f:
         cols = self.table.columns(xs)
         self._table_f = {key: [self.table.lookup(s_vec.dot(op.r), cols) for op in xs.ssg.ops]}
@@ -763,69 +838,39 @@ class calculator(object):
       pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
                   1.0 / at.crenel[1] if at.crenel else 1.0))
       extra.append(_local_tables(at, x4, sin_t, cos_t) if gradients else None)
-    ops = []
-    for op in xs.ssg.ops:
-      sp = s_vec.dot(op.r)
-      ops.append((self.h.dot(op.r) + np.outer(self.m, op.m), op.eps * self.m, sp, self.h.dot(op.t) + self.m * op.tau,
-                  np.column_stack([sp[:, 0] ** 2, sp[:, 1] ** 2, sp[:, 2] ** 2,
-                                   2 * sp[:, 0] * sp[:, 1], 2 * sp[:, 0] * sp[:, 2], 2 * sp[:, 1] * sp[:, 2]])))
 
     def atom_sum(ia):
       """One atom's share of F over every operation; it touches only its own gradient blocks."""
       at = xs.atoms[ia]
       x4, wt, sin_t, cos_t, disp, p, uw, dp_docc = pre[ia]
       pw = wt * p      # node weights go into the K-vectors, not onto the (N, K) block
+      ex = extra[ia]
       out = np.zeros(nref, dtype=complex)
       th, e = np.empty((nref, len(x4))), np.empty((nref, len(x4)), dtype=complex)
-      for iop, (hp, mp, sp, ph0, q6) in enumerate(ops):
+      sums = {}
+
+      def x4_sums(k):
+        """Every sum over the x4 nodes an operation needs, from its e: the structure factor's and the gradients'."""
+        hp, mp, sp, ph0, q6, isp, dw6 = ops[k]
         np.dot(sp, disp.T, out=th)
-        th += np.outer(mp, x4)
-        th *= TWO_PI
+        np.add(th, np.outer(mp, x4), out=th)       # in place: th and e are the enclosing function's buffers
+        np.multiply(th, TWO_PI, out=th)
         np.cos(th, out=e.real)   # 1.5x faster than exp(1j th) on (17754, 32), the same bits
         np.sin(th, out=e.imag)
         if uw is not None:
-          e *= np.exp(-TWO_PI_SQ * q6.dot(uw.T))
-        if at.u_star is None:
-          t0 = np.exp(-TWO_PI_SQ * at.u_iso * s_sq)
-        else:
-          t0 = np.exp(-TWO_PI_SQ * q6.dot(at.u_star))
-        f_at = ff[at.scattering_type] if tab is None else tab[iop][:, ia]
-        base = at.site_weight * f_at * t0 * np.exp(1j * TWO_PI * (ph0 + hp.dot(at.site)))
-        c = base * e.dot(pw)
-        out += c
+          np.multiply(e, np.exp(dw6.dot(uw.T)), out=e)
+        r = {"pw": e.dot(pw)}
         if gradients:
-          gr = grads[ia]
-          gr["site"] += (1j * TWO_PI) * c[:, None] * hp
-          if at.u_star is None:
-            gr["adp"][:, 0] += c * (-TWO_PI_SQ * s_sq)
-          else:
-            gr["adp"] += c[:, None] * (-TWO_PI_SQ * q6)
-          gr["occ"] += base * e.dot(wt) * dp_docc
-          ps, pc = e.dot((pw * sin_t).T), e.dot((pw * cos_t).T)                       # (N, n_max)
-          for n in range(at.n_harmonics):
-            gr["a"][:, n, :] += (1j * TWO_PI) * (base * ps[:, n])[:, None] * sp
-            gr["b"][:, n, :] += (1j * TWO_PI) * (base * pc[:, n])[:, None] * sp
+          r["wt"] = e.dot(wt)
+          r["ps"], r["pc"] = e.dot((pw * sin_t).T), e.dot((pw * cos_t).T)          # (N, n_max)
           if len(at.occ_sin):
-            es, ec = e.dot((wt * sin_t).T), e.dot((wt * cos_t).T)
-            for n in range(len(at.occ_sin)):
-              gr["os"][:, n] += base * es[:, n]
-              gr["oc"][:, n] += base * ec[:, n]
-          for n in range(len(at.u_sin)):
-            gr["us"][:, n, :] += (base * ps[:, n])[:, None] * (-TWO_PI_SQ * q6)
-            gr["uc"][:, n, :] += (base * pc[:, n])[:, None] * (-TWO_PI_SQ * q6)
-          ex = extra[ia]
+            r["es"], r["ec"] = e.dot((wt * sin_t).T), e.dot((wt * cos_t).T)
           if len(at.legendre):
-            pl = e.dot((pw * ex["leg"]).T)
-            for n in range(len(at.legendre)):
-              gr["leg"][:, n, :] += (1j * TWO_PI) * (base * pl[:, n])[:, None] * sp
+            r["pl"] = e.dot((pw * ex["leg"]).T)
           if len(at.xharm):
-            px = e.dot((pw * ex["xh"]).T)
-            for n in range(len(at.xharm)):
-              gr["xh"][:, n, :] += (1j * TWO_PI) * (base * px[:, n])[:, None] * sp
+            r["px"] = e.dot((pw * ex["xh"]).T)
           if len(at.u_xharm):
-            pu = e.dot((pw * ex["ux"]).T)
-            for n in range(len(at.u_xharm)):
-              gr["ux"][:, n, :] += (base * pu[:, n])[:, None] * (-TWO_PI_SQ * q6)
+            r["pu"] = e.dot((pw * ex["ux"]).T)
           if at.crenel:
             # d/dx4 of the integrand at a node, its local coordinate held: the phase through the Fourier and
             # sawtooth displacements and m x4, the Debye-Waller factor through the ADP waves, and p
@@ -834,9 +879,75 @@ class calculator(object):
               rate -= TWO_PI_SQ * q6.dot(ex["duw"].T)
             de = e * rate
             loc, dp = ex["loc"], ex["dp"]
-            gr["cren"][:, 0] += base * (de.dot(pw) + e.dot(wt * dp))
-            gr["cren"][:, 1] += base * (e.dot(wt * ex["p_waves"] * dp_docc) + de.dot(pw * loc)
-                                        + e.dot(wt * dp * loc))
+            r["c0"] = de.dot(pw) + e.dot(wt * dp)
+            r["c1"] = e.dot(wt * ex["p_waves"] * dp_docc) + de.dot(pw * loc) + e.dot(wt * dp * loc)
+        return r
+
+      # per class: the sums of base over its operations with the class's own e (plus) and with its conjugate
+      # (minus). Within a class sp, hp and 2 pi i sp change sign with the conjugate, q6 and the ADP factors do not,
+      # so every term is (B+ X - B- X*) or (B+ X + B- X*) times the class leader's factor.
+      b_plus, b_minus = {}, {}
+      for iop, (hp, mp, sp, ph0, q6, isp, dw6) in enumerate(ops):
+        k, conj = classes[iop]
+        if at.u_star is None:
+          t0 = np.exp(-TWO_PI_SQ * at.u_iso * s_sq)
+        else:
+          t0 = np.exp(dw6.dot(at.u_star))
+        f_at = ff[at.scattering_type] if tab is None else tab[iop][:, ia]
+        base = at.site_weight * f_at * t0 * np.exp(1j * TWO_PI * (ph0 + hp.dot(at.site)))
+        acc = b_minus if conj else b_plus
+        acc[k] = base if k not in acc else acc[k] + base
+      for k in sorted(set(b_plus) | set(b_minus)):
+        if k not in sums:
+          sums[k] = x4_sums(k)
+        S = sums[k]
+        hp, mp, sp, ph0, q6, isp, dw6 = ops[k]
+        bp = b_plus.get(k)
+        bm = b_minus.get(k)
+
+        def odd(key, cols=None):
+          """B+ X - B- X*: the terms whose factor changes sign with the conjugate (sp, hp)."""
+          x = S[key] if cols is None else S[key][:, :cols]
+          bpv = 0 if bp is None else (bp[:, None] if x.ndim == 2 else bp)
+          bmv = 0 if bm is None else (bm[:, None] if x.ndim == 2 else bm)
+          return bpv * x - bmv * np.conj(x)
+
+        def even(key, cols=None):
+          """B+ X + B- X*: the terms whose factor does not (q6, the ADP factors, occupancies)."""
+          x = S[key] if cols is None else S[key][:, :cols]
+          bpv = 0 if bp is None else (bp[:, None] if x.ndim == 2 else bp)
+          bmv = 0 if bm is None else (bm[:, None] if x.ndim == 2 else bm)
+          return bpv * x + bmv * np.conj(x)
+        c_even = even("pw")
+        out += c_even
+        if gradients:
+          gr = grads[ia]
+          gr["site"] += (1j * TWO_PI) * odd("pw")[:, None] * hp
+          if at.u_star is None:
+            gr["adp"][:, 0] += c_even * (-TWO_PI_SQ * s_sq)
+          else:
+            gr["adp"] += c_even[:, None] * dw6
+          gr["occ"] += even("wt") * dp_docc
+          nh, nu = at.n_harmonics, len(at.u_sin)
+          # every harmonic at once
+          gr["a"] += odd("ps", nh)[:, :, None] * isp[:, None, :]
+          gr["b"] += odd("pc", nh)[:, :, None] * isp[:, None, :]
+          if len(at.occ_sin):
+            no = len(at.occ_sin)
+            gr["os"] += even("es", no)
+            gr["oc"] += even("ec", no)
+          if nu:
+            gr["us"] += even("ps", nu)[:, :, None] * dw6[:, None, :]
+            gr["uc"] += even("pc", nu)[:, :, None] * dw6[:, None, :]
+          if len(at.legendre):
+            gr["leg"] += odd("pl")[:, :, None] * isp[:, None, :]
+          if len(at.xharm):
+            gr["xh"] += odd("px")[:, :, None] * isp[:, None, :]
+          if len(at.u_xharm):
+            gr["ux"] += even("pu")[:, :, None] * dw6[:, None, :]
+          if at.crenel:
+            gr["cren"][:, 0] += even("c0")
+            gr["cren"][:, 1] += even("c1")
       return out
 
     # numpy's ufuncs and dots release the GIL, so atoms run in threads; summed in atom order, so the result does
@@ -1235,11 +1346,12 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1
   sw = np.sqrt(w)
   history = []
   lam = damping
-  _, fc_sq, _ = calc.compute(xs)
-  chi = float(np.sum(w * (f_obs_sq - fc_sq) ** 2))   # + the weighted restraints once there are any
+  chi = None    # from the first gradient pass: the same F^2 a separate pass before the loop would give
   norm = None
   for cycle in range(cycles):
     _, fc_sq, d = calc.compute(xs, flags, gradients=True)
+    if chi is None:
+      chi = float(np.sum(w * (f_obs_sq - fc_sq) ** 2))   # + the weighted restraints once there are any
     r = sw * (f_obs_sq - fc_sq)
     j = _times_blocks(sw[:, None] * d, zb) if link is None else link.jacobian(sw[:, None] * d)
     jtj = j.T.dot(j)
