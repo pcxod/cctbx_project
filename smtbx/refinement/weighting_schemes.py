@@ -113,8 +113,20 @@ class _():
         if bin_count[i_bin] == 0:
           binned_chi_sq.append(np.zeros((9, 9)))
           continue
-        w = 1. / ((ssq + np.square(av * pb)) + bkv * pb)
-        binned_chi_sq.append(np.cumsum(w * d2, axis=2)[:, :, -1].T)
+        # a bin at a time, 256 reflections at a time: a whole large bin's
+        # 9 x 9 x n blocks fall out of cache, and at ~21k reflections that
+        # made this slower than the per-point C++ calls it replaced. Each
+        # chunk's first term takes the running sum, so the summation stays
+        # sequential and the result is the same bit for bit.
+        acc = None
+        for lo in range(0, pb.size, 256):
+          c_pb = pb[lo:lo+256]
+          w = 1. / ((ssq[lo:lo+256] + np.square(av * c_pb)) + bkv * c_pb)
+          wd2 = w * d2[lo:lo+256]
+          if acc is not None:
+            wd2[:, :, 0] += acc
+          acc = np.cumsum(wd2, axis=2)[:, :, -1]
+        binned_chi_sq.append(acc.T)
       min_variance = 9e9
       j_min, k_min = (0, 0)
       for j in range(9):
