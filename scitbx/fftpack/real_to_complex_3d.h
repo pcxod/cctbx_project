@@ -5,7 +5,18 @@
 #include <scitbx/fftpack/real_to_complex.h>
 #include <omptbx/omp_or_stubs.h>
 
-#define SCITBX_FFTPACK_REAL_TO_COMPLEX_3D_NO_PRAGMA_OMP
+// Commented out to let the pragmas below run, as complex_to_complex_2d.h:8
+// has had them all along. They arrived with the openmp_experiments merge in
+// 2008 and were switched off in the same commit; nothing since has touched
+// them. The two transforms are a third of a mask cycle on a protein grid.
+//
+// The parallel regions are safe as written: in forward() the first omp for
+// writes only map(ix,*,*) and the second only map(*,iy,*); in backward() the
+// first writes map(*,*,2*iz..2*iz+1) and the second map(ix,*,*). Disjoint
+// every time, and each thread gets its own slice of the scratch buffer. No
+// reduction and no reassociation, so the result is bit-identical - which is
+// checked, not assumed, against the previous build.
+//#define SCITBX_FFTPACK_REAL_TO_COMPLEX_3D_NO_PRAGMA_OMP
 
 namespace scitbx { namespace fftpack {
 
