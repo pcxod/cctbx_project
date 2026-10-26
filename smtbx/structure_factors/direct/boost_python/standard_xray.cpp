@@ -199,6 +199,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
           .def("is_spherical", &wt::is_spherical)
           .def("get_full", get_full, (arg("scatterer_index"), arg("h")))
           .def("scatterers_not_in_table", &wt::scatterers_not_in_table)
+          .def("records_not_in_structure", &wt::records_not_in_structure)
+          .def("records_moved_by_symmetry", &wt::records_moved_by_symmetry)
           ;
       }
     };
@@ -258,7 +260,10 @@ namespace smtbx { namespace structure_factors { namespace direct {
               arg("scattering_type_registry"),
               // the Miller indices this table will ever be asked for; empty keeps
               // every row, which is what it did before
-              arg("wanted") = af::shared<cctbx::miller::index<> >()),
+              arg("wanted") = af::shared<cctbx::miller::index<> >(),
+              // a .tshb that misses atoms is an error unless this is set;
+              // tables fall back on spherical form factors as before
+              arg("allow_spherical_fallback") = false),
             return_value_policy<manage_new_object>())
           .staticmethod("build_with_fallback")
           .def("build_lookup_based_for_tests", &wt::build_lookup_based_for_tests,

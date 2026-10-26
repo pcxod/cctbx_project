@@ -885,6 +885,21 @@ namespace smtbx { namespace structure_factors { namespace direct {
         return af::shared<std::size_t>();
       }
 
+      /* The other half of a mismatch: entries of a density file (.tshb)
+      that describe no scatterer of the structure, for the caller to report.
+      Empty for everything else.
+      */
+      virtual af::shared<std::string> records_not_in_structure() const {
+        return af::shared<std::string>();
+      }
+
+      /* Entries of a density file found on a symmetry image of the site they
+      were made for (move, compaq, inv) and rotated there, with the operation.
+      */
+      virtual af::shared<std::string> records_moved_by_symmetry() const {
+        return af::shared<std::string>();
+      }
+
       virtual scatterer_contribution *raw_fork() const = 0;
     };
 

@@ -7,7 +7,10 @@ What is checked:
   out by hand;
 - that spherical atoms written as .tshb give the spherical structure factors
   and gradients, with and without atoms missing from the file;
-- that a least-squares build with them is the spherical one.
+- that a least-squares build with them is the spherical one;
+- version 4 ids, merging and errors; atoms moved onto a symmetry image
+  (rotated shells), non-integer Slater powers, disorder gradients, and that
+  damaged files are refused rather than crash.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -229,7 +232,8 @@ def exercise_spherical_equivalence():
     write_spherical(xs, path, skip)
     if skip:
       c = build_with_fallback(xs.unit_cell(), xs.scatterers(), path,
-        xs.space_group(), True, xs.scattering_type_registry())
+        xs.space_group(), True, xs.scattering_type_registry(),
+        allow_spherical_fallback=True)
       assert list(c.scatterers_not_in_table()) == list(skip)
     else:
       c = build(xs.unit_cell(), xs.scatterers(), path, xs.space_group(), True)
@@ -302,6 +306,461 @@ def exercise_spherical_records():
   assert worst < 1e-8, worst
   print("\tGaussian, Slater and form factor records against radial integrals: %.1e" % worst)
 
+def disordered_setup():
+  """ P2_1/c, two PART 0 atoms and one disordered site whose two parts share
+  the label C3 - which only an id tells apart. """
+  cs = crystal.symmetry((7.1, 9.3, 11.2, 90, 103.4, 90), "P 1 21/c 1")
+  spec = [("O1", "O", (0.13, 0.27, 0.41), 0, 1.0),
+          ("N2", "N", (0.31, 0.12, 0.18), 0, 1.0),
+          ("C3", "C", (0.62, 0.08, 0.77), 1, 0.6),
+          ("C3", "C", (0.66, 0.11, 0.73), 2, 0.4)]
+  scs = []
+  for label, t, site, part, occ in spec:
+    sc = xray.scatterer(label, site, u=0, occupancy=occ, scattering_type=t)
+    sc.set_part(part)
+    scs.append(sc)
+  return xray.structure(crystal_symmetry=cs, scatterers=flex.xray_scatterer(scs))
+
+
+def keyed(xs, j, record):
+  sc = xs.scatterers()[j]
+  return record._replace(label=sc.label, key=tshb.scatterer_id(sc), part=sc.get_part())
+
+
+def form_factors_of(record, cs, h):
+  """ What a lone label-keyed record gives, in P1 - the reference. """
+  path = os.path.join(tempfile.mkdtemp(), "one.tshb")
+  tshb.write(path, [record._replace(label="X", key=None, part=0)])
+  one = xray.structure(crystal_symmetry=crystal.symmetry(cs.unit_cell(), "P1"),
+    scatterers=flex.xray_scatterer([xray.scatterer("X", (0, 0, 0), u=0, scattering_type="C")]))
+  return build(one.unit_cell(), one.scatterers(), path, one.space_group(), True).get_full(0, h)[0]
+
+
+def exercise_version_4_ids_and_merge():
+  """ Per-part files keyed by scatterer id, merged with += (first wins), read
+  back onto a model whose atoms have since moved: every atom gets its own
+  record, the PART 0 atoms the first part's, the two C3 theirs. """
+  rng = random.Random(7)
+  xs = disordered_setup()
+  d = tempfile.mkdtemp()
+  # each part's density: its own PART 0 atoms (different, to show which is
+  # kept) and its own C3
+  part1 = tshb.tshb_block([keyed(xs, j, random_atom("x", 2, rng)._replace(z=z))
+                           for j, z in ((0, 8), (1, 7), (2, 6))],
+                          header={"COVERAGE": "partial", "PARTS": "0 1"})
+  part2 = tshb.tshb_block([keyed(xs, j, random_atom("x", 2, rng)._replace(z=z))
+                           for j, z in ((0, 8), (1, 7), (3, 6))],
+                          header={"COVERAGE": "partial", "PARTS": "0 2"})
+  part1.write(os.path.join(d, "p1.tshb"))
+  part2.write(os.path.join(d, "p2.tshb"))
+  joint = tshb.tshb_block.read(os.path.join(d, "p1.tshb"))
+  joint += tshb.tshb_block.read(os.path.join(d, "p2.tshb"))
+  joint.header["COVERAGE"] = "complete"
+  joint.header["PARTS"] = "0 1 2"
+  assert len(joint) == 4, len(joint)
+  same = lambda a, b: (a.label, bytes(a.key), a.part, a.z, [(x.l, x.alpha, list(x.c)) for x in a.shells]) == \
+                      (b.label, bytes(b.key), b.part, b.z, [(x.l, x.alpha, list(x.c)) for x in b.shells])
+  assert same(joint.records[0], part1.records[0])    # first wins
+  assert not same(joint.records[0], part2.records[0])
+  path = os.path.join(d, "joint.tshb")
+  joint.write(path)
+  header, records = tshb.read(path)
+  assert header["COVERAGE"] == "complete"
+  assert [r.part for r in records] == [0, 0, 1, 2]
+  assert all(r.key == tshb.scatterer_id(xs.scatterers()[j])
+             for j, r in enumerate(records))
+  # the model refines on: every atom moves by ~0.03 A, so no id matches as it
+  # is and all four go by the position the id carries
+  moved = xs.deep_copy_scatterers()
+  for sc in moved.scatterers():
+    sc.site = tuple(x + 0.003 for x in sc.site)
+  expected = [part1.records[0], part1.records[1], part1.records[2], part2.records[2]]
+  worst = 0
+  for structure in (xs, moved):
+    c = build_with_fallback(structure.unit_cell(), structure.scatterers(), path,
+      structure.space_group(), True, structure.scattering_type_registry())
+    assert len(c.scatterers_not_in_table()) == 0
+    assert len(c.records_not_in_structure()) == 0
+    for h in [(1, 2, 3), (-2, 0, 4), (3, -5, 1)]:
+      for j, rec in enumerate(expected):
+        worst = max(worst, abs(c.get_full(j, h)[0] - form_factors_of(rec, xs, h)))
+  assert worst < 1e-12, worst
+  # Python merges like NoSpherA2: the + operator too, and a second += is a no-op
+  again = joint + part2
+  assert len(again) == 4 and all(same(a, b) for a, b in zip(again.records, joint.records))
+  print("\tversion 4: per-part files keyed by id, merged by +=, first wins,"
+        " matched by id and after a move by position: %.1e" % worst)
+
+
+def exercise_version_4_errors():
+  """ A key twice, two records on one atom, an atom with no record, a record
+  with no atom. """
+  rng = random.Random(8)
+  xs = disordered_setup()
+  d = tempfile.mkdtemp()
+  recs = [keyed(xs, j, random_atom("x", 1, rng)) for j in range(4)]
+  def expect_error(path, words, **kw):
+    try:
+      build_with_fallback(xs.unit_cell(), xs.scatterers(), path, xs.space_group(),
+        True, xs.scattering_type_registry(), **kw)
+    except RuntimeError as e:
+      for w in words:
+        assert w in str(e), (w, str(e))
+      return str(e)
+    raise AssertionError("no error for %s" % path)
+  # the same id twice
+  p = os.path.join(d, "dup.tshb")
+  tshb.write(p, recs + [recs[2]])
+  expect_error(p, ["twice", "C3"])
+  try:
+    tshb.tshb_block.read(p)
+    raise AssertionError("tshb_block.read accepted a repeated key")
+  except ValueError:
+    pass
+  # an id and a label resolving to one atom
+  p = os.path.join(d, "two.tshb")
+  tshb.write(p, recs + [recs[0]._replace(key=None)])
+  expect_error(p, ["resolve to the atom O1"])
+  # the second part's C3 missing: refused, named with its PART
+  p = os.path.join(d, "short.tshb")
+  tshb.write(p, recs[:3])
+  msg = expect_error(p, ["no density for 1 of 4 atoms", "C3(PART 2)"])
+  # ... unless the caller asks for the spherical stand-in
+  c = build_with_fallback(xs.unit_cell(), xs.scatterers(), p, xs.space_group(),
+    True, xs.scattering_type_registry(), allow_spherical_fallback=True)
+  assert list(c.scatterers_not_in_table()) == [3]
+  # a record for an atom the model no longer has: kept for the caller to report
+  gone = xray.scatterer("S9", (0.9, 0.9, 0.9), u=0, scattering_type="S")
+  p = os.path.join(d, "extra.tshb")
+  tshb.write(p, recs + [random_atom("S9", 0, rng)._replace(key=bytes(gone.get_id_big(0).to_bytes()))])
+  c = build_with_fallback(xs.unit_cell(), xs.scatterers(), p, xs.space_group(),
+    True, xs.scattering_type_registry())
+  extra = list(c.records_not_in_structure())
+  assert len(extra) == 1 and extra[0].startswith("S9 (id "), extra
+  print("\tversion 4 errors: repeated key, two records on one atom, unmatched record"
+        " reported, missing atom refused: '...%s'" % msg[msg.index("has no density"):])
+
+
+def exercise_spherical_only_atom_cached():
+  """ A Thakkar-filled atom: Slater and Gaussian records, no shells. Under the
+  orbit cache it folds to the single a_00, for X-ray and ED; the ED value
+  uses its Z. Cached, uncached and the analytic value agree. """
+  slaters = [(30.0, 0, 9.0), (4.0, 2, 3.5)]
+  gaussians = [(2.5, 3.0)]
+  rec = tshb.atom("X1", [], gaussians, slaters, z=6)
+  other = random_atom("X2", 3, random.Random(9))._replace(z=8)
+  d = tempfile.mkdtemp()
+  px, pe = os.path.join(d, "x.tshb"), os.path.join(d, "e.tshb")
+  tshb.write(px, [rec, other])
+  tshb.write(pe, [rec, other], header={"ED": "true"})
+  def f_x(s):
+    from scipy.integrate import quad
+    rho = lambda r: (sum(c*math.exp(-a*r*r) for c, a in gaussians)
+                     + sum(c*r**n*math.exp(-z*r) for c, n, z in slaters))
+    k = 2*math.pi*s
+    return quad(lambda r: 4*math.pi*r*r*rho(r)*math.sin(k*r)/(k*r), 0, 60, limit=400)[0]
+  worst = 0
+  for symbol in ("P 1 21/c 1", "F m -3 m"):
+    sgi = sgtbx.space_group_info(symbol)
+    cs = crystal.symmetry(sgi.any_compatible_unit_cell(volume=1500), space_group_info=sgi)
+    xs = xray.structure(crystal_symmetry=cs, scatterers=flex.xray_scatterer(
+      [xray.scatterer(a, (0.11, 0.23, 0.37), u=0, scattering_type="C") for a in ("X1", "X2")]))
+    for budget in ("0", None):
+      if budget is None: os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
+      else: os.environ["SMTBX_TSHB_CACHE_MB"] = budget
+      cx = build(cs.unit_cell(), xs.scatterers(), px, cs.space_group(), True)
+      ce = build(cs.unit_cell(), xs.scatterers(), pe, cs.space_group(), True)
+      os.environ.pop("SMTBX_TSHB_CACHE_MB", None)
+      for h in [(1, 1, 1), (2, 0, 0), (3, 1, 1), (1, 1, 1), (2, 0, 0)]:   # repeats hit
+        s = math.sqrt(cs.unit_cell().d_star_sq(h))
+        stl2 = (s/2)**2
+        fx0 = f_x(s)
+        fe0 = 0.023934*(6 - fx0)/stl2
+        for v in cx.get_full(0, h):
+          worst = max(worst, abs(v - fx0)/max(1, abs(fx0)))
+        for v in ce.get_full(0, h):
+          worst = max(worst, abs(v - fe0)/max(1, abs(fe0)))
+  assert worst < 1e-10, worst
+  print("\tspherical-only atom, cached and uncached, X-ray and ED (its Z): %.1e" % worst)
+
+
+def exercise_symmetry_moves():
+  """ Atoms moved onto a symmetry image after the .tshb was made (move,
+  compaq, inv): found there by id and rotated. The crystal is the same, so Fc
+  must not change; inv -f of a whole acentric structure turns Fc into its
+  conjugate. Two-fold operations are their own inverse and cannot tell the
+  rotation from its transpose, so 3-, 4- and -4-fold ones are there too, in
+  oblique cells. """
+  rng = random.Random(11)
+  def structure(cs, sites):
+    # not snapped onto a special position: the atom near a centre stays put
+    return xray.structure(special_position_settings=crystal.special_position_settings(
+      cs, min_distance_sym_equiv=0.1), scatterers=flex.xray_scatterer(
+      [xray.scatterer(l, site, u=0.02, scattering_type=t) for l, t, site in sites]))
+  def fc_of(xs, path, h_list):
+    c = build_with_fallback(xs.unit_cell(), xs.scatterers(), path, xs.space_group(),
+      True, xs.scattering_type_registry())
+    f = direct.f_calc_modulus_squared(xs, scatterer_contribution=c)
+    out = []
+    for h in h_list:
+      f.linearise(h); out.append(f.f_calc)
+    return c, out
+  sites = [("O1", "O", (0.13, 0.27, 0.41)), ("N2", "N", (0.31, 0.12, 0.18)),
+           ("C3", "C", (0.62, 0.08, 0.77))]
+  h_list = [(1, 2, 3), (-2, 0, 4), (3, -5, 1), (0, 1, 7), (4, 3, -6), (-5, 2, 2)]
+  cases = [
+    # 2_1 screw with a lattice translation, the inversion, the c-glide
+    ((7.1, 9.3, 11.2, 90, 103.4, 90), "P 1 21/c 1",
+     ["-x+1,y+1/2,-z+1/2", "-x,-y,-z", "x,-y+1/2,z+1/2+1"]),
+    # 3_1 and its square, hexagonal axes
+    ((8.3, 8.3, 12.1, 90, 90, 120), "P 31",
+     ["-y,x-y,z+1/3", "-x+y,-x,z+2/3", "-y+1,x-y,z+1/3"]),
+    # 4-fold and -4-fold (improper, not an involution)
+    ((9.1, 9.1, 6.7, 90, 90, 90), "P 4/n :2",
+     ["-y+1/2,x,z", "y+1/2,-x,-z+1", "-x,-y,-z"]),
+    # the cube's body diagonal
+    ((10.3, 10.3, 10.3, 90, 90, 90), "P 21 3",
+     ["z,x,y", "y+1/2,-z+1/2,-x", "x,y,z"]),
+  ]
+  # an atom 0.22 A from a centre, put on its image 0.44 A away: within the
+  # tolerance of where it was, but the image is nearer and must win
+  near_centre = [("O1", "O", (0.02, 0.01, 0.015)), ("N2", "N", (0.31, 0.12, 0.18)),
+                 ("C3", "C", (0.62, 0.08, 0.77))]
+  cases.append(((7.1, 9.3, 11.2, 80, 103.4, 95), "P -1", ["-x,-y,-z", "x,y,z", "x,y,z"],
+                near_centre))
+  worst = 0
+  for case in cases:
+    cell, sg, moves = case[:3]
+    cs = crystal.symmetry(cell, sg)
+    xs = structure(cs, case[3] if len(case) > 3 else sites)
+    path = os.path.join(tempfile.mkdtemp(), "before.tshb")
+    tshb.write(path, [keyed(xs, j, random_atom("x", 4, rng)._replace(z=8 - j))
+                      for j in range(3)])
+    moved = xs.deep_copy_scatterers()
+    for sc, op in zip(moved.scatterers(), moves):
+      sc.site = sgtbx.rt_mx(op)*sc.site
+    _, f0 = fc_of(xs, path, h_list)
+    c, f1 = fc_of(moved, path, h_list)
+    n_moved = len([op for op in moves if not sgtbx.rt_mx(op).is_unit_mx()])
+    assert len(c.records_moved_by_symmetry()) == n_moved, (sg, list(c.records_moved_by_symmetry()))
+    for a, b in zip(f0, f1):
+      worst = max(worst, abs(a - b)/abs(a))
+  # inv -f in P2_12_12_1 and in P3_1, which becomes P3_2 (no centre: the
+  # inversion composed with the group's operations): the enantiomer, Fc its
+  # conjugate. The two H of a CH2 swap places, as the riding constraint
+  # makes them after an improper operation: densities follow the sites.
+  with_h = sites + [("H4", "H", (0.70, 0.15, 0.80)), ("H5", "H", (0.55, 0.02, 0.83))]
+  for cell, sg in (((7.1, 9.3, 11.2, 90, 90, 90), "P 21 21 21"),
+                   ((8.3, 8.3, 12.1, 90, 90, 120), "P 31")):
+    cs = crystal.symmetry(cell, sg)
+    xs = structure(cs, with_h)
+    path = os.path.join(tempfile.mkdtemp(), "acentric.tshb")
+    tshb.write(path, [keyed(xs, j, random_atom("x", 3, rng)._replace(z=(8, 7, 6, 1, 1)[j]))
+                      for j in range(5)])
+    other_hand = cs.space_group_info().change_hand()
+    assert str(other_hand.type().change_of_hand_op()) == "-a,-b,-c"
+    inverted_sites = [(l, t, tuple(-x for x in site)) for l, t, site in with_h]
+    inverted_sites[3], inverted_sites[4] = (
+      ("H4",) + inverted_sites[4][1:], ("H5",) + inverted_sites[3][1:])
+    inverted = structure(crystal.symmetry(cell, space_group_info=other_hand),
+                         inverted_sites)
+    _, f0 = fc_of(xs, path, h_list)
+    c, f1 = fc_of(inverted, path, h_list)
+    assert len(c.records_moved_by_symmetry()) == 5
+    for a, b in zip(f0, f1):
+      worst = max(worst, abs(a.conjugate() - b)/abs(a))
+  assert worst < 1e-8, worst
+  print("\tsymmetry moves (2_1, -1, c, 3_1, 4, -4, body-diagonal 3, image nearer"
+        " than the site; inv -f, CH2 hydrogens swapped): Fc unchanged %.1e" % worst)
+
+
+def exercise_fractional_slater_n():
+  """ A Slater term with n = 1.5 (and -0.5), against the radial integral. """
+  from scipy.integrate import quad
+  slaters = [(3.0, 1.5, 2.7), (0.8, -0.5, 4.1), (1.2, 2, 3.3)]
+  path = os.path.join(tempfile.mkdtemp(), "half.tshb")
+  tshb.write(path, [tshb.atom("X1", [], (), slaters)])
+  cs = crystal.symmetry((20, 20, 20, 90, 90, 90), "P1")
+  xs = xray.structure(crystal_symmetry=cs, scatterers=flex.xray_scatterer(
+    [xray.scatterer("X1", (0, 0, 0), u=0, scattering_type="C")]))
+  c = build(cs.unit_cell(), xs.scatterers(), path, cs.space_group(), True)
+  rho = lambda r: sum(cc*r**n*math.exp(-z*r) for cc, n, z in slaters)
+  worst = 0
+  for h in [(0, 0, 0), (1, 0, 0), (3, 4, 0), (9, 7, 5), (20, 15, 11)]:
+    s = math.sqrt(sum(x*x for x in h))/20.
+    k = 2*math.pi*s
+    if k == 0:
+      f = quad(lambda r: 4*math.pi*r*r*rho(r), 0, 60, limit=400)[0]
+    else:
+      f = quad(lambda r: 4*math.pi*r*r*rho(r)*math.sin(k*r)/(k*r), 0, 60, limit=400)[0]
+    worst = max(worst, abs(c.get_full(0, h)[0] - f)/max(1, abs(f)))
+  assert worst < 1e-8, worst
+  print("\tSlater n = 1.5 and -0.5 against the radial integral: %.1e" % worst)
+
+
+def exercise_disorder_gradients():
+  """ PART 1/2 sharing one occupancy variable, with positions and ADPs, all
+  off one id-keyed .tshb: analytic gradients against finite differences, and
+  the normal matrix against the same densities written as a table. """
+  from cctbx import adptbx
+  from smtbx.refinement import least_squares, constraints
+  from smtbx.refinement.constraints import occupancy
+  import smtbx.utils
+  rng = random.Random(12)
+  xs = disordered_setup()
+  for sc in xs.scatterers():
+    sc.flags.set_use_u_iso(False); sc.flags.set_use_u_aniso(True)
+    sc.u_star = adptbx.u_cart_as_u_star(xs.unit_cell(), (0.02, 0.025, 0.03, 0.002, -0.001, 0.003))
+    sc.flags.set_grad_site(True); sc.flags.set_grad_u_aniso(True)
+    sc.flags.set_grad_occupancy(sc.get_part() != 0)
+  d = tempfile.mkdtemp()
+  records = [keyed(xs, j, random_atom("x", 3, rng)._replace(z=z)) for j, z in enumerate((8, 7, 6, 6))]
+  path = os.path.join(d, "dis.tshb")
+  tshb.write(path, records)
+  c = build_with_fallback(xs.unit_cell(), xs.scatterers(), path, xs.space_group(),
+    True, xs.scattering_type_registry())
+  # finite differences of |Fc|^2 against grad_observable, parameter by parameter
+  def observable(structure, h):
+    f = direct.f_calc_modulus_squared(structure, scatterer_contribution=c)
+    f.linearise(h)
+    return f.observable, list(f.grad_observable)
+  worst = 0
+  for h in [(1, 2, 3), (-2, 1, 4), (3, -3, 2)]:
+    y0, grad = observable(xs, h)
+    q = 0
+    for j, sc in enumerate(xs.scatterers()):
+      params = [("site", k, 1e-6) for k in range(3)] + [("u_star", k, 1e-7) for k in range(6)]
+      if sc.flags.grad_occupancy(): params.append(("occupancy", 0, 1e-6))
+      for kind, k, eps in params:
+        vals = []
+        for sign in (1, -1):
+          t = xs.deep_copy_scatterers()
+          s2 = t.scatterers()[j]
+          if kind == "site":
+            v = list(s2.site); v[k] += sign*eps; s2.site = tuple(v)
+          elif kind == "u_star":
+            v = list(s2.u_star); v[k] += sign*eps; s2.u_star = tuple(v)
+          else:
+            s2.occupancy += sign*eps
+          vals.append(observable(t, h)[0])
+        fd = (vals[0] - vals[1])/(2*eps)
+        worst = max(worst, abs(fd - grad[q])/max(1, abs(grad[q])))
+        q += 1
+    assert q == len(grad), (q, len(grad))
+  assert worst < 1e-5, worst
+  # the same densities as a table, keyed by the same ids
+  fo = xs.structure_factors(d_min=1.0).f_calc()
+  table = os.path.join(d, "dis.tsc")
+  ids = [sc.get_id_big(sc.get_part()).to_hex_string() for sc in xs.scatterers()]
+  rows = set()
+  for h in fo.indices():
+    for op in xs.space_group().smx():
+      r = op.r().num()
+      hr = tuple(sum(h[k]*r[3*k + cc] for k in range(3)) for cc in range(3))
+      rows.add(hr); rows.add(tuple(-v for v in hr))
+  with open(table, "w") as out:
+    out.write("TITLE: disorder\nSYMM: expanded\nSCATTERER_IDS: %s\nDATA:\n" % " ".join(ids))
+    for hr in sorted(rows):
+      vals = [c.get_full(j, hr)[0] for j in range(4)]
+      out.write("%d %d %d %s\n" % (hr + (" ".join("%.17g,%.17g" % (v.real, v.imag) for v in vals),)))
+  fo_sq = fo.norm()
+  fo_sq = fo_sq.customized_copy(sigmas=flex.double(fo_sq.size(), 1.))
+  fo_sq.set_observation_type_xray_intensity()
+  def normal_matrix(file_name):
+    rep = constraints.reparametrisation(structure=xs,
+      constraints=[occupancy.dependent_occupancy([(2, 1.0)], [(3, 1.0)])],
+      connectivity_table=smtbx.utils.connectivity_table(xs))
+    ls = least_squares.crystallographic_ls(fo_sq.as_xray_observations(), rep,
+      weighting_scheme=least_squares.unit_weighting(), may_parallelise=False)
+    contribution = build_with_fallback(xs.unit_cell(), xs.scatterers(), file_name,
+      xs.space_group(), True, xs.scattering_type_registry())
+    ls.one_h_linearisation = least_squares.f_calc_function_default(
+      direct.f_calc_modulus_squared(xs, scatterer_contribution=contribution))
+    ls.build_up()
+    return ls.n_parameters, ls.normal_matrix_packed_u().deep_copy()
+  n_a, a = normal_matrix(path)
+  n_b, b = normal_matrix(table)
+  assert n_a == n_b
+  dm = flex.max(flex.abs(a - b))/flex.max(flex.abs(a))
+  assert dm < 1e-12, dm
+  print("\tdisorder, shared occupancy + sites + ADPs: gradients against finite"
+        " differences %.1e; normal matrix (%d parameters) against the table %.1e"
+        % (worst, n_a, dm))
+
+
+def exercise_corrupt_files():
+  """ Truncated at every byte, bytes flipped at random, absurd counts: every
+  version reads to a Python exception, never a crash or a huge allocation. """
+  import struct
+  rng = random.Random(13)
+  xs = disordered_setup()
+  d = tempfile.mkdtemp()
+  base = [keyed(xs, j, random_atom("x", 2, rng)._replace(
+            slaters=[(0.3, 1, 2.5)], gaussians=[(0.2, 3.0)], exponentials=[(0.1, 0.5)], z=6))
+          for j in range(4)]
+  files = {}
+  for version in (1, 2, 3, 4):
+    if version == 1:
+      recs = [r._replace(key=None, part=0, slaters=(), gaussians=(), exponentials=(), z=0) for r in base]
+    elif version == 2:
+      recs = [r._replace(key=None, part=0, z=0) for r in base]
+    elif version == 3:
+      recs = [r._replace(key=None, part=0) for r in base]
+    else:
+      recs = base
+    if version < 4:     # label-keyed: the two C3 need distinct labels
+      recs = [r._replace(label="A%d" % j) for j, r in enumerate(recs)]
+    p = os.path.join(d, "v%d.tshb" % version)
+    tshb.write(p, recs)
+    files[version] = open(p, "rb").read()
+  bad = os.path.join(d, "bad.tshb")
+  def attempt(data):
+    with open(bad, "wb") as f:
+      f.write(data)
+    try:
+      build_with_fallback(xs.unit_cell(), xs.scatterers(), bad, xs.space_group(),
+        True, xs.scattering_type_registry(), allow_spherical_fallback=True)
+      return 0
+    except (RuntimeError, ValueError, IndexError, OverflowError) as e:
+      return 1
+  n_cases = n_errors = n_truncations = 0
+  for version, data in files.items():
+    for cut in range(len(data)):            # every truncation
+      n_errors += attempt(data[:cut]); n_cases += 1; n_truncations += 1
+    for t in range(300):                    # random byte flips
+      b = bytearray(data)
+      for k in range(rng.randint(1, 4)):
+        b[rng.randrange(len(b))] = rng.randrange(256)
+      attempt(bytes(b)); n_cases += 1
+    # absurd counts: every u32 field in turn set to 0xffffffff and 0x7fffffff
+    for pos in range(4, len(data) - 3):
+      for v in (0xffffffff, 0x7fffffff):
+        b = bytearray(data); b[pos:pos + 4] = struct.pack("<I", v)
+        attempt(bytes(b)); n_cases += 1
+    # NaN and infinity over every 8 bytes in turn
+    for pos in range(8, len(data) - 7):
+      for v in (float("nan"), float("inf")):
+        b = bytearray(data); b[pos:pos + 8] = struct.pack("<d", v)
+        attempt(bytes(b)); n_cases += 1
+  assert n_errors == n_truncations, (n_errors, n_truncations)
+  # NaN or infinity in exactly one number of a record: refused, whichever
+  n_non_finite = 0
+  record = base[0]
+  shells = list(record.shells)
+  for v in (float("nan"), float("inf"), -float("inf")):
+    variants = [
+      dict(shells=[shells[0]._replace(alpha=v)] + shells[1:]),
+      dict(shells=[shells[0]] + [shells[1]._replace(c=[v] + list(shells[1].c[1:]))] + shells[2:]),
+      dict(gaussians=[(v, 3.0)]), dict(gaussians=[(0.2, v)]),
+      dict(slaters=[(v, 1, 2.5)]), dict(slaters=[(0.3, v, 2.5)]), dict(slaters=[(0.3, 1, v)]),
+      dict(exponentials=[(v, 0.5)]), dict(exponentials=[(0.1, v)])]
+    for change in variants:
+      tshb.write(bad, [record._replace(**change)] + base[1:])
+      assert attempt(open(bad, "rb").read()[:]) == 1, change
+      n_non_finite += 1
+  print("\tcorrupt files, versions 1-4: %d cases, no crash; all %d truncations"
+        " and %d NaN/inf numbers refused" % (n_cases, n_truncations, n_non_finite))
+
 
 def run():
   exercise_transform_against_numerical_integral()
@@ -309,6 +768,13 @@ def run():
   exercise_symmetry_and_structure_factor()
   exercise_electron_diffraction()
   exercise_cache()
+  exercise_spherical_only_atom_cached()
+  exercise_version_4_ids_and_merge()
+  exercise_version_4_errors()
+  exercise_symmetry_moves()
+  exercise_fractional_slater_n()
+  exercise_disorder_gradients()
+  exercise_corrupt_files()
   exercise_spherical_equivalence()
   exercise_least_squares_build()
   print("OK")

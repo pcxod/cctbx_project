@@ -1126,6 +1126,14 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       return result;
     }
 
+    virtual af::shared<std::string> records_not_in_structure() const {
+      return tabulated_->records_not_in_structure();
+    }
+
+    virtual af::shared<std::string> records_moved_by_symmetry() const {
+      return tabulated_->records_moved_by_symmetry();
+    }
+
     virtual base_type *raw_fork() const {
       return new partially_tabulated(*this);
     }
@@ -1147,7 +1155,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           af::shared<cctbx::miller::index<> >())
     {
       return build_impl(u_cell, scatterers, file_name, space_group,
-        anomalous_flag, 0, wanted);
+        anomalous_flag, 0, wanted, false);
     }
 
     static direct::one_scatterer_one_h::scatterer_contribution<FloatType> *
@@ -1159,10 +1167,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         bool anomalous_flag,
         xray::scattering_type_registry const &scattering_type_registry,
         af::shared<cctbx::miller::index<> > const &wanted =
-          af::shared<cctbx::miller::index<> >())
+          af::shared<cctbx::miller::index<> >(),
+        bool allow_spherical_fallback = false)
     {
       return build_impl(u_cell, scatterers, file_name, space_group,
-        anomalous_flag, &scattering_type_registry, wanted);
+        anomalous_flag, &scattering_type_registry, wanted,
+        allow_spherical_fallback);
     }
 
     static direct::one_scatterer_one_h::scatterer_contribution<FloatType> *
@@ -1174,22 +1184,43 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         bool anomalous_flag,
         xray::scattering_type_registry const *scattering_type_registry,
         af::shared<cctbx::miller::index<> > const &wanted =
-          af::shared<cctbx::miller::index<> >())
+          af::shared<cctbx::miller::index<> >(),
+        bool allow_spherical_fallback = false)
     {
       if (boost::algorithm::iends_with(file_name, ".tshb")) {
         // densities, not tabulated values: any reflection can be evaluated,
         // so `wanted` has nothing to filter
         boost::shared_ptr<harmonic_expansion_data<FloatType> > densities(
-          new harmonic_expansion_data<FloatType>(scatterers, file_name));
+          new harmonic_expansion_data<FloatType>(u_cell, scatterers, file_name,
+            space_group));
+        af::shared<bool> const &covered = densities->covered;
+        /* A density file is meant to describe the whole model, every PART
+        and the atoms a Thakkar fill supplies included. An atom it misses is
+        refused, with every such atom named, rather than given a spherical
+        form factor quietly: that is how a file written for one PART alone
+        refined the others as IAM. allow_spherical_fallback restores the
+        spherical stand-in, for a caller that asks for it.
+        */
+        std::string missing;
+        std::size_t n_missing = 0;
+        for (std::size_t i = 0; i < covered.size(); i++) {
+          if (covered[i]) continue;
+          n_missing++;
+          missing += " " + scatterers[i].label;
+          if (scatterers[i].get_part() != 0) {
+            missing += "(PART " + std::to_string(scatterers[i].get_part()) + ")";
+          }
+        }
+        if (n_missing != 0 &&
+            (scattering_type_registry == 0 || !allow_spherical_fallback))
+        {
+          throw SMTBX_ERROR(file_name + " has no density for "
+            + std::to_string(n_missing) + " of "
+            + std::to_string(covered.size()) + " atoms:" + missing);
+        }
         direct::one_scatterer_one_h::scatterer_contribution<FloatType> *result =
           new harmonic_expansion<FloatType>(densities, u_cell, space_group);
-        af::shared<bool> const &covered = densities->covered;
-        if (std::find(covered.begin(), covered.end(), false) != covered.end()) {
-          if (scattering_type_registry == 0) {
-            delete result;
-            throw SMTBX_ERROR("the table does not cover the whole structure and"
-              " no scattering type registry was given to fall back on");
-          }
+        if (n_missing != 0) {
           result = new partially_tabulated<FloatType>(result, scatterers,
             *scattering_type_registry, covered, space_group.n_smx());
         }
