@@ -308,9 +308,13 @@ namespace smtbx { namespace refinement { namespace least_squares {
     Two constants because the accumulators differ greatly in m. The packed one
     keeps half a matrix and folds each row in as it arrives, so it merges less
     and wants more workers for the same work; the buffered one carries a full
-    matrix, a row buffer and a syrk besides. They are told apart as in
-    new_chunk_equations above -- the buffered accumulator is the one that takes
-    a buffer size.
+    matrix, a row buffer and a syrk besides. They are told apart by whether
+    the rank update buffers rows, which only rank_n_update does: it alone has a
+    default_buffer_bytes(). Not by whether the normal equations take a buffer
+    size, as new_chunk_equations above asks -- both wrappers take one, the
+    packed accumulator ignoring it so that the two stay interchangeable, and
+    that test handed the packed one the buffered one's constant as well. The
+    matrix-free summaries have no rank update and take the packed figure.
 
     Both values are deliberately conservative. Overshooting T* costs more than
     undershooting it, every extra worker being another copy of the matrix, and
@@ -319,7 +323,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
     //@{
     template <typename NE>
     static double accumulator_work_constant(
-      int, decltype(NE(0, true, std::size_t(0)))* = 0) { return 195.; }
+      int, decltype(NE::sum_of_rank_1_updates_t::default_buffer_bytes())* = 0)
+    {
+      return 195.;
+    }
 
     template <typename NE>
     static double accumulator_work_constant(long) { return 30.; }
