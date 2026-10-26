@@ -10,6 +10,26 @@ from libtbx.utils import xfrange
 from six.moves import range
 
 
+def _void_iselections(mask_data, n_voids):
+  """ The grid points of each void (label j+2), one selection per void.
+
+  One pass over the grid. Comparing the whole grid against each label in turn
+  is a pass per void, and a van der Waals-only region of a protein falls apart
+  into thousands of voids: on a 39.8M point grid with 1569 voids (30OR's van
+  der Waals-only region) 40 s against 0.8 s here, same selections. Within a void
+  the indices ascend, as iselection() gives them, so a sum over a selection is
+  the same bit for bit.
+  """
+  import numpy as np
+  labels = mask_data.as_numpy_array().ravel()
+  points = np.flatnonzero(labels >= 2)
+  voids = labels[points] - 2
+  points = points[np.argsort(voids, kind='stable')]
+  ends = np.cumsum(np.bincount(voids, minlength=n_voids))
+  return [flex.size_t(s.astype(np.uint64))
+          for s in np.split(points, ends[:-1])][:n_voids]
+
+
 class solvent_accessible_volume(object):
   def __init__(self, xray_structure,
                solvent_radius,
@@ -82,9 +102,7 @@ class solvent_accessible_volume(object):
     a pass over the void alone.
     """
     if self._void_isel is None:
-      labels = self.mask.data.as_1d()
-      self._void_isel = [(labels == j+2).iselection()
-                         for j in range(self.n_voids())]
+      self._void_isel = _void_iselections(self.mask.data, self.n_voids())
     return self._void_isel[i]
 
   def n_solvent_grid_points(self):
@@ -594,9 +612,7 @@ class mask(object):
     a pass over the void alone.
     """
     if self._void_isel is None:
-      labels = self.mask.data.as_1d()
-      self._void_isel = [(labels == j+2).iselection()
-                         for j in range(self.n_voids())]
+      self._void_isel = _void_iselections(self.mask.data, self.n_voids())
     return self._void_isel[i]
 
   def n_solvent_grid_points(self):

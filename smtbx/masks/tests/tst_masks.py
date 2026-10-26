@@ -84,6 +84,10 @@ gridding: (30,45,54)
     assert n_voids == 2
     assert approx_equal(n_voids, mask.n_voids())
     assert mask.n_solvent_grid_points() == 42148
+    # built in one pass, the selections are still the per-label ones
+    labels = mask.mask.data.as_1d()
+    for j in range(mask.n_voids()):
+      assert mask.void_iselection(j).all_eq((labels == j+2).iselection())
     if fo2 is fo2_complete:
       # check the difference map has no large peaks/holes
       assert max(stats.max(), abs(stats.min())) < 0.11
