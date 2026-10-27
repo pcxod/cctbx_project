@@ -2,5 +2,8 @@ Import("env_smtbx_boost_python_ext", "env_etc")
 env = env_smtbx_boost_python_ext.Clone()
 if env_etc.compiler != "win32_cl":
   # the node loops carry "omp simd" reductions; this enables them without OpenMP threads
-  env.Append(CCFLAGS=["-fopenmp-simd"])
+  env.Append(SHCXXFLAGS=["-fopenmp-simd"])
+else:
+  # under /openmp MSVC rejects "omp simd" (C7660) unless the experimental OpenMP mode is on
+  env.Append(SHCXXFLAGS=["/openmp:experimental"])
 env.SharedLibrary(target="#lib/smtbx_modulation_ext", source=["x4_sums.cpp"])
