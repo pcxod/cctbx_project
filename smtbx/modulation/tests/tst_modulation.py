@@ -892,12 +892,27 @@ def _lm_solve_reference(jtj, jtr, lam, diag):
   return np.linalg.solve(jtj + lam * np.diag(diag), jtr)
 
 
+def _cond_from_cholesky(a):
+  """1-norm condition number of the symmetric positive definite a, estimated by LAPACK dpocon from its Cholesky
+  factor."""
+  from scipy.linalg import lapack
+  c, info = lapack.dpotrf(np.array(a, order="F"), lower=1, clean=1)
+  assert info == 0
+  rcond, info = lapack.dpocon(c, np.max(np.sum(np.abs(a), axis=0)), uplo="L")
+  assert info == 0
+  return 1.0 / rcond
+
+
 def test_lm_factor_solve_equivalence():
   """The damped normal equations solved by Cholesky in the lower triangle of the one matrix that holds J^T J in
   its upper triangle, against forming J^T J + lam D apart and solving it by LU: several dampings in a row on the
-  same buffer (J^T J must survive each), small and medium-like, to 1e-10; and None for a matrix that is not
-  positive definite (refine then solves a full copy by LU or least squares)."""
-  worst = 0.0
+  same buffer (J^T J must survive each), small and medium-like. Two backward-stable solves of the same system
+  differ by at most a small multiple of cond(A) eps, so the bound is 10 cond(A) eps, A equilibrated by its
+  diagonal and cond(A) estimated from its Cholesky factor (dpocon) - not a fixed number, which the conditioning of the medium-like matrix (and the
+  platform's rounding) can exceed. A wrong solve (the damping off by 1 %) must fail that bound. And None for a
+  matrix that is not positive definite (refine then solves a full copy by LU or least squares)."""
+  eps = np.finfo(float).eps
+  worst_ratio, conds, wrong = 0.0, [], np.inf
   for xs, flags in ((model(n_harmonics=2, amp=0.02), {"site": True, "u_iso": True, "modulation": True, "scale": True}),
                     _medium_like()):
     fl = mod._flags(flags)
@@ -909,15 +924,28 @@ def test_lm_factor_solve_equivalence():
     jtj0 = jtj.copy()
     diag = np.diag(jtj).copy()
     buf = np.asfortranarray(jtj)
+    cmax = 0.0
     for lam in (1e-3, 5e-3, 2.5e-2, 1e-4):
       x = mod._lm_factor_solve(buf, diag, lam * diag, jtr)
       y = _lm_solve_reference(jtj0, jtr, lam, diag)
-      worst = max(worst, np.max(np.abs(x - y)) / np.max(np.abs(y)))
+      # in the equilibrated variables D^1/2 x (both solvers are insensitive to that diagonal scaling, so it is
+      # the condition number of D^-1/2 A D^-1/2 that bounds them)
+      a = jtj0 + lam * np.diag(diag)
+      sc = 1 / np.sqrt(np.diag(a))
+      cond = _cond_from_cholesky(sc[:, None] * a * sc[None, :])
+      cmax = max(cmax, cond)
+      bound = 10 * cond * eps
+      rel = lambda u: np.max(np.abs((u - y) / sc)) / np.max(np.abs(y / sc))
+      worst_ratio = max(worst_ratio, rel(x) / bound)
+      wrong = min(wrong, rel(_lm_solve_reference(jtj0, jtr, 1.01 * lam, diag)) / bound)
+    conds.append(cmax)
     assert np.array_equal(np.triu(buf, 1), np.triu(jtj0, 1))      # J^T J kept in the upper triangle
-  assert worst < 1e-10, worst
+  assert worst_ratio < 1, worst_ratio
+  assert wrong > 1, wrong
   bad = np.asfortranarray(np.diag([1.0, -1.0, 2.0]))
   assert mod._lm_factor_solve(bad, np.diag(bad).copy(), np.zeros(3), np.ones(3)) is None
-  print("  damped solve in one matrix (Cholesky in the lower triangle) = LU on a second matrix: %.1e" % worst)
+  print("  damped solve in one matrix (Cholesky in the lower triangle) = LU on a second matrix within 10 cond eps"
+        " (cond small %.1e, medium-like %.1e)" % tuple(conds))
 
 
 def test_auto_n_x4():
