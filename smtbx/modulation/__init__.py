@@ -561,6 +561,37 @@ def xharm_basis(order, x):
   return (first if order % 2 else second)(TWO_PI * k * x)
 
 
+def xharm_orthonormal(n, quadrature=64):
+  """The orthonormalised x-harmonics g_1..g_n over the crenel interval, x in [-1/2, 1/2] with weight 1: Gram-Schmidt
+  of (1, f_1, ..., f_n), f the plain x-harmonics of xharm_basis (the same treatment JANA gives the Legendre
+  functions), the constant dropped. Returns (d, T) with g_j(x) = d_j + sum_i T[j, i] f_i(x), T lower triangular.
+  A wave written in the g basis, u(x) = sum_j c_j g_j(x), is the plain wave with coefficients T^T c plus the
+  constant d . c (moved into the average site or ADP); xharm_to_plain does that change of basis.
+  The plain sin/cos(2 pi k x) are mutually orthogonal and orthogonal to 1 on this interval, so with XHARM_MODE
+  either way d = 0 and T = sqrt(2) I: the difference between the two conventions is the normalisation alone."""
+  xg, wg = np.polynomial.legendre.leggauss(quadrature)
+  x, w = 0.5 * xg, 0.5 * wg
+  f = np.array([np.ones_like(x)] + [xharm_basis(k + 1, x) for k in range(n)])
+  coef = np.zeros((n + 1, n + 1))   # g_j = sum_i coef[j, i] f_i, f_0 = 1
+  for j in range(n + 1):
+    c = np.zeros(n + 1)
+    c[j] = 1.0
+    for i in range(j):
+      gi = coef[i].dot(f)
+      c -= np.sum(w * f[j] * gi) * coef[i]
+    c /= math.sqrt(np.sum(w * c.dot(f) ** 2))
+    coef[j] = c
+  return coef[1:, 0], coef[1:, 1:]
+
+
+def xharm_to_plain(coeffs):
+  """Coefficients (n, width) of the orthonormalised x-harmonics -> (plain coefficients (n, width), the constant
+  (width,) that the wave adds to the average)."""
+  coeffs = np.asarray(coeffs, dtype=float)
+  d, t = xharm_orthonormal(len(coeffs))
+  return t.T.dot(coeffs), d.dot(coeffs)
+
+
 def _waves(v, n, width):
   return np.zeros((n, width)) if v is None else np.asarray(v, dtype=float).reshape(-1, width)
 

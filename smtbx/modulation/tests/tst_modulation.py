@@ -1026,6 +1026,119 @@ def test_compiled_central_differences():
     mod.USE_COMPILED = False
 
 
+def test_mscif_write_round_trip():
+  """mscif.write -> mscif.read: every parameter of every block family (sites, Uiso/Uaniso, occupancies and site
+  multiplicities, displacive/occupancy/ADP Fourier waves, crenels, sawtooth, Legendre, x-harmonics, ADP
+  x-harmonics, f'/f'') and F^2calc of the refln loop back to 1e-12, on the small, the all-blocks and the
+  medium-like model."""
+  import tempfile
+  from smtbx.modulation import mscif
+  worst = 0.0
+  for xs in (model(n_harmonics=2, amp=0.02), _all_blocks_model(), _medium_like()[0]):
+    h, m = reflections(xs, d_min=1.5)
+    fsq = mod.calculator(h, m).compute(xs)[1]
+    path = os.path.join(tempfile.mkdtemp(), "model.cif")
+    mscif.write(xs, path, h, m, f_sq_meas=1.01 * fsq, f_sq_sigma=0.02 * fsq + 1)
+    ys, data = mscif.read(path)
+    assert [a.label for a in ys.atoms] == [a.label for a in xs.atoms]
+    assert np.allclose(ys.q, xs.q, rtol=0, atol=1e-14) and len(ys.ssg.ops) == len(xs.ssg.ops)
+    for a, b in zip(xs.atoms, ys.atoms):
+      assert (a.crenel is None) == (b.crenel is None) and (a.sawtooth is None) == (b.sawtooth is None)
+      assert a.scattering_type == b.scattering_type and (a.u_star is None) == (b.u_star is None)
+      pairs = [(a.site, b.site), ([a.u_iso, a.occupancy, a.site_weight], [b.u_iso, b.occupancy, b.site_weight])]
+      for k in ("a", "b", "occ_sin", "occ_cos", "u_sin", "u_cos", "legendre", "xharm", "u_xharm"):
+        assert getattr(a, k).shape == getattr(b, k).shape, k
+        pairs.append((getattr(a, k), getattr(b, k)))
+      if a.u_star is not None:
+        pairs.append((a.u_star, b.u_star))
+      if a.crenel:
+        pairs.append((a.crenel, b.crenel))
+      if a.sawtooth is not None:
+        pairs.append((np.r_[a.sawtooth[0], a.sawtooth[1:]], np.r_[b.sawtooth[0], b.sawtooth[1:]]))
+      for x, y in pairs:
+        x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+        if x.size:
+          worst = max(worst, np.max(np.abs(x - y)) / max(np.max(np.abs(x)), 1e-3))
+    assert ys.dispersion == xs.dispersion
+    f2 = mod.calculator(data["h"], data["m"]).compute(ys)[1]
+    worst = max(worst, np.max(np.abs(f2 - fsq)) / fsq.max(), np.max(np.abs(data["f_sq_calc"] - fsq)) / fsq.max(),
+                np.max(np.abs(data["f_sq_meas"] - 1.01 * fsq)) / fsq.max())
+  assert worst <= 1e-12, worst
+  print("  msCIF write -> read: every block family and F^2calc back to %.1e" % worst)
+
+
+def test_xharm_orthonormal_basis():
+  """The orthonormalised x-harmonics (xharm_orthonormal) against an independent orthonormalisation (QR of the
+  sampled functions): the same functions to 1e-12, orthonormal over the crenel interval; and an msCIF read with
+  xharm_basis="orthonormal" gives the displacement field sum_j c_j g_j(x) of its coefficients c to 1e-12 (the
+  change to the plain basis), displacive and ADP x-harmonics."""
+  import tempfile
+  from smtbx.modulation import mscif
+  n = 6
+  xg, wg = np.polynomial.legendre.leggauss(80)
+  x, w = 0.5 * xg, 0.5 * wg
+  f = np.array([np.ones_like(x)] + [mod.xharm_basis(k + 1, x) for k in range(n)]).T
+  q, r = np.linalg.qr(np.sqrt(w)[:, None] * f)
+  g_ref = (q * np.sign(np.diag(r))) / np.sqrt(w)[:, None]          # g_0 = 1, then g_1..g_n
+  d, t = mod.xharm_orthonormal(n)
+  g = d[None, :] + f[:, 1:].dot(t.T)
+  e_basis = np.max(np.abs(g - g_ref[:, 1:]))
+  e_ortho = np.max(np.abs((w[:, None] * g).T.dot(g) - np.eye(n)))
+  xs = _all_blocks_model()
+  rng = np.random.RandomState(23)
+  coeffs = {}
+  for at in xs.atoms:
+    if at.crenel:
+      at.xharm = 0.01 * rng.uniform(-1, 1, (n, 3))
+      at.u_xharm = at.u_star[None, :] * 0.05 * rng.uniform(-1, 1, (n, 6))
+      coeffs[at.label] = (at.xharm.copy(), at.u_xharm.copy())
+  path = os.path.join(tempfile.mkdtemp(), "ortho.cif")
+  mscif.write(xs, path)
+  ys, _ = mscif.read(path, xharm_basis="orthonormal")
+  e_field = 0.0
+  for a, b in zip(xs.atoms, ys.atoms):
+    if a.label not in coeffs:
+      continue
+    x4 = a.crenel[0] + a.crenel[1] * x
+    c, cu = coeffs[a.label]
+    # the wave in the orthonormal basis, evaluated directly, on top of everything else the atom carries
+    a.xharm = np.zeros_like(c)
+    want = a.displacement(x4) + g_ref[:, 1:].dot(c)
+    e_field = max(e_field, np.max(np.abs(b.displacement(x4) - want)) / np.max(np.abs(g_ref[:, 1:].dot(c))))
+    a.u_xharm = np.zeros_like(cu)
+    e_field = max(e_field, np.max(np.abs(b.u_xharm_at(x4) - g_ref[:, 1:].dot(cu))) / np.max(np.abs(cu)))
+  assert e_basis < 1e-12 and e_ortho < 1e-12 and e_field < 1e-12, (e_basis, e_ortho, e_field)
+  print("  x-harmonics orthonormalised over the crenel = QR to %.1e (orthonormal to %.1e, = sqrt(2) x plain); "
+        "orthonormal-basis msCIF = its displacement field to %.1e" % (e_basis, e_ortho, e_field))
+
+
+def test_xharm_against_jana():
+  """COD 2108551 and 2108550 (crenels with JANA x-harmonics, Legendre terms, ADP x-harmonics) against JANA's
+  F^2calc of their refln loops, the x-harmonics read as plain and as orthonormalised, when the samples are on this
+  machine (E:\\olex2-samples\\cod_<id>\\<id>.cif and .hkl, as COD distributes them). Only m = 0 is asserted
+  (0.6 % and 1.1 % with the plain basis); the satellite figures are reported."""
+  from smtbx.modulation import mscif
+  found = False
+  for cid in ("2108551", "2108550"):
+    root = os.path.join("E:\\olex2-samples", "cod_" + cid, cid)
+    if not os.path.exists(root + ".cif"):
+      continue
+    found = True
+    line = []
+    for basis in ("plain", "orthonormal"):
+      xs, d = mscif.read(root + ".cif", root + ".hkl", xharm_basis=basis)
+      fc = mod.calculator(d["h"], d["m"], 64).compute(xs)[1]
+      fj, m = d["f_sq_calc"], d["m"]
+      k = np.sum(fc[m == 0] * fj[m == 0]) / np.sum(fc[m == 0] ** 2)
+      r = [np.sum(np.abs(k * fc[s] - fj[s])) / np.sum(fj[s]) for s in (m == 0, m != 0)]
+      if basis == "plain":
+        assert r[0] < 0.015, (cid, r)
+      line.append("%s: R(m=0) %.3f, R(|m|=1) %.3f" % (basis, r[0], r[1]))
+    print("  COD %s against JANA's F^2calc, x-harmonics %s" % (cid, "; ".join(line)))
+  if not found:
+    print("  x-harmonics vs JANA: samples not here, skipped")
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
@@ -1041,6 +1154,9 @@ def run():
   test_auto_n_x4()
   test_compiled_x4_sums_equivalence()
   test_compiled_central_differences()
+  test_mscif_write_round_trip()
+  test_xharm_orthonormal_basis()
+  test_xharm_against_jana()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()
