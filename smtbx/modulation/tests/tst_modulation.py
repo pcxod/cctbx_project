@@ -1326,6 +1326,53 @@ def test_blas_threads_equivalence():
         % (worst, len(libs), "y" if len(libs) == 1 else "ies"))
 
 
+def test_commensurate_gradients_and_refine():
+  """commensurate_compute: the folded image gradients plus the site part (wave phases and section points that
+  move with a site) against central differences of the commensurate F^2 with respect to the parameters of the
+  superspace model, P2_1/c, q = 2/3 b*, t0 = 0.07: <= 1e-6; and refine(commensurate=...) from shifted sites and
+  scaled amplitudes back to the model that made the data."""
+  import copy
+  from cctbx import sgtbx
+  xs = model(n_harmonics=2, amp=0.02, ssg=mod.superspace_group(sgtbx.space_group_info("P 1 21/c 1").group(),
+                                                              (0.0, 2.0 / 3, 0.0)))
+  rng = np.random.RandomState(4)
+  for at in xs.atoms:
+    at.occ_sin, at.occ_cos = 0.05 * rng.uniform(-1, 1, 1), 0.05 * rng.uniform(-1, 1, 1)
+  flags = {"site": True, "u_iso": True, "modulation": True, "occ_waves": True, "scale": True}
+  h, m = reflections(xs, d_min=1.2, m_max=2)
+  t0 = 0.07
+  calc = mod.calculator(h, m)
+  d = mod.commensurate_compute(calc, xs, t0, 3, flags, gradients=True)[2]
+  p0 = mod.get_parameters(xs, flags)
+  assert d.shape[1] == len(p0)
+  worst = 0.0
+  for k in range(len(p0)):
+    st = 1e-5 * max(1e-2, abs(p0[k]))
+    p = p0.copy(); p[k] += st
+    mod.set_parameters(xs, flags, p)
+    fp = mod.commensurate_compute(calc, xs, t0, 3)[1]
+    p[k] -= 2 * st
+    mod.set_parameters(xs, flags, p)
+    fm = mod.commensurate_compute(calc, xs, t0, 3)[1]
+    mod.set_parameters(xs, flags, p0)
+    num = (fp - fm) / (2 * st)
+    worst = max(worst, np.max(np.abs(num - d[:, k])) / max(np.max(np.abs(num)), 1e-8))
+  assert worst < 1e-6, worst
+  fl = {"site": True, "u_iso": True, "modulation": True, "scale": True}
+  xs1 = model(n_harmonics=1, amp=0.02, ssg=xs.ssg)
+  h1, m1 = reflections(xs1, d_min=1.0, m_max=1)
+  data = mod.commensurate_compute(mod.calculator(h1, m1), xs1, t0, 3)[1]
+  ys = copy.deepcopy(xs1)
+  for a in ys.atoms:
+    a.a, a.b, a.site = 0.8 * a.a, 1.2 * a.b, a.site + 0.003
+  mod.refine(ys, h1, m1, data, 0.01 * data + 1e-3 * data.max(), flags=fl, cycles=15, verbose=False,
+             commensurate=(t0, 3))
+  err = np.max(np.abs(mod.get_parameters(ys, fl) - mod.get_parameters(xs1, fl)))
+  assert err < 1e-8, err
+  print("  commensurate gradients = central differences: %.1e (%d parameters); refined back to the model: %.1e"
+        % (worst, len(p0), err))
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
@@ -1349,6 +1396,7 @@ def run():
   test_commensurate_section()
   test_slice_workspace_equivalence()
   test_blas_threads_equivalence()
+  test_commensurate_gradients_and_refine()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()

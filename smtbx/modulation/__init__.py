@@ -906,6 +906,76 @@ def commensurate_section(xs, t0, n):
   return out
 
 
+def commensurate_compute(calc, xs, t0, n, flags=None, gradients=False, step=1e-6):
+  """(F, F^2, dF^2/dp) of the commensurate structure commensurate_section(xs, t0, n) for calc's reflections, the
+  gradients with respect to the parameters of xs. The images' gradients are folded back (_commensurate_fold);
+  a site also moves its images' wave phases and section points (the finite sum has no fixed nodes), which the
+  folded site columns lack: that part is added as a central difference over the site, image sites held, atom by
+  atom on one-atom structures (six F passes in all, step 1e-6 in fractional units). Crenel borders are not
+  differentiated (a section point crossing one is a jump)."""
+  flags = _flags(flags)
+  xc = commensurate_section(xs, t0, n)
+  if not gradients:
+    return calc.compute(xc, flags)[:2] + (None,)
+  f, fsq, d = calc.compute(xc, flags, gradients=True)
+  d = _commensurate_fold(xs, flags)(d)
+  if flags["site"]:
+    sub = calculator(calc.h, calc.m, calc.n_x4, calc.table, threads=calc.threads, radiation=calc.radiation)
+    col = 0
+    for at in xs.atoms:
+      blocks = _blocks(at, flags)
+      if blocks and blocks[0][0] == "site":
+        for i in range(3):
+          fd = []
+          for sgn in (1, -1):
+            one = modulated_structure(xs.unit_cell, xs.ssg, [at], 1.0, xs.dispersion)
+            moved = commensurate_section(one, t0, n)
+            shifted = at.site.copy()
+            shifted[i] += sgn * step
+            at_s = _atom_with_site(at, shifted)
+            ref = commensurate_section(modulated_structure(xs.unit_cell, xs.ssg, [at_s], 1.0, xs.dispersion), t0, n)
+            for a, b in zip(ref.atoms, moved.atoms):
+              a.site = b.site          # image sites held: their motion is in the folded columns already
+            fd.append(sub.compute(ref)[0])
+          dfi = (fd[0] - fd[1]) / (2 * step)
+          d[:, col + i] += 2 * xs.scale * (f.real * dfi.real + f.imag * dfi.imag)
+      col += sum(len(get()) for _, _, get, _ in blocks)
+  return f, fsq, d
+
+
+def _atom_with_site(at, site):
+  import copy
+  b = copy.deepcopy(at)
+  b.site = np.asarray(site, dtype=float)
+  return b
+
+
+def _commensurate_fold(xs, flags):
+  """d -> d Z: gradients with respect to the parameters of commensurate_section(xs, ...)'s images (atom by atom,
+  each atom's images in operation order, then scale and extinction) folded onto the parameters of xs. An image's
+  parameters are T_k p (+ constants: translations, crenel shift) with T_k = _atom_map(atom, op_k), so dF/dp =
+  sum_k dF/dp_k T_k. T_k depends on the site (the phases of the wave pairs): call it again after every update."""
+  flags = _flags(flags)
+  maps, i_img, i_org = [], 0, 0
+  for at in xs.atoms:
+    n = sum(len(get()) for _, _, get, _ in _blocks(at, flags))
+    for op in xs.ssg.ops:
+      maps.append((i_img, i_org, n, _atom_map(at, op, flags)))
+      i_img += n
+    i_org += n
+  n_tail = int(flags["scale"]) + int(flags["extinction"])
+
+  def fold(d):
+    out = np.zeros((d.shape[0], i_org + n_tail))
+    for ii, io, n, t in maps:
+      if n:
+        out[:, io:io + n] += d[:, ii:ii + n].dot(t)
+    if n_tail:
+      out[:, i_org:] = d[:, i_img:i_img + n_tail]
+    return out
+  return fold
+
+
 def _sum_waves(sin_c, cos_c, sin_t, cos_t):
   """sum_n s_n sin_t[n] + c_n cos_t[n] for coefficient arrays (n, ...) and node tables (n, K) -> (K, ...)."""
   n = len(sin_c)
@@ -2008,9 +2078,13 @@ def _rows_per_slice(xs, flags, max_memory_mb):
 
 
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", damping=1e-3, log=None, verbose=True,
-           table=None, radiation="xray", average=None, max_memory_mb=512):
+           table=None, radiation="xray", average=None, max_memory_mb=512, commensurate=None):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
   table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
+  commensurate: (t0, N) refines the commensurate structure of that section (commensurate_section): F^2 and
+  gradients of the expanded images, the gradients folded back onto the parameters of xs (_commensurate_fold).
+  Crenel centres and widths, and extinction, cannot be refined then (a finite sum has no gradient with respect
+  to the crenel; the site correction of commensurate_compute does not carry the extinction factor). One slice.
   n_x4: x4 nodes per atom, or "auto" (the default: auto_n_x4, within 1e-10 of 128 nodes, raised during the
   refinement if the amplitudes grow); 32 was the default before.
 
@@ -2052,16 +2126,33 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
       link.sync()
   f_obs_sq = np.asarray(f_obs_sq, dtype=float)
   calc = calculator(h, m, n_x4, table, radiation=radiation)
+  if commensurate is not None:
+    if flags["crenel"] or flags["extinction"]:
+      raise ValueError("refine: crenel centres and widths, and extinction, cannot be refined in a commensurate "
+                       "section")
+    t0, n_sec = commensurate
+    model = lambda: commensurate_section(xs, t0, n_sec)
+  else:
+    model = lambda: xs
   w = 1.0 / np.maximum(np.asarray(sigmas, dtype=float), 1e-12) ** 2
   sw = np.sqrt(w)
   history = []
   lam = damping
   chi = None    # from the first gradient pass: the same F^2 a separate pass before the loop would give
   norm = None
-  project = (lambda d: _times_blocks(d, zb)) if link is None else link.jacobian
-  max_rows = _rows_per_slice(xs, flags, max_memory_mb)
+  project0 = (lambda d: _times_blocks(d, zb)) if link is None else link.jacobian
+  max_rows = _rows_per_slice(model(), flags, max_memory_mb)
   for cycle in range(cycles):
-    fc_sq, jtj, jtr = _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows)
+    if commensurate is None:
+      fc_sq, jtj, jtr = _normal_equations(calc, xs, flags, f_obs_sq, sw, project0, max_rows)
+    else:
+      # one dense slice: commensurate structures are small, and commensurate_compute needs all rows' F at once
+      _, fc_sq, d = commensurate_compute(calc, xs, t0, n_sec, flags, gradients=True)
+      j = project0(sw[:, None] * d)
+      del d
+      with _blas_threads(calc._threads()):
+        jtj, jtr = j.T.dot(j), j.T.dot(sw * (f_obs_sq - fc_sq))
+      del j
     if chi is None:
       chi = float(np.sum(w * (f_obs_sq - fc_sq) ** 2))   # + the weighted restraints once there are any
     r = sw * (f_obs_sq - fc_sq)
@@ -2100,7 +2191,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
         link.apply(p0, x)
       step = get_parameters(xs, flags) - p0
       with np.errstate(over="ignore", invalid="ignore"):
-        fc_new = _f_sq(calc, xs, max_rows)
+        fc_new = _f_sq(calc, model(), max_rows)
       chi_new = float(np.sum(w * (f_obs_sq - fc_new) ** 2))
       if rest is not None:
         r_new = link.restraints(n_free)
@@ -2113,7 +2204,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
       lam *= 5
     if not accepted:
       set_parameters(xs, flags, p0)
-      fc_new = _f_sq(calc, xs, max_rows)
+      fc_new = _f_sq(calc, model(), max_rows)
     wr2 = math.sqrt(float(np.sum(w * (f_obs_sq - fc_new) ** 2)) / float(np.sum(w * f_obs_sq ** 2)))
     rec = {"cycle": cycle + 1, "wR2": wr2, "R1": r_factors(f_obs_sq, fc_new, m),
            "max_shift": float(np.max(np.abs(step))) if accepted and step.size else 0.0, "lambda": lam}
