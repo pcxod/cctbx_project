@@ -1297,10 +1297,40 @@ def test_slice_workspace_equivalence():
   print("  slices with the pass's reused buffers = slices with fresh arrays: F^2 bit for bit, J^T J, J^T r %.1e" % worst)
 
 
+def test_blas_threads_equivalence():
+  """The J^T J build and the damped solve with BLAS raised to the calculator's thread count (_blas_threads)
+  against BLAS as the process has it: J^T J and J^T r to 1e-14 relative, small and medium-like, sliced; and the
+  process's BLAS thread count restored afterwards."""
+  libs = mod._openblas_libs()
+  before = [lib.openblas_get_num_threads() for lib in libs]
+  raise_was, mod.RAISE_BLAS_THREADS = mod.RAISE_BLAS_THREADS, True
+  worst = 0.0
+  for xs, flags in ((model(n_harmonics=2, amp=0.02), {"site": True, "u_iso": True, "modulation": True, "scale": True}),
+                    _medium_like()):
+    fl = mod._flags(flags)
+    h, m = reflections(xs, d_min=1.4, m_max=2)
+    fo = mod.calculator(h, m).compute(xs)[1] * 1.01
+    sw = np.full(len(m), 0.3)
+    zb = mod._reduction_blocks(xs, fl)
+    out = []
+    for threads in (1, 4):
+      out.append(mod._normal_equations(mod.calculator(h, m, threads=threads), xs, fl, fo, sw,
+                                       lambda d: mod._times_blocks(d, zb), len(m) // 3 + 1))
+    assert np.array_equal(out[0][0], out[1][0])
+    worst = max(worst, np.max(np.abs(out[1][1] - out[0][1])) / np.max(np.abs(out[0][1])),
+                np.max(np.abs(out[1][2] - out[0][2])) / np.max(np.abs(out[0][2])))
+  mod.RAISE_BLAS_THREADS = raise_was
+  assert worst <= 1e-14, worst
+  assert [lib.openblas_get_num_threads() for lib in libs] == before
+  print("  J^T J with BLAS raised to the calculator's threads = BLAS as set: %.1e (%d OpenBLAS librar%s found)"
+        % (worst, len(libs), "y" if len(libs) == 1 else "ies"))
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
   mod.USE_COMPILED = False
+  mod.RAISE_BLAS_THREADS = False   # likewise BLAS's thread count; test_blas_threads_equivalence raises it
   test_superspace_closure()
   test_main_reflections_match_cctbx()
   test_bessel_single_harmonic()
@@ -1318,6 +1348,7 @@ def run():
   test_extinction()
   test_commensurate_section()
   test_slice_workspace_equivalence()
+  test_blas_threads_equivalence()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()

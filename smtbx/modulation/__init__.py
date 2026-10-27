@@ -1867,10 +1867,84 @@ def _f_sq(calc, xs, max_rows):
   return np.concatenate([c.compute(xs)[1] for c in _slices(calc, len(calc.m), max_rows)])
 
 
+RAISE_BLAS_THREADS = True    # False: _blas_threads leaves the process's BLAS thread count alone
+
+
+class _blas_threads(object):
+  """with _blas_threads(n): OpenBLAS (the library numpy and scipy call) runs at least n threads inside the block
+  (a higher count is left alone), its own count again after it. The libtbx dispatchers export
+  OPENBLAS_NUM_THREADS=1 (libtbx/env_config.py), so under libtbx.python every dsyrk / potrf of a refinement ran
+  single-threaded; the J^T J build and the damped solve run while the atom pool is idle and take the
+  calculator's thread count instead. threadpoolctl when it is
+  installed (every platform), else the openblas_{get,set}_num_threads symbols of the loaded libopenblas found
+  in /proc/self/maps (Linux); otherwise nothing changes."""
+
+  def __init__(self, n):
+    self.n, self.undo = n, None
+
+  def __enter__(self):
+    if not self.n or not RAISE_BLAS_THREADS:
+      return self
+    try:
+      from threadpoolctl import threadpool_info, threadpool_limits
+      blas = [i["num_threads"] for i in threadpool_info() if i.get("user_api") == "blas"]
+      if blas and min(blas) < self.n:
+        self.undo = threadpool_limits(limits=self.n, user_api="blas")
+      return self
+    except ImportError:
+      pass
+    for lib in _openblas_libs():
+      try:
+        old = lib.openblas_get_num_threads()
+        if old < self.n:
+          lib.openblas_set_num_threads(int(self.n))
+          self.undo = (self.undo or []) + [(lib, old)]
+      except AttributeError:
+        continue
+    return self
+
+  def __exit__(self, *exc):
+    if self.undo is None:
+      return False
+    if isinstance(self.undo, list):
+      for lib, old in self.undo:
+        lib.openblas_set_num_threads(old)
+    else:
+      self.undo.restore_original_limits()
+    return False
+
+
+_openblas_cache = []
+
+
+def _openblas_libs():
+  """The loaded OpenBLAS libraries (Linux), found once per process."""
+  if not _openblas_cache:
+    import ctypes
+    paths = set()
+    try:
+      with open("/proc/self/maps") as f:
+        for line in f:
+          p = line.split()[-1]
+          if "openblas" in os.path.basename(p) and ".so" in p:
+            paths.add(p)
+    except (IOError, OSError):
+      pass
+    libs = []
+    for p in sorted(paths):
+      try:
+        libs.append(ctypes.CDLL(p, mode=getattr(os, "RTLD_NOLOAD", 0) | ctypes.RTLD_GLOBAL))
+      except OSError:
+        continue
+    _openblas_cache.append(libs)
+  return _openblas_cache[0]
+
+
 def _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows):
   """F^2 and J^T J, J^T r of the weighted residuals r = sw (Fo^2 - Fc^2), J = project(sw dFc^2/dp), with the
   reflections taken max_rows at a time: the design matrix (reflections x parameters) is never held whole.
-  One slice is exactly the dense product."""
+  One slice is exactly the dense product. The J^T J updates run with the calculator's thread count in BLAS
+  (_blas_threads): the atom pool is idle then."""
   calc._resolve_n_x4(xs)
   subs = _slices(calc, len(f_obs_sq), max_rows)
   n_chunks = len(subs)
@@ -1891,16 +1965,17 @@ def _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows):
     j = project(d)
     del d
     r = sw[a:b] * (f_obs_sq[a:b] - fc_sq)
-    if n_chunks == 1:
-      jtj = j.T.dot(j)
-    elif dsyrk is not None:
-      # in place, upper triangle: no second n x n matrix per slice
-      if jtj is None:
-        jtj = np.zeros((j.shape[1], j.shape[1]), order="F")
-      jtj = dsyrk(1.0, j, beta=1.0, c=jtj, trans=1, lower=0, overwrite_c=1)
-    else:
-      jtj = j.T.dot(j) if jtj is None else jtj + j.T.dot(j)
-    jtr = j.T.dot(r) if jtr is None else jtr + j.T.dot(r)
+    with _blas_threads(calc._threads()):
+      if n_chunks == 1:
+        jtj = j.T.dot(j)
+      elif dsyrk is not None:
+        # in place, upper triangle: no second n x n matrix per slice
+        if jtj is None:
+          jtj = np.zeros((j.shape[1], j.shape[1]), order="F")
+        jtj = dsyrk(1.0, j, beta=1.0, c=jtj, trans=1, lower=0, overwrite_c=1)
+      else:
+        jtj = j.T.dot(j) if jtj is None else jtj + j.T.dot(j)
+    jtr = j.T.dot(r) if jtr is None else jtr + j.T.dot(r)     # a matrix-vector product: BLAS as the process has it
     fc_parts.append(fc_sq)
     a = b
   if n_chunks > 1 and dsyrk is not None:
@@ -2009,7 +2084,8 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
     if not jtj.flags.f_contiguous:
       jtj = jtj.T
     for _ in range(16):
-      x = _lm_factor_solve(jtj, jtj_diag, lam * diag, jtr)
+      with _blas_threads(calc._threads()):
+        x = _lm_factor_solve(jtj, jtj_diag, lam * diag, jtr)
       if x is None:   # no scipy, or not positive definite: a full copy, rebuilt from the upper triangle
         a_mat = _mirror_upper(np.array(jtj))
         a_mat[np.diag_indices_from(a_mat)] = jtj_diag + lam * diag
