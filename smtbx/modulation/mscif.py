@@ -290,6 +290,14 @@ def read(cif_path, fcf_path=None, xharm_basis="plain"):
     data["radiation"] = "electron" if "electron" in probe or (wl is not None and wl < 0.1) else "xray"
     data["wavelength"] = wl
   if data is not None:
+    # twins: [(3x3 matrix acting on (h k l) as a row vector, mass fraction)], None without
+    tw = _col(block, "_twin_individual_id")
+    data["twins"] = None
+    if tw:
+      mats = [[_num(v) for v in _col(block, "_twin_individual_twin_matrix_%d%d" % (i, j))] for i in (1, 2, 3)
+              for j in (1, 2, 3)]
+      frac = [_num(v) for v in _col(block, "_twin_individual_mass_fraction_refined")]
+      data["twins"] = [(np.array([mats[r][k] for r in range(9)]).reshape(3, 3), frac[k]) for k in range(len(tw))]
     data["commensurate"] = commensurate     # (t0, N): mod.commensurate_section(xs, t0, N) gives JANA's model
   return xs, data
 

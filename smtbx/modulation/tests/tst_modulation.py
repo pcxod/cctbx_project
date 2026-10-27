@@ -1373,6 +1373,49 @@ def test_commensurate_gradients_and_refine():
         % (worst, len(p0), err))
 
 
+def test_twins():
+  """twin_indices: (h + m q) t = h' + m' q for twin matrices that map q to q and to -q; twinned_calculator's
+  gradients (model parameters and the free fractions) against central differences; refine(twins=...) from
+  equal fractions and scaled amplitudes back to the fractions and model that made the data."""
+  import copy
+  xs = model(n_harmonics=1, amp=0.02, ssg=mod.superspace_group(p21c(), (0.31, 0.0, 0.0)))
+  h, m = reflections(xs, d_min=1.0, m_max=1)
+  mats = [np.eye(3), np.diag([1.0, -1.0, -1.0]), np.diag([-1.0, 1.0, 1.0])]
+  for t in mats:
+    hp, mp = mod.twin_indices(xs.q, t, h, m)
+    assert np.allclose((h + np.outer(m, xs.q)).dot(t), hp + np.outer(mp, xs.q))
+  flags = {"site": True, "u_iso": True, "modulation": True, "scale": True}
+  tc = mod.twinned_calculator(h, m, xs.q, list(zip(mats, [0.5, 0.3, 0.2])))
+  _, _, d = tc.compute(xs, flags, gradients=True)
+  p0 = np.concatenate([mod.get_parameters(xs, flags), tc.fractions[1:]])
+  n = len(p0) - 2
+  worst = 0.0
+  for k in range(len(p0)):
+    st = 1e-5 * max(1e-2, abs(p0[k]))
+    out = []
+    for sgn in (1, -1):
+      p = p0.copy(); p[k] += sgn * st
+      mod.set_parameters(xs, flags, p[:n])
+      tc.fractions[1:] = p[n:]
+      tc.fractions[0] = 1 - p[n:].sum()
+      out.append(tc.compute(xs)[1])
+    num = (out[0] - out[1]) / (2 * st)
+    worst = max(worst, np.max(np.abs(num - d[:, k])) / max(np.max(np.abs(num)), 1e-8))
+  mod.set_parameters(xs, flags, p0[:n])
+  assert worst < 1e-6, worst
+  # two domains that F^2 can tell apart (the third is the second times the inversion: the same F^2)
+  data = mod.twinned_calculator(h, m, xs.q, list(zip(mats[:2], [0.65, 0.35]))).compute(xs)[1]
+  tw = list(zip(mats[:2], [0.5, 0.5]))
+  ys = copy.deepcopy(xs)
+  for a in ys.atoms:
+    a.a, a.b = 0.8 * a.a, 1.2 * a.b
+  mod.refine(ys, h, m, data, 0.01 * data + 1e-3 * data.max(), flags=flags, cycles=20, verbose=False, twins=tw)
+  err = max(abs(tw[1][1] - 0.35), np.max(np.abs(mod.get_parameters(ys, flags) - mod.get_parameters(xs, flags))))
+  assert err < 1e-8, err
+  print("  twins: indices exact; gradients with the fractions = central differences %.1e; fractions and model "
+        "refined back to %.1e" % (worst, err))
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
@@ -1397,6 +1440,7 @@ def run():
   test_slice_workspace_equivalence()
   test_blas_threads_equivalence()
   test_commensurate_gradients_and_refine()
+  test_twins()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()

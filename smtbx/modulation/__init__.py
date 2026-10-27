@@ -906,6 +906,48 @@ def commensurate_section(xs, t0, n):
   return out
 
 
+def twin_indices(q, t, h, m):
+  """(h', m') of the twin domain with matrix t (3x3, acting on the row vector h): (h + m q) t = h' + m' q, which
+  needs q t = s q + G with s = +-1 and G integral; then h' = h t + m G, m' = s m."""
+  q = np.asarray(q, dtype=float)
+  t = np.asarray(t, dtype=float)
+  qt = q.dot(t)
+  for s in (1, -1):
+    g = qt - s * q
+    if np.allclose(g, np.round(g), atol=1e-6):
+      g = np.round(g)
+      hp = np.rint(np.asarray(h, dtype=float).dot(t) + np.outer(m, g)).astype(int)
+      return hp, s * np.asarray(m)
+  raise IncompatibleQ("twin matrix %s does not map q = %s onto +-q" % (t.tolist(), q.tolist()))
+
+
+class twinned_calculator(object):
+  """F^2 of a twinned crystal: sum_k f_k F^2(domain k's indices), the domain indices from twin_indices, one
+  calculator per domain (each keeps its own invariants and slices). twins: [(matrix, fraction)], the first
+  domain the reference (identity for JANA files). The fractions are parameters of the twin, not of xs: with
+  refine(..., twins=...) the last k - 1 of them are refined after the scale (the first is 1 - their sum)."""
+
+  def __init__(self, h, m, q, twins, **kw):
+    self.h, self.m = np.asarray(h), np.asarray(m)
+    self.mats = [np.asarray(t, dtype=float) for t, _ in twins]
+    self.fractions = np.array([f for _, f in twins], dtype=float)
+    self.calcs = []
+    for t in self.mats:
+      hk, mk = twin_indices(q, t, self.h, self.m)
+      self.calcs.append(calculator(hk, mk, **kw))
+
+  def compute(self, xs, flags=None, gradients=False):
+    """(F of the reference domain, sum_k f_k F_k^2, gradients): the gradients of the model's parameters summed
+    with the fractions, then dF^2/df_k = F_k^2 - F_1^2 for k = 2..n (f_1 = 1 - sum of the others)."""
+    parts = [c.compute(xs, flags, gradients) for c in self.calcs]
+    fsq = sum(f * p[1] for f, p in zip(self.fractions, parts))
+    if not gradients:
+      return parts[0][0], fsq, None
+    d = sum(f * p[2] for f, p in zip(self.fractions, parts))
+    dfrac = np.column_stack([p[1] - parts[0][1] for p in parts[1:]]) if len(parts) > 1 else np.zeros((len(fsq), 0))
+    return parts[0][0], fsq, np.hstack([d, dfrac])
+
+
 def commensurate_compute(calc, xs, t0, n, flags=None, gradients=False, step=1e-6):
   """(F, F^2, dF^2/dp) of the commensurate structure commensurate_section(xs, t0, n) for calc's reflections, the
   gradients with respect to the parameters of xs. The images' gradients are folded back (_commensurate_fold);
@@ -2078,13 +2120,16 @@ def _rows_per_slice(xs, flags, max_memory_mb):
 
 
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", damping=1e-3, log=None, verbose=True,
-           table=None, radiation="xray", average=None, max_memory_mb=512, commensurate=None):
+           table=None, radiation="xray", average=None, max_memory_mb=512, commensurate=None, twins=None):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
   table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
   commensurate: (t0, N) refines the commensurate structure of that section (commensurate_section): F^2 and
   gradients of the expanded images, the gradients folded back onto the parameters of xs (_commensurate_fold).
   Crenel centres and widths, and extinction, cannot be refined then (a finite sum has no gradient with respect
   to the crenel; the site correction of commensurate_compute does not carry the extinction factor). One slice.
+  twins: [(3x3 matrix, mass fraction)] (mscif.read's data["twins"]): F^2 = sum_k f_k F_k^2 (twinned_calculator),
+  the fractions refined under sum f_k = 1 (the first is 1 - the others); the list is updated in place. One
+  slice; not with average or commensurate.
   n_x4: x4 nodes per atom, or "auto" (the default: auto_n_x4, within 1e-10 of 128 nodes, raised during the
   refinement if the amplitudes grow); 32 was the default before.
 
@@ -2134,6 +2179,27 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
     model = lambda: commensurate_section(xs, t0, n_sec)
   else:
     model = lambda: xs
+  tc, nt = None, 0
+  if twins is not None:
+    if average is not None or commensurate is not None:
+      raise NotImplementedError("refine: twins with average or commensurate")
+    tc = twinned_calculator(h, m, xs.q, twins, n_x4=n_x4, table=table, radiation=radiation)
+    nt = len(twins) - 1
+    zb = zb + [np.eye(nt)] if nt else zb
+
+  def get_p():
+    p = get_parameters(xs, flags)
+    return np.concatenate([p, tc.fractions[1:]]) if nt else p
+
+  def set_p(p):
+    if nt:
+      tc.fractions[1:] = p[-nt:]
+      tc.fractions[0] = 1 - np.sum(tc.fractions[1:])
+      p = p[:-nt]
+    set_parameters(xs, flags, p)
+
+  def f_sq_now():
+    return tc.compute(xs)[1] if tc is not None else _f_sq(calc, model(), max_rows)
   w = 1.0 / np.maximum(np.asarray(sigmas, dtype=float), 1e-12) ** 2
   sw = np.sqrt(w)
   history = []
@@ -2143,11 +2209,14 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
   project0 = (lambda d: _times_blocks(d, zb)) if link is None else link.jacobian
   max_rows = _rows_per_slice(model(), flags, max_memory_mb)
   for cycle in range(cycles):
-    if commensurate is None:
+    if commensurate is None and tc is None:
       fc_sq, jtj, jtr = _normal_equations(calc, xs, flags, f_obs_sq, sw, project0, max_rows)
     else:
       # one dense slice: commensurate structures are small, and commensurate_compute needs all rows' F at once
-      _, fc_sq, d = commensurate_compute(calc, xs, t0, n_sec, flags, gradients=True)
+      if tc is not None:
+        _, fc_sq, d = tc.compute(xs, flags, gradients=True)
+      else:
+        _, fc_sq, d = commensurate_compute(calc, xs, t0, n_sec, flags, gradients=True)
       j = project0(sw[:, None] * d)
       del d
       with _blas_threads(calc._threads()):
@@ -2165,7 +2234,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
       rw = norm * rest[2]
       jtj += rest[0].T.dot(rw[:, None] * rest[0])
       jtr -= rest[0].T.dot(rw * rest[1])
-    p0 = get_parameters(xs, flags)
+    p0 = get_p()
     jtj_diag = np.diag(jtj).copy()
     diag = jtj_diag.copy()
     diag[diag <= 1e-12 * max(diag.max(), 1e-300)] = max(diag.max(), 1.0)
@@ -2186,12 +2255,12 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
           x = np.linalg.lstsq(a_mat, jtr, rcond=None)[0]
         del a_mat
       if link is None:
-        set_parameters(xs, flags, p0 + _blocks_times(zb, x))
+        set_p(p0 + _blocks_times(zb, x))
       else:
         link.apply(p0, x)
-      step = get_parameters(xs, flags) - p0
+      step = get_p() - p0
       with np.errstate(over="ignore", invalid="ignore"):
-        fc_new = _f_sq(calc, model(), max_rows)
+        fc_new = f_sq_now()
       chi_new = float(np.sum(w * (f_obs_sq - fc_new) ** 2))
       if rest is not None:
         r_new = link.restraints(n_free)
@@ -2203,8 +2272,8 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
         link.undo(p0, x)
       lam *= 5
     if not accepted:
-      set_parameters(xs, flags, p0)
-      fc_new = _f_sq(calc, model(), max_rows)
+      set_p(p0)
+      fc_new = f_sq_now()
     wr2 = math.sqrt(float(np.sum(w * (f_obs_sq - fc_new) ** 2)) / float(np.sum(w * f_obs_sq ** 2)))
     rec = {"cycle": cycle + 1, "wR2": wr2, "R1": r_factors(f_obs_sq, fc_new, m),
            "max_shift": float(np.max(np.abs(step))) if accepted and step.size else 0.0, "lambda": lam}
@@ -2216,6 +2285,8 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
       print(line, file=log) if log is not None else print(line)
     if not accepted or rec["max_shift"] < 1e-8:
       break
+  if tc is not None:
+    twins[:] = [(t, float(f)) for (t, _), f in zip(twins, tc.fractions)]
   return history
 
 
