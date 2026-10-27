@@ -862,6 +862,8 @@ class calculator(object):
     # compute() calls of a refinement; rebuilt when any of those changes (_invariant_key)
     self._invariants = (None, None)
     self._share_classes = True   # False: every operation evaluates its own x4 sums (the reference path)
+    # False: the numpy x4 sums (the reference path, and the only one without the extension)
+    self.use_compiled = USE_COMPILED and _ext is not None
     self._mode = None            # None: pool_mode decides; "atoms" or "reflections" forces it
     self._sub = {}               # reflection-slice calculators, by number of slices (_chunks)
     self._tables = {"lock": threading.Lock()}   # the per-atom x4 tables, shared with the slices (_atom_tables)
@@ -900,14 +902,23 @@ class calculator(object):
       f0 = _form_factors([a.scattering_type for a in xs.atoms], np.sqrt(s_sq) / 2, self.radiation)
       dispersion = xs.dispersion if self.radiation == "xray" else {}
       ff = {t: f + complex(*dispersion.get(t, (0.0, 0.0))) for t, f in f0.items()}
+    # per operation, stacked (operation, reflection, ...) so that the compiled sums take them whole; ops[k] holds
+    # views of them
+    n_op, nref = len(xs.ssg.ops), len(self.m)
+    st = {"hp": np.empty((n_op, nref, 3)), "ph0": np.empty((n_op, nref)), "dw6": np.empty((n_op, nref, 6)),
+          "sp": np.empty((n_op, nref, 3)), "mp": np.empty((n_op, nref))}
     ops = []
-    for op in xs.ssg.ops:
-      sp = s_vec.dot(op.r)
+    for k, op in enumerate(xs.ssg.ops):
+      sp = st["sp"][k]
+      sp[...] = s_vec.dot(op.r)
       q6 = np.column_stack([sp[:, 0] ** 2, sp[:, 1] ** 2, sp[:, 2] ** 2,
                             2 * sp[:, 0] * sp[:, 1], 2 * sp[:, 0] * sp[:, 2], 2 * sp[:, 1] * sp[:, 2]])
+      st["hp"][k] = self.h.dot(op.r) + np.outer(self.m, op.m)
+      st["mp"][k] = op.eps * self.m
+      st["ph0"][k] = self.h.dot(op.t) + self.m * op.tau
+      st["dw6"][k] = -TWO_PI_SQ * q6
       # hp, mp, sp, ph0, q6, and the two factors the gradients multiply by: 2 pi i sp and -2 pi^2 q6
-      ops.append((self.h.dot(op.r) + np.outer(self.m, op.m), op.eps * self.m, sp, self.h.dot(op.t) + self.m * op.tau,
-                  q6, (1j * TWO_PI) * sp, -TWO_PI_SQ * q6))
+      ops.append((st["hp"][k], st["mp"][k], sp, st["ph0"][k], q6, (1j * TWO_PI) * sp, st["dw6"][k]))
     # e(x4) = exp(2 pi i (S R.u(x4) + eps m x4)) depends on an operation only through (R, eps, M): operations
     # that differ in t and tau alone (centring, screws, glides) have the same e, and (-R, -eps, -M) the complex
     # conjugate. classes[k] = (the first operation with that e or its conjugate, conjugate or not)
@@ -924,7 +935,10 @@ class calculator(object):
       else:
         first[key_p] = k
         classes.append((k, False))
-    value = (s_vec, s_sq, ff, ops, classes)
+    st["s_sq"] = s_sq
+    st["cls"] = np.array([c[0] for c in classes], dtype=np.int64)
+    st["conj"] = np.array([int(c[1]) for c in classes], dtype=np.int64)
+    value = (s_vec, s_sq, ff, ops, classes, st)
     self._invariants = (key, value)
     return value
 
@@ -947,6 +961,7 @@ class calculator(object):
         c = calculator(self.h[a:b], self.m[a:b], self.n_x4, self.table, threads=threads, radiation=self.radiation)
         c._share_classes, c._mode = self._share_classes, "atoms"
         c._tables = self._tables
+        c.use_compiled = self.use_compiled
         subs.append(c)
       self._sub[key] = subs
     return self._sub[key]
@@ -964,18 +979,20 @@ class calculator(object):
   @staticmethod
   def _atom_key(xs, n_x4):
     """Everything the per-atom x4 tables depend on: every wave and crenel of every atom, the average occupancy,
-    n_x4. Not the site or the ADPs (they do not enter the tables)."""
+    n_x4, and whether the ADP is isotropic (the compiled column layout). Not the site or the ADP values (they do not
+    enter the tables)."""
     parts = [n_x4, XHARM_MODE]
     for at in xs.atoms:
       parts.append((at.a.tobytes(), at.b.tobytes(), at.occ_sin.tobytes(), at.occ_cos.tobytes(),
                     at.u_sin.tobytes(), at.u_cos.tobytes(), at.legendre.tobytes(), at.xharm.tobytes(),
-                    at.u_xharm.tobytes(), at.crenel, at.occupancy,
+                    at.u_xharm.tobytes(), at.crenel, at.occupancy, at.u_star is None,
                     None if at.sawtooth is None else (at.sawtooth[0].tobytes(),) + tuple(at.sawtooth[1:])))
     return tuple(parts)
 
   def _atom_tables(self, xs, gradients):
     """Per atom: the x4 nodes and weights, sin/cos tables, u, p(x4), the ADP-wave sum at the nodes (pre) and
-    the gradients' local tables (extra). They do not depend on the reflections, so the slices of a refinement
+    the gradients' local tables (extra), and for the compiled sums their node arrays and column specifications
+    (comp, _compiled_atom). They do not depend on the reflections, so the slices of a refinement
     share one set (self._tables, one dict for a calculator and all its slices), rebuilt when _atom_key changes -
     after every parameter update - and kept while only sites, ADPs or the scale move."""
     key = self._atom_key(xs, self.n_x4)
@@ -996,8 +1013,11 @@ class calculator(object):
         pre.append((x4, wt, sin_t, cos_t, at.displacement(x4), at.occupancy_at(x4), uw,
                     1.0 / at.crenel[1] if at.crenel else 1.0))
         extra.append(_local_tables(at, x4, sin_t, cos_t) if gradients else None)
-      t.update(key=key, gradients=gradients, value=(pre, extra))
-      return pre, extra
+      # the compiled sums' node arrays and column specifications, from the same tables
+      comp = [_compiled_atom(at, pre[ia], extra[ia], gradients) for ia, at in enumerate(xs.atoms)] \
+          if _ext is not None else None
+      t.update(key=key, gradients=gradients, value=(pre, extra, comp))
+      return pre, extra, comp
 
   def _resolve_n_x4(self, xs):
     """With n_x4 = "auto": the rule's n_x4, set with 25 % headroom on z, and set again (slices dropped, so that
@@ -1016,7 +1036,7 @@ class calculator(object):
     if self.pool_mode(xs) == "reflections":
       subs = self._chunks(self._threads())
       for c in subs:
-        c._share_classes = self._share_classes
+        c._share_classes, c.use_compiled = self._share_classes, self.use_compiled
       with concurrent.futures.ThreadPoolExecutor(len(subs)) as ex:
         parts = list(ex.map(lambda c: c.compute(xs, flags, gradients), subs))
       f = np.concatenate([p[0] for p in parts])
@@ -1027,7 +1047,7 @@ class calculator(object):
   def _compute_rows(self, xs, flags=None, gradients=False):
     flags = _flags(flags)
     q = xs.q
-    s_vec, s_sq, ff, ops, classes = self._per_operation(xs)
+    s_vec, s_sq, ff, ops, classes, st = self._per_operation(xs)
     tab = None
     if self.table is not None:
       # by the rotations, not op.xyz: every operation but the generators has an empty xyz
@@ -1052,7 +1072,36 @@ class calculator(object):
                       "leg": np.zeros((nref, len(at.legendre), 3), complex),
                       "xh": np.zeros((nref, len(at.xharm), 3), complex),
                       "ux": np.zeros((nref, len(at.u_xharm), 6), complex)})
-    pre, extra = self._atom_tables(xs, gradients)
+    pre, extra, comp = self._atom_tables(xs, gradients)
+    compiled = self.use_compiled and comp is not None
+    if compiled and gradients:
+      # one (N, columns) block per atom, the gradient dict entries views of it
+      grads = []
+      for ia, at in enumerate(xs.atoms):
+        g = np.zeros((nref, comp[ia]["ncol"]), complex)
+        gr = {}
+        for key, (off, shape) in comp[ia]["offsets"].items():
+          width = int(np.prod(shape)) if shape else 1
+          gr[key] = g[:, off] if not shape else g[:, off:off + width].reshape((nref,) + shape)
+        gr["_all"] = g
+        grads.append(gr)
+    if compiled:
+      ops_c = (st["hp"], st["ph0"], st["dw6"], st["sp"], st["mp"], st["s_sq"], st["cls"], st["conj"])
+
+      def atom_sum_compiled(ia):
+        at, c = xs.atoms[ia], comp[ia]
+        if tab is None:
+          f = ff[at.scattering_type][None, :]
+        else:
+          f = np.array([tab[iop][:, ia] for iop in range(len(ops))])
+        f = np.ascontiguousarray(f, dtype=complex)
+        out = np.zeros(nref, complex)
+        u_star = np.zeros(0) if at.u_star is None else np.ascontiguousarray(at.u_star, dtype=float)
+        _ext.atom_sums(ops_c + (f,),
+                       (np.ascontiguousarray(at.site, dtype=float), at.u_iso, u_star, at.site_weight, c["x4"],
+                        c["disp"], c["uw"], c["w"], c["du"], c["duw"], c["w2"], c["specs"], c["spec_c"]),
+                       (out, grads[ia]["_all"] if gradients else None))
+        return out
 
     def atom_sum(ia):
       """One atom's share of F over every operation; it touches only its own gradient blocks."""
@@ -1172,6 +1221,8 @@ class calculator(object):
     # not depend on the thread count. About 40 bytes per (reflection, node) per thread are live at once.
     n_threads = max(1, min(self._threads(), len(xs.atoms),
                            int(2e9 // (40 * nref * max(len(p[0]) for p in pre)))))
+    if compiled:
+      atom_sum = atom_sum_compiled      # the GIL is released for a whole atom; no (N, K) buffers
     if n_threads == 1:
       for ia in range(len(xs.atoms)):
         f_calc += atom_sum(ia)
@@ -1182,6 +1233,30 @@ class calculator(object):
     f_sq = np.abs(f_calc) ** 2
     if not gradients:
       return f_calc, xs.scale * f_sq, None
+    if compiled:
+      # per atom, the refined columns of its one block straight into d|F|^2/dp
+      flag_of = {"site": "site", "adp": "adp", "occ": "occupancy", "a": "modulation", "b": "modulation",
+                 "os": "occ_waves", "oc": "occ_waves", "us": "adp_waves", "uc": "adp_waves", "cren": "crenel",
+                 "leg": "legendre", "xh": "xharm", "ux": "u_xharm"}
+      idx = []
+      for ia in range(len(xs.atoms)):
+        sel = []
+        for key, (off, shape) in comp[ia]["offsets"].items():
+          if flags[flag_of[key]]:
+            sel.extend(range(off, off + (int(np.prod(shape)) if shape else 1)))
+        idx.append(sel)
+      d_fsq = np.empty((nref, sum(len(i) for i in idx) + int(flags["scale"])))
+      fr, fi, j = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None], 0
+      for gr, sel in zip(grads, idx):
+        g = gr["_all"]
+        if len(sel) == g.shape[1]:
+          d_fsq[:, j:j + len(sel)] = fr * g.real + fi * g.imag
+        elif sel:
+          d_fsq[:, j:j + len(sel)] = fr * g.real[:, sel] + fi * g.imag[:, sel]
+        j += len(sel)
+      if flags["scale"]:
+        d_fsq[:, j] = f_sq
+      return f_calc, xs.scale * f_sq, d_fsq
     cols = []
     for gr in grads:
       for key, flag in (("site", "site"), ("adp", "adp"), ("occ", "occupancy"), ("a", "modulation"),
@@ -1199,6 +1274,95 @@ class calculator(object):
     if flags["scale"]:
       d_fsq[:, j] = f_sq
     return f_calc, xs.scale * f_sq, d_fsq
+
+
+# the compiled per-class x4 sums (smtbx_modulation_ext.atom_sums); None when the extension is not built, and then
+# the numpy path below is used. calculator.use_compiled = False forces numpy.
+USE_COMPILED = True     # the default of calculator.use_compiled
+try:
+  import boost_adaptbx.boost.python as _bp
+  _ext = _bp.import_ext("smtbx_modulation_ext")
+except ImportError:
+  _ext = None
+
+# the gradient blocks of one atom in the order calculator._compute_rows lists them, (key, width per atom)
+def _grad_layout(at):
+  nh, no, nu = at.n_harmonics, len(at.occ_sin), len(at.u_sin)
+  return [("site", (3,)), ("adp", (1 if at.u_star is None else 6,)), ("occ", ()), ("a", (nh, 3)), ("b", (nh, 3)),
+          ("os", (no,)), ("oc", (no,)), ("us", (nu, 6)), ("uc", (nu, 6)), ("cren", (2 if at.crenel else 0,)),
+          ("leg", (len(at.legendre), 3)), ("xh", (len(at.xharm), 3)), ("ux", (len(at.u_xharm), 6))]
+
+
+def _compiled_atom(at, pre, ex, gradients):
+  """What atom_sums needs of one atom besides the site and ADP: the node arrays, the weight columns w (and w2 for
+  the x4 derivative of the integrand, crenel atoms) whose x4 sums with e the numpy path forms one by one in
+  x4_sums, and the specifications that turn the sums into gradient columns as atom_sum's odd/even terms do:
+  rows (source, column, kind, first output column), kinds 0 c E, 1 c O hp, 2 c O sp (2 pi i sp), 3 c E dw6,
+  4 c E s^2."""
+  x4, wt, sin_t, cos_t, disp, p, uw, dp_docc = pre
+  pw = wt * p
+  cols, cols2, specs, cvals = [pw], [], [], []
+  K = len(x4)
+  # node arrays component-major, (3, K) and (6, K), so that the node loops read them contiguously
+  out = {"x4": np.ascontiguousarray(x4), "disp": np.ascontiguousarray(disp.T),
+         "uw": np.zeros(0) if uw is None else np.ascontiguousarray(uw.T), "du": np.zeros(0), "duw": np.zeros(0)}
+  if gradients:
+    off, offs = 0, {}
+    for key, shape in _grad_layout(at):
+      offs[key] = (off, shape)
+      off += int(np.prod(shape)) if shape else 1
+    out["ncol"], out["offsets"] = off, offs
+    two_pi_i = 1j * TWO_PI
+
+    def col(v, second=False):
+      lst = cols2 if second else cols
+      lst.append(v)
+      return (1 if second else 0, len(lst) - 1)
+
+    def spec(src, kind, dest, c):
+      specs.append((src[0], src[1], kind, dest))
+      cvals.append(c)
+    c_pw, c_wt = (0, 0), col(wt)
+    spec(c_pw, 1, offs["site"][0], two_pi_i)
+    if at.u_star is None:
+      spec(c_pw, 4, offs["adp"][0], -TWO_PI_SQ)
+    else:
+      spec(c_pw, 3, offs["adp"][0], 1.0)
+    spec(c_wt, 0, offs["occ"][0], dp_docc)
+    nh, no, nu = at.n_harmonics, len(at.occ_sin), len(at.u_sin)
+    for n in range(max(nh, nu)):
+      c_s, c_c = col(pw * sin_t[n]), col(pw * cos_t[n])
+      if n < nh:
+        spec(c_s, 2, offs["a"][0] + 3 * n, two_pi_i)
+        spec(c_c, 2, offs["b"][0] + 3 * n, two_pi_i)
+      if n < nu:
+        spec(c_s, 3, offs["us"][0] + 6 * n, 1.0)
+        spec(c_c, 3, offs["uc"][0] + 6 * n, 1.0)
+    for n in range(no):
+      spec(col(wt * sin_t[n]), 0, offs["os"][0] + n, 1.0)
+      spec(col(wt * cos_t[n]), 0, offs["oc"][0] + n, 1.0)
+    for n in range(len(at.legendre)):
+      spec(col(pw * ex["leg"][n]), 2, offs["leg"][0] + 3 * n, two_pi_i)
+    for n in range(len(at.xharm)):
+      spec(col(pw * ex["xh"][n]), 2, offs["xh"][0] + 3 * n, two_pi_i)
+    for n in range(len(at.u_xharm)):
+      spec(col(pw * ex["ux"][n]), 3, offs["ux"][0] + 6 * n, 1.0)
+    if at.crenel:
+      loc, dp, c0 = ex["loc"], ex["dp"], offs["cren"][0]
+      spec(col(pw, True), 0, c0, 1.0)
+      spec(col(wt * dp), 0, c0, 1.0)
+      spec(col(wt * ex["p_waves"] * dp_docc), 0, c0 + 1, 1.0)
+      spec(col(pw * loc, True), 0, c0 + 1, 1.0)
+      spec(col(wt * dp * loc), 0, c0 + 1, 1.0)
+      out["du"] = np.ascontiguousarray(ex["du"].T)
+      if ex["duw"] is not None:
+        out["duw"] = np.ascontiguousarray(ex["duw"].T)
+  out["w"] = np.ascontiguousarray(np.array(cols))          # (M, K)
+  out["w2"] = np.ascontiguousarray(np.array(cols2)) if cols2 else np.zeros(0)
+  out["specs"] = np.array(specs, dtype=np.int64).reshape(-1, 4)
+  out["spec_c"] = np.array(cvals, dtype=complex)
+  assert out["w"].shape == (len(cols), K)
+  return out
 
 
 def _local_tables(at, x4, sin_t, cos_t):

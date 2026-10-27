@@ -3,6 +3,7 @@ from __future__ import absolute_import, division, print_function
 
 import math
 
+import os
 import numpy as np
 
 from cctbx import crystal, miller, sgtbx, uctbx, xray
@@ -955,7 +956,80 @@ def test_auto_n_x4():
         % (worst, ", ".join(chosen), n0, c.n_x4))
 
 
+def _all_blocks_model():
+  """The model of test_gradients_all_wave_blocks: anisotropic ADPs, occupancy and ADP waves on every atom, two
+  crenel atoms with Legendre, x-harmonic and ADP x-harmonic terms, one sawtooth, dispersion."""
+  from cctbx import adptbx
+  xs = model(n_harmonics=2, amp=0.02)
+  rng = np.random.RandomState(7)
+  for at in xs.atoms:
+    at.u_star = np.array(adptbx.u_iso_as_u_star(xs.unit_cell, at.u_iso))
+    at.occ_sin, at.occ_cos = 0.1 * rng.uniform(-1, 1, 2), 0.1 * rng.uniform(-1, 1, 2)
+    at.u_sin = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+    at.u_cos = at.u_star[None, :] * 0.1 * rng.uniform(-1, 1, (2, 6))
+  for i, (c, w) in ((2, (0.3, 0.6)), (3, (0.71, 0.45))):
+    at = xs.atoms[i]
+    at.crenel = (c, w)
+    at.legendre = 0.01 * rng.uniform(-1, 1, (3, 3))
+    at.xharm = 0.01 * rng.uniform(-1, 1, (3, 3))
+    at.u_xharm = at.u_star[None, :] * 0.05 * rng.uniform(-1, 1, (2, 6))
+  xs.atoms[3].sawtooth = (0.01 * rng.uniform(-1, 1, 3), 0.65, 0.5)
+  xs.dispersion = {"Cu": (0.3, 1.2)}
+  return xs
+
+
+def test_compiled_x4_sums_equivalence():
+  """The compiled per-class x4 sums (smtbx_modulation_ext) against the numpy reference path (use_compiled=False):
+  F, F^2 and every gradient column to 1e-12 relative, with and without gradients, on the small model (isotropic),
+  the all-blocks model (anisotropic, occupancy/ADP waves, crenels, Legendre, x-harmonics, sawtooth, dispersion),
+  the medium-like model, electron scattering, refined and fixed blocks mixed, and through the atom and the
+  reflection pools."""
+  if mod._ext is None:
+    print("  compiled x4 sums: smtbx_modulation_ext not built, skipped")
+    return
+  every = {"site": True, "adp": True, "u_iso": True, "occupancy": True, "modulation": True, "occ_waves": True,
+           "adp_waves": True, "crenel": True, "legendre": True, "xharm": True, "u_xharm": True, "scale": True}
+  some = {"site": False, "adp": True, "modulation": True, "occ_waves": False, "crenel": True, "scale": False}
+  cases = [("small", model(n_harmonics=2, amp=0.02), every, "xray", None),
+           ("all blocks", _all_blocks_model(), every, "xray", None),
+           ("all blocks, some refined", _all_blocks_model(), some, "xray", None),
+           ("medium-like", _medium_like()[0], every, "xray", None),
+           ("electrons", model(n_harmonics=2, amp=0.02), every, "electron", None),
+           ("small, reflection pool", model(n_harmonics=2, amp=0.02), every, "xray", "reflections")]
+  worst = 0.0
+  for name, xs, flags, radiation, mode in cases:
+    h, m = reflections(xs, d_min=1.2, m_max=2)
+    res = []
+    for compiled in (False, True):
+      c = mod.calculator(h, m, radiation=radiation, threads=4 if mode else None)
+      c.use_compiled, c._mode = compiled, mode
+      f, fsq, d = c.compute(xs, flags, gradients=True)
+      f0, fsq0, _ = c.compute(xs)
+      res.append((f, fsq, d, f0, fsq0))
+    for a, b in zip(res[0], res[1]):
+      worst = max(worst, np.max(np.abs(a - b)) / np.max(np.abs(a)))
+  assert worst <= 1e-12, worst
+  print("  compiled x4 sums = numpy x4 sums: F, F^2 and gradients %.1e (%d models and modes)" % (worst, len(cases)))
+
+
+def test_compiled_central_differences():
+  """The central-difference gradient checks again, on the compiled path."""
+  if mod._ext is None:
+    return
+  print("  compiled x4 sums, central differences:")
+  mod.USE_COMPILED = True
+  try:
+    test_gradients_finite_difference()
+    test_gradients_aniso_occ_adp_crenel()
+    test_gradients_all_wave_blocks()
+  finally:
+    mod.USE_COMPILED = False
+
+
 def run():
+  # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
+  # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
+  mod.USE_COMPILED = False
   test_superspace_closure()
   test_main_reflections_match_cctbx()
   test_bessel_single_harmonic()
@@ -965,6 +1039,8 @@ def run():
   test_shared_tables_equivalence()
   test_lm_factor_solve_equivalence()
   test_auto_n_x4()
+  test_compiled_x4_sums_equivalence()
+  test_compiled_central_differences()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()
