@@ -901,6 +901,8 @@ class calculator(object):
     self._mode = None            # None: pool_mode decides; "atoms" or "reflections" forces it
     self._sub = {}               # reflection-slice calculators, by number of slices (_chunks)
     self._tables = {"lock": threading.Lock()}   # the per-atom x4 tables, shared with the slices (_atom_tables)
+    # buffers lent by _normal_equations for one pass over its slices (_take); None: every array is new
+    self._workspace = None
 
   def table_indices(self, ssg):
     """The rows a NoSpherA2 table needs for these reflections (-hkl_scale TABLE_SCALE): round(TABLE_SCALE S R)
@@ -1109,10 +1111,16 @@ class calculator(object):
     pre, extra, comp = self._atom_tables(xs, gradients)
     compiled = self.use_compiled and comp is not None
     if compiled and gradients:
-      # one (N, columns) block per atom, the gradient dict entries views of it
+      # one (N, columns) block per atom, the gradient dict entries views of it; all atoms' blocks in one flat
+      # buffer, reused from slice to slice when _normal_equations lends a workspace (a fresh ~0.3 GB per slice
+      # costs page faults that serialise the atom threads: 1.5-2.3 s per large slice instead of 1.2-1.4)
       grads = []
+      widths = [nref * comp[ia]["ncol"] for ia in range(len(xs.atoms))]
+      flat = _take(self._workspace, "g", (sum(widths),), complex, zero=True)
+      o = 0
       for ia, at in enumerate(xs.atoms):
-        g = np.zeros((nref, comp[ia]["ncol"]), complex)
+        g = flat[o:o + widths[ia]].reshape(nref, comp[ia]["ncol"])
+        o += widths[ia]
         gr = {}
         for key, (off, shape) in comp[ia]["offsets"].items():
           width = int(np.prod(shape)) if shape else 1
@@ -1279,7 +1287,8 @@ class calculator(object):
           if flags[flag_of[key]]:
             sel.extend(range(off, off + (int(np.prod(shape)) if shape else 1)))
         idx.append(sel)
-      d_fsq = np.empty((nref, sum(len(i) for i in idx) + int(flags["scale"]) + int(flags["extinction"])))
+      d_fsq = _take(self._workspace, "d", (nref, sum(len(i) for i in idx) + int(flags["scale"])
+                                           + int(flags["extinction"])), float)
       fr, fi, j = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None], 0
       for gr, sel in zip(grads, idx):
         g = gr["_all"]
@@ -1308,6 +1317,22 @@ class calculator(object):
     if flags["scale"]:
       d_fsq[:, j] = f_sq
     return _finish(xs, flags, f_calc, f_sq, d_fsq, s_sq)
+
+
+def _take(ws, name, shape, dtype, zero=False):
+  """An array of this shape: a view of the workspace's buffer `name` (grown when too small) when there is a
+  workspace, else a new one. The workspace belongs to one _normal_equations pass, which uses every slice's
+  arrays before it computes the next, and is dropped at its end: nothing is kept between passes."""
+  n = int(np.prod(shape))
+  if ws is None:
+    return np.zeros(shape, dtype) if zero else np.empty(shape, dtype)
+  buf = ws.get(name)
+  if buf is None or buf.size < n or buf.dtype != np.dtype(dtype):
+    buf = ws[name] = np.empty(n, dtype)
+  out = buf[:n].reshape(shape)
+  if zero:
+    out.fill(0)
+  return out
 
 
 def _finish(xs, flags, f_calc, f_sq, d_fsq, s_sq):
@@ -1805,9 +1830,14 @@ def _normal_equations(calc, xs, flags, f_obs_sq, sw, project, max_rows):
   except ImportError:
     dsyrk = None
   fc_parts, jtj, jtr, a = [], None, None, 0
+  ws = {}       # buffers the slices reuse in turn: each slice's d is used up before the next one is computed
   for c in subs:
     b = a + len(c.m)
-    _, fc_sq, d = c.compute(xs, flags, gradients=True)
+    c._workspace = ws
+    try:
+      _, fc_sq, d = c.compute(xs, flags, gradients=True)
+    finally:
+      c._workspace = None
     d *= sw[a:b, None]      # in place: d is this slice's own
     j = project(d)
     del d
@@ -1841,16 +1871,16 @@ def _mirror_upper(a, block=1024):
 
 
 def _rows_per_slice(xs, flags, max_memory_mb):
-  """How many reflections a slice of the normal equations may hold. The peak is inside calculator.compute: per
-  reflection 16 bytes for every column of the atoms' complex gradient blocks (all of an atom's blocks, refined or
-  not) and 8 for every refined parameter's real dF^2/dp, 5 % on top for the node buffers and block temporaries.
-  On the large test problem that is 25 bytes per parameter against 24.4 measured (tracemalloc); the projection
-  that follows needs 16."""
+  """How many reflections a slice of the normal equations may hold. Per reflection: 16 bytes for every column of
+  the atoms' complex gradient blocks (all of an atom's blocks, refined or not), 8 for every refined parameter's
+  real dF^2/dp and 8 for its projection, 5 % on top for the node buffers and block temporaries. The compiled path
+  keeps the gradient blocks and dF^2/dp in the pass's workspace while the projection is made, so all three are
+  alive at once (33 bytes per parameter on the large test problem)."""
   n_p = len(get_parameters(xs, flags))
   n_c = sum(3 + (1 if at.u_star is None else 6) + 1 + 6 * at.n_harmonics + 2 * len(at.occ_sin) + 12 * len(at.u_sin)
             + (2 if at.crenel else 0) + 3 * len(at.legendre) + 3 * len(at.xharm) + 6 * len(at.u_xharm)
             for at in xs.atoms)
-  return max(256, int(max_memory_mb * 2 ** 20 // (1.05 * (16 * n_c + 8 * max(n_p, 1)))))
+  return max(256, int(max_memory_mb * 2 ** 20 // (1.05 * (16 * n_c + 16 * max(n_p, 1)))))
 
 
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", damping=1e-3, log=None, verbose=True,

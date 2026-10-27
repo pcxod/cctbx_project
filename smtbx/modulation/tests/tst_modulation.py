@@ -1194,6 +1194,44 @@ def test_xharm_against_jana():
     print("  x-harmonics vs JANA: samples not here, skipped")
 
 
+def test_slice_workspace_equivalence():
+  """The compiled path with the buffers _normal_equations lends its slices (gradient blocks and dF^2/dp reused from
+  slice to slice) against every slice computed on its own with fresh arrays: F^2 bit for bit, J^T r and J^T J to
+  1e-14 relative, small and medium-like; a slice's own compute() outside a pass gets new arrays (no workspace)."""
+  if mod._ext is None:
+    print("  slice workspace: smtbx_modulation_ext not built, skipped")
+    return
+  worst = 0.0
+  for xs, flags in ((model(n_harmonics=2, amp=0.02), {"site": True, "u_iso": True, "modulation": True, "scale": True}),
+                    _medium_like()):
+    fl = mod._flags(flags)
+    h, m = reflections(xs, d_min=1.4, m_max=2)
+    fo = mod.calculator(h, m).compute(xs)[1] * 1.01
+    sw = np.full(len(m), 0.3)
+    zb = mod._reduction_blocks(xs, fl)
+    project = lambda d: mod._times_blocks(d, zb)
+    calc = mod.calculator(h, m)
+    calc.use_compiled = True
+    fc, jtj, jtr = mod._normal_equations(calc, xs, fl, fo, sw, project, len(m) // 4 + 1)
+    subs = mod._slices(calc, len(m), len(m) // 4 + 1)
+    assert all(c._workspace is None for c in subs)
+    rj = rr = None
+    fcs, a = [], 0
+    for c in subs:
+      b = a + len(c.m)
+      _, f, d = c.compute(xs, flags, gradients=True)
+      j = project(sw[a:b, None] * d)
+      r = sw[a:b] * (fo[a:b] - f)
+      rj = j.T.dot(j) if rj is None else rj + j.T.dot(j)
+      rr = j.T.dot(r) if rr is None else rr + j.T.dot(r)
+      fcs.append(f)
+      a = b
+    assert np.array_equal(fc, np.concatenate(fcs))
+    worst = max(worst, np.max(np.abs(jtj - rj)) / np.max(np.abs(rj)), np.max(np.abs(jtr - rr)) / np.max(np.abs(rr)))
+  assert worst <= 1e-14, worst
+  print("  slices with the pass's reused buffers = slices with fresh arrays: F^2 bit for bit, J^T J, J^T r %.1e" % worst)
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
@@ -1213,6 +1251,7 @@ def run():
   test_xharm_orthonormal_basis()
   test_xharm_against_jana()
   test_extinction()
+  test_slice_workspace_equivalence()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()
