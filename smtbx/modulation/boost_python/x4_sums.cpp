@@ -50,7 +50,6 @@ namespace smtbx { namespace modulation { namespace {
   {
     const double two_over_pi = 0.63661977236758134308, p1 = 1.57079632673412561417e+00,
                  p2 = 6.07710050650619224932e-11, p3 = 2.02226624879595063154e-21, magic = 6755399441055744.0;
-#pragma omp simd
     for (std::size_t i = 0; i < n; i++) {
       double q = (x[i] * two_over_pi + magic) - magic;     // round to nearest, no libm call (|x| < 2^50)
       double r = ((x[i] - q * p1) - q * p2) - q * p3;
@@ -74,9 +73,10 @@ namespace smtbx { namespace modulation { namespace {
   {
     const double log2e = 1.44269504088896338700, ln2hi = 6.93147180369123816490e-01,
                  ln2lo = 1.90821492927058770002e-10, magic = 6755399441055744.0;
-#pragma omp simd
     for (std::size_t i = 0; i < n; i++) {
-      double v = std::min(std::max(x[i], -708.0), 709.0);
+      double xv = x[i];
+      double v = xv < -708.0 ? -708.0 : xv;
+      v = v > 709.0 ? 709.0 : v;
       double k = (v * log2e + magic) - magic;
       double r = (v - k * ln2hi) - k * ln2lo;
       double p = 1.0 + r * (1.0 + r * (1.0 / 2 + r * (1.0 / 6 + r * (1.0 / 24 + r * (1.0 / 120 + r * (1.0 / 720
@@ -93,16 +93,26 @@ namespace smtbx { namespace modulation { namespace {
     }
   }
 
-  // sum_k e_k w_k over the nodes for every column, e = c + i s, w (M, K) contiguous along k
+  // sum_k e_k w_k over the nodes for every column, e = c + i s, w (M, K) contiguous along k. Four independent
+  // partial sums per part, so that compilers vectorise the loop without an "omp simd reduction" clause (MSVC
+  // ignores it, C4849) and without reassociating floating-point sums on their own
   X4_CLONES
   void node_sums(const double *c, const double *s, const double *w, std::size_t K, std::size_t M, cd *r)
   {
+    std::size_t K4 = K & ~std::size_t(3);
     for (std::size_t j = 0; j < M; j++) {
       const double *wj = w + j * K;
-      double re = 0, im = 0;
-#pragma omp simd reduction(+:re,im)
-      for (std::size_t k = 0; k < K; k++) { re += c[k] * wj[k]; im += s[k] * wj[k]; }
-      r[j] += cd(re, im);
+      double re[4] = {0, 0, 0, 0}, im[4] = {0, 0, 0, 0};
+      for (std::size_t k = 0; k < K4; k += 4)
+        for (int l = 0; l < 4; l++) {
+          re[l] += c[k + l] * wj[k + l];
+          im[l] += s[k + l] * wj[k + l];
+        }
+      for (std::size_t k = K4; k < K; k++) {
+        re[0] += c[k] * wj[k];
+        im[0] += s[k] * wj[k];
+      }
+      r[j] += cd((re[0] + re[1]) + (re[2] + re[3]), (im[0] + im[1]) + (im[2] + im[3]));
     }
   }
 
@@ -212,17 +222,14 @@ namespace smtbx { namespace modulation { namespace {
         {
           const double a0 = two_pi * s3[0], a1 = two_pi * s3[1], a2 = two_pi * s3[2], am = two_pi * m;
           const double *u0 = Disp, *u1 = Disp + K, *u2 = Disp + 2 * K;
-#pragma omp simd
           for (std::size_t k = 0; k < K; k++) ph[k] = ((a0 * u0[k] + a1 * u1[k]) + a2 * u2[k]) + am * X4[k];
         }
         sincos_array(&ph[0], &es[0], &ec[0], K);
         if (Uw) {
-#pragma omp simd
           for (std::size_t k = 0; k < K; k++)
             dwf[k] = d6[0] * Uw[k] + d6[1] * Uw[K + k] + d6[2] * Uw[2 * K + k] + d6[3] * Uw[3 * K + k]
                      + d6[4] * Uw[4 * K + k] + d6[5] * Uw[5 * K + k];
           exp_array(&dwf[0], K);
-#pragma omp simd
           for (std::size_t k = 0; k < K; k++) { ec[k] *= dwf[k]; es[k] *= dwf[k]; }
         }
         node_sums(&ec[0], &es[0], W, K, M, &r[0]);
