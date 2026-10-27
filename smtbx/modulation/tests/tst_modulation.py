@@ -1112,6 +1112,61 @@ def test_xharm_orthonormal_basis():
         "orthonormal-basis msCIF = its displacement field to %.1e" % (e_basis, e_ortho, e_field))
 
 
+def test_extinction():
+  """SHELX-style EXTI on the modulated F^2: Fc^2 = scale |F|^2 (1 + 0.001 x |F|^2 lambda^3 / sin 2 theta)^(-1/2).
+  Every gradient (sites, ADPs, waves, scale, x) against central differences, numpy and compiled paths, with a
+  correction of up to ~40 %; x = 0 gives the plain F^2 bit for bit; and a refinement started from x = 0 recovers
+  x from data made with it."""
+  import copy
+  xs = model(n_harmonics=2, amp=0.02)
+  xs.wavelength = 0.71073
+  h, m = reflections(xs, d_min=1.2, m_max=2)
+  flags = {"site": True, "u_iso": True, "modulation": True, "scale": True, "extinction": True}
+  plain = mod.calculator(h, m).compute(xs)[1]
+  # x so that the strongest reflection is reduced by ~40 % (the correction factor 1/sqrt(1 + a x F^2))
+  s = h + np.outer(m, xs.q)
+  g6 = xs.unit_cell.reciprocal_metrical_matrix()
+  gm = np.array([[g6[0], g6[3], g6[4]], [g6[3], g6[1], g6[5]], [g6[4], g6[5], g6[2]]])
+  sin_t = 0.71073 * np.sqrt(np.einsum("ni,ij,nj->n", s, gm, s)) / 2
+  a = 0.001 * 0.71073 ** 3 / (2 * sin_t * np.sqrt(1 - sin_t ** 2))
+  xs.extinction = 1.8 / np.max(a * plain)
+  worst = {}
+  for compiled in ((False, True) if mod._ext is not None else (False,)):
+    calc = mod.calculator(h, m)
+    calc.use_compiled = compiled
+    _, fsq, d = calc.compute(xs, flags, gradients=True)
+    p0 = mod.get_parameters(xs, flags)
+    assert d.shape[1] == len(p0) and p0[-1] == xs.extinction
+    for k in range(len(p0)):
+      step = 1e-5 * max(1e-2, abs(p0[k]))
+      p = p0.copy(); p[k] += step
+      mod.set_parameters(xs, flags, p)
+      fp = calc.compute(xs)[1]
+      p[k] -= 2 * step
+      mod.set_parameters(xs, flags, p)
+      fm = calc.compute(xs)[1]
+      mod.set_parameters(xs, flags, p0)
+      num = (fp - fm) / (2 * step)
+      name = "extinction" if k == len(p0) - 1 else ("scale" if k == len(p0) - 2 else "atoms")
+      e = np.max(np.abs(num - d[:, k])) / max(np.max(np.abs(num)), 1e-8)
+      worst[name] = max(worst.get(name, 0.0), e)
+  assert max(worst.values()) < 1e-6, worst
+  i = int(np.argmax(plain))
+  shrink = 1 - fsq[i] / (xs.scale * plain[i])
+  x_true = xs.extinction
+  ys = copy.deepcopy(xs)
+  ys.extinction = 0.0
+  assert np.array_equal(mod.calculator(h, m).compute(ys)[1], plain)
+  data = mod.calculator(h, m).compute(xs)[1]
+  sig = 0.01 * data + 1e-4 * data.max()
+  mod.refine(ys, h, m, data, sig, flags={"site": False, "u_iso": False, "modulation": False, "scale": True,
+                                         "extinction": True}, cycles=10, verbose=False)
+  assert abs(ys.extinction - x_true) < 1e-4 * x_true, (ys.extinction, x_true)
+  print("  extinction (EXTI, strongest reflection -%.0f %%): gradients = central differences, %s; x = 0 gives "
+        "F^2 unchanged; refined from 0 back to x to %.1e" % (100 * shrink, ", ".join(
+          "%s %.1e" % kv for kv in sorted(worst.items())), abs(ys.extinction - x_true) / x_true))
+
+
 def test_xharm_against_jana():
   """COD 2108551 and 2108550 (crenels with JANA x-harmonics, Legendre terms, ADP x-harmonics) against JANA's
   F^2calc of their refln loops, the x-harmonics read as plain and as orthonormalised, when the samples are on this
@@ -1157,6 +1212,7 @@ def run():
   test_mscif_write_round_trip()
   test_xharm_orthonormal_basis()
   test_xharm_against_jana()
+  test_extinction()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()

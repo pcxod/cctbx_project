@@ -679,14 +679,17 @@ class modulated_atom(object):
 
 
 class modulated_structure(object):
-  """dispersion: {scattering type: (f', f'')}."""
+  """dispersion: {scattering type: (f', f'')}. extinction: SHELX's EXTI x, applied when it is not 0 (or is refined),
+  which needs the wavelength (Angstrom): Fc^2 = scale |F|^2 (1 + 0.001 x |F|^2 lambda^3 / sin 2 theta)^(-1/2)."""
 
-  def __init__(self, unit_cell, ssg, atoms, scale=1.0, dispersion=None):
+  def __init__(self, unit_cell, ssg, atoms, scale=1.0, dispersion=None, extinction=0.0, wavelength=None):
     self.unit_cell = unit_cell
     self.ssg = ssg
     self.atoms = list(atoms)
     self.scale = float(scale)
     self.dispersion = dict(dispersion or {})
+    self.extinction = float(extinction)
+    self.wavelength = wavelength
 
   @property
   def q(self):
@@ -1263,7 +1266,7 @@ class calculator(object):
           f_calc += c
     f_sq = np.abs(f_calc) ** 2
     if not gradients:
-      return f_calc, xs.scale * f_sq, None
+      return _finish(xs, flags, f_calc, f_sq, None, s_sq)
     if compiled:
       # per atom, the refined columns of its one block straight into d|F|^2/dp
       flag_of = {"site": "site", "adp": "adp", "occ": "occupancy", "a": "modulation", "b": "modulation",
@@ -1276,7 +1279,7 @@ class calculator(object):
           if flags[flag_of[key]]:
             sel.extend(range(off, off + (int(np.prod(shape)) if shape else 1)))
         idx.append(sel)
-      d_fsq = np.empty((nref, sum(len(i) for i in idx) + int(flags["scale"])))
+      d_fsq = np.empty((nref, sum(len(i) for i in idx) + int(flags["scale"]) + int(flags["extinction"])))
       fr, fi, j = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None], 0
       for gr, sel in zip(grads, idx):
         g = gr["_all"]
@@ -1287,7 +1290,7 @@ class calculator(object):
         j += len(sel)
       if flags["scale"]:
         d_fsq[:, j] = f_sq
-      return f_calc, xs.scale * f_sq, d_fsq
+      return _finish(xs, flags, f_calc, f_sq, d_fsq, s_sq)
     cols = []
     for gr in grads:
       for key, flag in (("site", "site"), ("adp", "adp"), ("occ", "occupancy"), ("a", "modulation"),
@@ -1297,14 +1300,42 @@ class calculator(object):
         if flags[flag]:
           cols.append(gr[key].reshape(nref, -1))
     # d|F|^2/dp = 2 Re(F* dF/dp), block by block into one real array: no (N, n_params) complex temporary
-    d_fsq = np.empty((nref, sum(c.shape[1] for c in cols) + int(flags["scale"])))
+    d_fsq = np.empty((nref, sum(c.shape[1] for c in cols) + int(flags["scale"]) + int(flags["extinction"])))
     fr, fi, j = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None], 0
     for c in cols:
       d_fsq[:, j:j + c.shape[1]] = fr * c.real + fi * c.imag
       j += c.shape[1]
     if flags["scale"]:
       d_fsq[:, j] = f_sq
+    return _finish(xs, flags, f_calc, f_sq, d_fsq, s_sq)
+
+
+def _finish(xs, flags, f_calc, f_sq, d_fsq, s_sq):
+  """(F, Fc^2, dFc^2/dp) from F, |F|^2 and d(scale |F|^2)/dp (the scale column, if any, holding |F|^2): with
+  xs.extinction or flags["extinction"], SHELX's EXTI correction y = (1 + a x |F|^2)^(-1/2), a = 0.001 lambda^3 /
+  sin 2 theta, so that Fc^2 = scale |F|^2 y; the parameter columns take the factor d(|F|^2 y)/d|F|^2 =
+  y^3 (1 + a x |F|^2 / 2), the scale column |F|^2 y, the extinction column (the last one, allocated by the
+  caller) dFc^2/dx = -scale a |F|^4 y^3 / 2. Without extinction everything passes unchanged."""
+  ext = flags is not None and _flags(flags)["extinction"]
+  if not ext and xs.extinction == 0.0:
     return f_calc, xs.scale * f_sq, d_fsq
+  if not xs.wavelength:
+    raise ValueError("extinction needs modulated_structure.wavelength")
+  lam = float(xs.wavelength)
+  sin_t = np.minimum(lam * np.sqrt(s_sq) / 2, 1.0)
+  a = 0.001 * lam ** 3 / np.maximum(2 * sin_t * np.sqrt(1 - sin_t ** 2), 1e-12)
+  u = 1 + a * xs.extinction * f_sq
+  y = 1 / np.sqrt(u)
+  if d_fsq is not None:
+    fl = _flags(flags)
+    n_tail = int(fl["scale"]) + int(ext)
+    n_par = d_fsq.shape[1] - n_tail
+    d_fsq[:, :n_par] *= (y ** 3 * (1 + 0.5 * a * xs.extinction * f_sq))[:, None]
+    if fl["scale"]:
+      d_fsq[:, n_par] = f_sq * y
+    if ext:
+      d_fsq[:, -1] = -0.5 * xs.scale * a * f_sq ** 2 * y ** 3
+  return f_calc, xs.scale * f_sq * y, d_fsq
 
 
 # the compiled per-class x4 sums (smtbx_modulation_ext.atom_sums); None when the extension is not built, and then
@@ -1437,7 +1468,7 @@ def _local_tables(at, x4, sin_t, cos_t):
 def _flags(flags):
   out = {"site": True, "adp": True, "occupancy": False, "modulation": True, "occ_waves": True,
          "adp_waves": True, "crenel": False, "legendre": False, "xharm": False, "u_xharm": False,
-         "scale": True}
+         "scale": True, "extinction": False}
   for k, v in (flags or {}).items():
     out["adp" if k == "u_iso" else k] = v
   return out
@@ -1535,6 +1566,8 @@ def _reduction_blocks(xs, flags):
     blocks.append(vt[rank:].T)
   if flags["scale"]:
     blocks.append(np.eye(1))
+  if flags["extinction"]:
+    blocks.append(np.eye(1))
   return blocks
 
 
@@ -1599,6 +1632,8 @@ def get_parameters(xs, flags):
       p.extend(get())
   if flags["scale"]:
     p.append(xs.scale)
+  if flags["extinction"]:
+    p.append(xs.extinction)
   return np.array(p)
 
 
@@ -1612,6 +1647,9 @@ def set_parameters(xs, flags, p):
       i += k
   if flags["scale"]:
     xs.scale = float(p[i])
+    i += 1
+  if flags["extinction"]:
+    xs.extinction = float(p[i])
 
 
 # ---------------------------------------------------------------------------
@@ -1654,9 +1692,10 @@ class _average_link(object):
         if name in ("a", "b"):
           self.ab[(k, name)] = i
         i += n
-    self.n_p = i + (1 if flags["scale"] else 0)
+    self.n_tail = int(flags["scale"]) + int(flags["extinction"])     # scale, extinction: after the atoms
+    self.n_p = i + self.n_tail
     self.na = np.asarray(average.jacobian()).shape[1]
-    self.zb = _reduction_blocks(xs, dict(flags, site=False, adp=False, scale=False))
+    self.zb = _reduction_blocks(xs, dict(flags, site=False, adp=False, scale=False, extinction=False))
     self.zw = _block_diag(self.zb)
     self.follow = {}                # follower: (parent, cos, sin) of 2 pi n dx4, one row per harmonic
     for k, (kp, dx4) in (getattr(average, "follow", None) or {}).items():
@@ -1684,11 +1723,11 @@ class _average_link(object):
     return d
 
   def jacobian(self, d):
-    """Columns: the average's independent parameters, the free wave directions, the scale."""
+    """Columns: the average's independent parameters, the free wave directions, the scale and extinction."""
     d = self._fold(d)
     cols = [d[:, self.avg_idx].dot(np.asarray(self.average.jacobian())), _times_blocks(d[:, self.wave_idx], self.zb)]
-    if self.flags["scale"]:
-      cols.append(d[:, -1:])
+    if self.n_tail:
+      cols.append(d[:, -self.n_tail:])
     return np.hstack(cols)
 
   def restraints(self, n_free):
@@ -1703,8 +1742,8 @@ class _average_link(object):
   def apply(self, p0, x):
     step = np.zeros(self.n_p)
     step[self.wave_idx] = self.zw.dot(x[self.na:self.na + self.zw.shape[1]])
-    if self.flags["scale"]:
-      step[-1] = x[-1]
+    if self.n_tail:
+      step[-self.n_tail:] = x[-self.n_tail:]
     set_parameters(self.xs, self.flags, p0 + step)
     self.average.shift(x[:self.na])
     self.sync()
