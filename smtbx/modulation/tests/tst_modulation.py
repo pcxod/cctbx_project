@@ -783,7 +783,8 @@ def rng_matrix(n, seed=15):
 def test_normal_equations_and_pool_equivalence():
   """J^T J and J^T r summed over slices of the reflections against the dense product (one slice), and a refine
   cycle with a budget that forces slices against one that does not: shifts to 1e-10, F to 1e-12. The pool by
-  slices of the reflections against the pool by atoms: F and gradients bit for bit."""
+  slices of the reflections against the pool by atoms: F and gradients to 1e-14 (bit for bit only with one BLAS
+  thread; OpenBLAS threading / kernel choice reorders the sums, seen on an i9-13950HX)."""
   from cctbx import adptbx
   xs = model(n_harmonics=2, amp=0.02)
   for at in xs.atoms:
@@ -801,8 +802,10 @@ def test_normal_equations_and_pool_equivalence():
   calc = mod.calculator(h, m)
   f1, a1, b1 = mod._normal_equations(calc, xs, fl, fsq * 1.01, sw, project, len(m))
   f7, a7, b7 = mod._normal_equations(calc, xs, fl, fsq * 1.01, sw, project, len(m) // 7 + 1)
-  e_ne = max(np.max(np.abs(a7 - a1)) / np.max(np.abs(a1)), np.max(np.abs(b7 - b1)) / np.max(np.abs(b1)))
-  assert np.array_equal(f1, f7) and e_ne < 1e-12, e_ne
+  rel = lambda x, y: np.max(np.abs(x - y)) / np.max(np.abs(y))
+  e_ne = max(rel(a7, a1), rel(b7, b1))
+  e_f17 = rel(f7, f1)
+  assert e_f17 < 1e-14 and e_ne < 1e-12, (e_f17, e_ne)
   # the in-place mirror of the upper triangle, with blocks smaller than the matrix
   u = np.triu(rng_matrix(53))
   for blk in (1, 7, 53, 1024):
@@ -822,9 +825,10 @@ def test_normal_equations_and_pool_equivalence():
   by_atoms._mode, by_rows._mode = "atoms", "reflections"
   fa, _, da = by_atoms.compute(xs, flags, gradients=True)
   fb, _, db = by_rows.compute(xs, flags, gradients=True)
-  assert np.array_equal(fa, fb) and np.array_equal(da, db)
+  e_pool = max(rel(fb, fa), rel(db, da))
+  assert e_pool < 1e-14, e_pool
   print("  normal equations by slices = dense: J^T J, J^T r %.1e, shifts %.1e, F %.1e; pool by reflections ="
-        " by atoms bit for bit" % (e_ne, e_shift, e_f))
+        " by atoms %.1e" % (e_ne, e_shift, e_f, e_pool))
 
 
 def _medium_like(seed=16):
