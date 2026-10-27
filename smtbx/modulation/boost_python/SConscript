@@ -1,9 +1,8 @@
 Import("env_smtbx_boost_python_ext", "env_etc")
 env = env_smtbx_boost_python_ext.Clone()
+# the C++ command line reads SHCXXFLAGS, not CCFLAGS. x4_sums.cpp has no OpenMP pragmas (its loops vectorise
+# without them); -fno-trapping-math lets g++ if-convert the clamp in exp_array so that loop vectorises as well
+# (the flags of floating-point exceptions are never read)
 if env_etc.compiler != "win32_cl":
-  # the node loops carry "omp simd" reductions; this enables them without OpenMP threads
-  env.Append(SHCXXFLAGS=["-fopenmp-simd"])
-else:
-  # under /openmp MSVC rejects "omp simd" (C7660) unless the experimental OpenMP mode is on
-  env.Append(SHCXXFLAGS=["/openmp:experimental"])
+  env.Append(SHCXXFLAGS=["-fno-trapping-math"])
 env.SharedLibrary(target="#lib/smtbx_modulation_ext", source=["x4_sums.cpp"])
