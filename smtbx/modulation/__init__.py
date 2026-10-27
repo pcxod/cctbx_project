@@ -1783,11 +1783,12 @@ def _rows_per_slice(xs, flags, max_memory_mb):
   return max(256, int(max_memory_mb * 2 ** 20 // (1.05 * (16 * n_c + 8 * max(n_p, 1)))))
 
 
-def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4=32, damping=1e-3, log=None, verbose=True,
+def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", damping=1e-3, log=None, verbose=True,
            table=None, radiation="xray", average=None, max_memory_mb=512):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
   table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
-  n_x4: x4 nodes per atom, or "auto" (auto_n_x4, raised during the refinement if the amplitudes grow).
+  n_x4: x4 nodes per atom, or "auto" (the default: auto_n_x4, within 1e-10 of 128 nodes, raised during the
+  refinement if the amplitudes grow); 32 was the default before.
 
   The x4 origin of a wave is free unless an eps = -1 operation fixes it; the damping keeps that direction
   (a rotation of every (A_n, B_n) pair together) from running away.
