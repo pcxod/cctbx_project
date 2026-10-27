@@ -627,6 +627,9 @@ class modulated_atom(object):
     self.u_sin = _waves(u_sin, 0, 6)
     self.u_cos = _waves(u_cos, len(self.u_sin), 6)
     self.site_weight = float(site_weight)
+    # commensurate: (x4 of the first section point, N) - the x4 integral becomes the mean over the N points
+    # x4_j = start + j / N the atom takes in the supercell (commensurate_section); None: incommensurate
+    self.section = None
 
   @property
   def n_harmonics(self):
@@ -664,7 +667,15 @@ class modulated_atom(object):
 
   def nodes(self, n_x4):
     """x4 quadrature nodes and weights of this atom's x4 integral: uniform over [0, 1), or Gauss-Legendre
-    inside the crenel (the integrand is smooth there and zero outside)."""
+    inside the crenel (the integrand is smooth there and zero outside). With a commensurate section: the N section
+    points, weight 1/N each (0 outside a crenel), whatever n_x4."""
+    if self.section is not None:
+      start, n = self.section
+      x4 = start + np.arange(n) / float(n)
+      wt = np.full(n, 1.0 / n)
+      if self.crenel is not None:
+        wt[np.abs(self._local(x4)) > 0.5 + 1e-12] = 0.0
+      return x4, wt
     if self.crenel is None:
       return (np.arange(n_x4) + 0.5) / n_x4, np.full(n_x4, 1.0 / n_x4)
     c, w = self.crenel
@@ -857,6 +868,44 @@ def auto_n_x4(xs, h, m, headroom=1.0):
   return max(12, int(4 * math.ceil(n / 4.0))), z
 
 
+def commensurate_section(xs, t0, n):
+  """The commensurate structure of section t0 with N = n points per atom (q = r / n): every atom expanded into its
+  images under all superspace operations (so the result has the identity alone), each image with the waves the
+  operation gives it (_atom_map; crenel centre eps c + M.x + tau) and section (t0 + q.x', n): its x4 integral is
+  then the mean over the n values x4 = t0 + q.(x' + L) takes over the supercell translations L. The structure
+  factor of a reflection (h, m) is the supercell's F(H), H = h + m q, divided by n and times exp(2 pi i m t0)
+  (test_commensurate_section). Gradients of crenel centres and widths are not defined for a finite sum (the
+  points do not move with them); sawtooth atoms are not handled."""
+  import copy
+  every = _flags({k: True for k in ("site", "adp", "occupancy", "modulation", "occ_waves", "adp_waves", "crenel",
+                                    "legendre", "xharm", "u_xharm")})
+  identity = [op for op in xs.ssg.ops if np.allclose(op.as_4x4(), np.eye(4)) and not np.any(op.t) and not op.tau]
+  ssg = copy.copy(xs.ssg)
+  ssg.ops = identity[:1] or [superspace_operator(np.eye(3), np.zeros(3), 1, np.zeros(3))]
+  atoms = []
+  for at in xs.atoms:
+    if at.sawtooth is not None:
+      raise NotImplementedError("commensurate_section: sawtooth on %s" % at.label)
+    blocks = _blocks(at, every)
+    p = np.concatenate([np.atleast_1d(np.asarray(get(), dtype=float)) for _, _, get, _ in blocks]) if blocks else np.zeros(0)
+    for k, op in enumerate(xs.ssg.ops):
+      img = copy.deepcopy(at)
+      img.label = "%s_%d" % (at.label, k)
+      v, i = _atom_map(at, op, every).dot(p), 0
+      for _, _, get, put in _blocks(img, every):
+        m = len(get())
+        put(v[i:i + m])
+        i += m
+      img.site = op.r.dot(at.site) + op.t
+      if at.crenel:
+        img.crenel = (op.eps * at.crenel[0] + op.m.dot(at.site) + op.tau, at.crenel[1])
+      img.section = (t0 + xs.q.dot(img.site), int(n))
+      atoms.append(img)
+  out = modulated_structure(xs.unit_cell, ssg, atoms, xs.scale, xs.dispersion)
+  out.extinction, out.wavelength = getattr(xs, "extinction", 0.0), getattr(xs, "wavelength", None)
+  return out
+
+
 def _sum_waves(sin_c, cos_c, sin_t, cos_t):
   """sum_n s_n sin_t[n] + c_n cos_t[n] for coefficient arrays (n, ...) and node tables (n, K) -> (K, ...)."""
   n = len(sin_c)
@@ -1021,7 +1070,7 @@ class calculator(object):
     for at in xs.atoms:
       parts.append((at.a.tobytes(), at.b.tobytes(), at.occ_sin.tobytes(), at.occ_cos.tobytes(),
                     at.u_sin.tobytes(), at.u_cos.tobytes(), at.legendre.tobytes(), at.xharm.tobytes(),
-                    at.u_xharm.tobytes(), at.crenel, at.occupancy, at.u_star is None,
+                    at.u_xharm.tobytes(), at.crenel, at.occupancy, at.u_star is None, at.section,
                     None if at.sawtooth is None else (at.sawtooth[0].tobytes(),) + tuple(at.sawtooth[1:])))
     return tuple(parts)
 

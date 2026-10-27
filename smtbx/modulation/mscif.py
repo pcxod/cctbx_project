@@ -74,7 +74,8 @@ def _sin_cos(block, prefix, n):
 
 
 def read(cif_path, fcf_path=None, xharm_basis="plain"):
-  """(modulated_structure, data) with data = dict(h, m, f_sq_meas, f_sq_sigma, f_sq_calc, extinction).
+  """(modulated_structure, data) with data = dict(h, m, f_sq_meas, f_sq_sigma, f_sq_calc, extinction,
+  commensurate): commensurate (t0, N) for a JANA commensurate refinement (q then exactly r / N), else None.
   xharm_basis: how the x-harmonic coefficients (_jana_atom_site_displace_xharm, _jana_atom_site_u_xharm) are
   meant: "plain", sin/cos(2 pi k x) as in xharm_basis, or "orthonormal", Gram-Schmidt orthonormalised over the
   crenel interval (smtbx.modulation.xharm_orthonormal); those are changed to the plain basis on reading (the
@@ -99,6 +100,16 @@ def read(cif_path, fcf_path=None, xharm_basis="plain"):
   if len(qx) > 1:
     raise NotImplementedError("(3+%d)D: only one wave vector is supported" % len(qx))
   q = np.array([_num(_col(block, "_cell_wave_vector_" + a)[0]) for a in "xyz"])
+  # commensurate (JANA _jana_cell_commen_*): the t0 section and N from the supercell, q made exactly r / N
+  commensurate = None
+  t_sec = _col(block, "_jana_cell_commen_t_section_1")
+  if t_sec and _num(t_sec[0]) is not None:
+    sm = np.array([[_num(_col(block, "_jana_cell_commen_supercell_matrix_%d_%d" % (i, j), ["0"])[0]) or 0.0
+                    for j in (1, 2, 3)] for i in (1, 2, 3)])
+    n_sec = int(round(abs(np.linalg.det(sm)))) if sm.any() else 0
+    if n_sec > 0:
+      q = np.round(q * n_sec) / n_sec
+      commensurate = (_num(t_sec[0]), n_sec)
   symbols = _col(block, "_space_group_symop_ssg_operation_algebraic")
   if not symbols:
     raise ValueError("no superspace operators in %s" % cif_path)
@@ -278,6 +289,8 @@ def read(cif_path, fcf_path=None, xharm_basis="plain"):
     wl = _num(_col(block, "_diffrn_radiation_wavelength", ["?"])[0])
     data["radiation"] = "electron" if "electron" in probe or (wl is not None and wl < 0.1) else "xray"
     data["wavelength"] = wl
+  if data is not None:
+    data["commensurate"] = commensurate     # (t0, N): mod.commensurate_section(xs, t0, N) gives JANA's model
   return xs, data
 
 

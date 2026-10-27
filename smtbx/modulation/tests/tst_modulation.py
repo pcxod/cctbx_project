@@ -1222,6 +1222,43 @@ def test_xharm_against_jana():
     print("  x-harmonics vs JANA: samples not here, skipped")
 
 
+def test_commensurate_section():
+  """commensurate_section (the x4 integral as the mean over the N section points of every atom image) against
+  cctbx direct on the explicit supercell (q = 2/3 b*, N = 3: every image at r + L and its displaced position and
+  occupancy at x4 = t0 + q.(r + L)): F(h, m) = F_supercell(H) / N exp(2 pi i m t0) to 1e-12, |m| <= 2, for
+  P-1 and P2_1/c, t0 = 0 and t0 != 0, displacive and occupancy waves."""
+  from cctbx import uctbx
+  worst = 0.0
+  for group, t0 in (("P -1", 0.0), ("P -1", 0.137), ("P 1 21/c 1", 0.07)):
+    q, n = (0.0, 2.0 / 3, 0.0), 3
+    xs = model(n_harmonics=2, amp=0.02, ssg=mod.superspace_group(sgtbx.space_group_info(group).group(), q))
+    rng = np.random.RandomState(4)
+    for at in xs.atoms:
+      at.occ_sin, at.occ_cos = 0.05 * rng.uniform(-1, 1, 1), 0.05 * rng.uniform(-1, 1, 1)
+    xc = mod.commensurate_section(xs, t0, n)
+    h, m = reflections(xs, d_min=1.2, m_max=2)
+    f = mod.calculator(h, m).compute(xc)[0]
+    p = list(xs.unit_cell.parameters())
+    p[1] *= n
+    sc = flex.xray_scatterer()
+    for at in xc.atoms:
+      for L in range(n):
+        r = at.site + np.array([0.0, L, 0.0])
+        x4 = np.array([t0 + xs.q.dot(r)])
+        pos = (r + at.displacement(x4)[0]) / np.array([1.0, n, 1.0])
+        sc.append(xray.scatterer("%s_%d" % (at.label, L), tuple(pos), at.u_iso,
+                                 at.occupancy_at(x4)[0] * at.site_weight, at.scattering_type))
+    xrs = xray.structure(crystal_symmetry=crystal.symmetry(uctbx.unit_cell(p), "P 1"), scatterers=sc)
+    xrs.scattering_type_registry(table="wk1995")
+    hh = np.rint((h + np.outer(m, xs.q)) * np.array([1, n, 1])).astype(int)
+    ms = miller.set(xrs.crystal_symmetry(), flex.miller_index([tuple(v) for v in hh.tolist()]), anomalous_flag=False)
+    fc = ms.structure_factors_from_scatterers(xrs, algorithm="direct").f_calc().data().as_numpy_array()
+    ref = fc / n * np.exp(2j * np.pi * m * t0)
+    worst = max(worst, np.max(np.abs(f - ref)) / np.max(np.abs(ref)))
+  assert worst < 1e-12, worst
+  print("  commensurate section (q = 2/3 b*, N = 3) = cctbx direct on the supercell: %.1e" % worst)
+
+
 def test_slice_workspace_equivalence():
   """The compiled path with the buffers _normal_equations lends its slices (gradient blocks and dF^2/dp reused from
   slice to slice) against every slice computed on its own with fresh arrays: F^2 bit for bit, J^T r and J^T J to
@@ -1279,6 +1316,7 @@ def run():
   test_xharm_orthonormal_basis()
   test_xharm_against_jana()
   test_extinction()
+  test_commensurate_section()
   test_slice_workspace_equivalence()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
