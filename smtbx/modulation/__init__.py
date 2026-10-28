@@ -1258,7 +1258,9 @@ class calculator(object):
     nref = self.h.shape[0]
     f_calc = np.zeros(nref, dtype=complex)
     grads = []
-    if gradients:
+    pre, extra, comp = self._atom_tables(xs, gradients)
+    compiled = self.use_compiled and comp is not None
+    if gradients and not compiled:     # the numpy path's blocks (the compiled one makes its own below)
       for at in xs.atoms:
         grads.append({"site": np.zeros((nref, 3), complex), "adp": np.zeros((nref, 1 if at.u_star is None else 6), complex),
                       "occ": np.zeros(nref, complex),
@@ -1269,8 +1271,6 @@ class calculator(object):
                       "leg": np.zeros((nref, len(at.legendre), 3), complex),
                       "xh": np.zeros((nref, len(at.xharm), 3), complex),
                       "ux": np.zeros((nref, len(at.u_xharm), 6), complex)})
-    pre, extra, comp = self._atom_tables(xs, gradients)
-    compiled = self.use_compiled and comp is not None
     if compiled and gradients:
       # one (N, columns) block per atom, the gradient dict entries views of it; all atoms' blocks in one flat
       # buffer, reused from slice to slice when _normal_equations lends a workspace (a fresh ~0.3 GB per slice
@@ -1450,14 +1450,24 @@ class calculator(object):
         idx.append(sel)
       d_fsq = _take(self._workspace, "d", (nref, sum(len(i) for i in idx) + int(flags["scale"])
                                            + int(flags["extinction"])), float)
-      fr, fi, j = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None], 0
-      for gr, sel in zip(grads, idx):
-        g = gr["_all"]
+      fr, fi = 2 * xs.scale * f_calc.real[:, None], 2 * xs.scale * f_calc.imag[:, None]
+      starts = np.concatenate([[0], np.cumsum([len(i) for i in idx])]).astype(int)
+
+      def assemble(ia):
+        """One atom's refined columns of d|F|^2/dp = 2 scale Re(F* dF/dp); atoms write disjoint columns."""
+        g, sel, j = grads[ia]["_all"], idx[ia], starts[ia]
         if len(sel) == g.shape[1]:
           d_fsq[:, j:j + len(sel)] = fr * g.real + fi * g.imag
         elif sel:
           d_fsq[:, j:j + len(sel)] = fr * g.real[:, sel] + fi * g.imag[:, sel]
-        j += len(sel)
+      # in the pool as well: on the large slices this assembly was a quarter of a 4-thread gradient pass
+      if n_threads == 1:
+        for ia in range(len(xs.atoms)):
+          assemble(ia)
+      else:
+        with concurrent.futures.ThreadPoolExecutor(n_threads) as ex:
+          list(ex.map(assemble, range(len(xs.atoms))))
+      j = int(starts[-1])
       if flags["scale"]:
         d_fsq[:, j] = f_sq
       return _finish(xs, flags, f_calc, f_sq, d_fsq, s_sq)
@@ -1605,11 +1615,13 @@ def _compiled_atom(at, pre, ex, gradients):
       out["du"] = np.ascontiguousarray(ex["du"].T)
       if ex["duw"] is not None:
         out["duw"] = np.ascontiguousarray(ex["duw"].T)
-  out["w"] = np.ascontiguousarray(np.array(cols))          # (M, K)
-  out["w2"] = np.ascontiguousarray(np.array(cols2)) if cols2 else np.zeros(0)
+  # (K, M), the columns zero-padded to a multiple of 8: atom_sums' node sums take eight columns at a time
+  pad = lambda c: np.ascontiguousarray(np.vstack([np.array(c), np.zeros((-len(c) % 8, K))]).T)
+  out["w"] = pad(cols)
+  out["w2"] = pad(cols2) if cols2 else np.zeros(0)
   out["specs"] = np.array(specs, dtype=np.int64).reshape(-1, 4)
   out["spec_c"] = np.array(cvals, dtype=complex)
-  assert out["w"].shape == (len(cols), K)
+  assert out["w"].shape == (K, len(cols) + (-len(cols) % 8))
   return out
 
 
@@ -1768,13 +1780,25 @@ def _block_diag(blocks):
 
 def _times_blocks(a, blocks):
   """a Z for the block-diagonal Z, block by block: the dense (N, n) x (n, n_free) product with a Z that is mostly
-  zeros (the identity for atoms in general positions) was the largest serial cost of an LM cycle."""
+  zeros (the identity for atoms in general positions) was the largest serial cost of an LM cycle. Identity
+  blocks are copied, and when Z is the identity a itself is returned (the caller must not modify it then)."""
+  ident = [b.shape[0] == b.shape[1] and _is_identity(b) for b in blocks]
+  if all(ident) and a.shape[1] == sum(b.shape[0] for b in blocks):
+    return a      # Z = I (every atom on a general position): a itself, no copy
   out = np.empty((a.shape[0], sum(b.shape[1] for b in blocks)))
   i = j = 0
-  for b in blocks:
-    out[:, j:j + b.shape[1]] = a[:, i:i + b.shape[0]].dot(b)
+  for b, is_i in zip(blocks, ident):
+    if is_i:
+      out[:, j:j + b.shape[1]] = a[:, i:i + b.shape[0]]     # the same numbers as the product, without a dgemm
+    else:
+      out[:, j:j + b.shape[1]] = a[:, i:i + b.shape[0]].dot(b)
     i, j = i + b.shape[0], j + b.shape[1]
   return out
+
+
+def _is_identity(b):
+  n = b.shape[0]
+  return bool(np.all(b.ravel()[::n + 1] == 1.0)) and np.count_nonzero(b) == n
 
 
 def reduction(xs, flags=None):
