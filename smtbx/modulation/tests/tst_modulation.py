@@ -1467,6 +1467,82 @@ def test_blas_threads_windows_layout():
         " inside, restored; a higher count left alone" % (len(libs), before, inside))
 
 
+def test_twins_and_commensurate_with_average():
+  """refine(average=...) - Olex2's constrained path - with twins (the free fraction after the average's columns)
+  and with a commensurate section (the folded gradients through the average's Jacobian): the riding model of
+  test_average_constraints_and_restraints, noise-free data from the constrained truth, refined from a disturbed
+  start back to the truth's sites and twin fraction."""
+  import copy
+  from cctbx import sgtbx
+  delta = (0.10, 0.12, 0.09)
+  out = []
+  for kind in ("twins", "commensurate"):
+    if kind == "twins":
+      ssg = mod.superspace_group(p21c(), (0.31, 0.0, 0.0))
+    else:
+      ssg = mod.superspace_group(sgtbx.space_group_info("P 1 21/c 1").group(), (0.0, 2.0 / 3, 0.0))
+    truth = model(amp=0.012, seed=7, ssg=ssg)
+    ride = _riding_average(truth, delta, truth.atoms[1].site[0])
+    mod._average_link(truth, mod._flags(None), ride).sync()
+    h, m = reflections(truth, d_min=0.9)
+    if kind == "twins":
+      mats = [np.eye(3), np.diag([1.0, -1.0, -1.0])]
+      fsq = mod.twinned_calculator(h, m, ssg.q, list(zip(mats, [0.7, 0.3]))).compute(truth)[1]
+    else:
+      fsq = mod.commensurate_compute(mod.calculator(h, m), truth, 0.0, 3)[1]
+    sig = 0.01 * fsq + 1e-4 * fsq.max()
+    start = copy.deepcopy(truth)
+    rng = np.random.RandomState(5)
+    for at in start.atoms[:4]:
+      at.site = at.site + rng.normal(0, 0.002, 3)
+    avg = _riding_average(start, delta, truth.atoms[1].site[0])
+    kw = {"twins": list(zip(mats, [0.5, 0.5]))} if kind == "twins" else {"commensurate": (0.0, 3)}
+    mod.refine(start, h, m, fsq, sig, cycles=30, verbose=False, average=avg, **kw)
+    err = max(np.max(np.abs(a.site - b.site)) for a, b in zip(start.atoms, truth.atoms))
+    if kind == "twins":
+      err = max(err, abs(kw["twins"][1][1] - 0.3))
+    assert err < 1e-6, (kind, err)
+    out.append("%s %.1e" % (kind, err))
+  print("  with the average's constraints: refined back to the truth (sites, fraction): %s" % ", ".join(out))
+
+
+def test_commensurate_sawtooth():
+  """commensurate_section with a sawtooth atom (on its crenel) and a crenel atom with Legendre terms, against
+  cctbx direct on the explicit supercell as in test_commensurate_section: P2_1/c, q = 2/3 b*, t0 = 0.07,
+  to 1e-12."""
+  from cctbx import uctbx
+  q, n, t0 = (0.0, 2.0 / 3, 0.0), 3, 0.07
+  xs = model(n_harmonics=1, amp=0.02, ssg=mod.superspace_group(sgtbx.space_group_info("P 1 21/c 1").group(), q))
+  xs.atoms[2].crenel = (0.31, 0.7)
+  xs.atoms[2].sawtooth = (np.array([0.02, -0.01, 0.015]), 0.31, 0.7)
+  xs.atoms[3].crenel = (0.62, 0.55)
+  xs.atoms[3].legendre = np.array([[0.01, 0.0, -0.01], [0.005, 0.004, 0.0]])
+  xc = mod.commensurate_section(xs, t0, n)
+  h, m = reflections(xs, d_min=1.2, m_max=2)
+  f = mod.calculator(h, m).compute(xc)[0]
+  p = list(xs.unit_cell.parameters())
+  p[1] *= n
+  sc = flex.xray_scatterer()
+  for at in xc.atoms:
+    for L in range(n):
+      r = at.site + np.array([0.0, L, 0.0])
+      x4 = np.array([t0 + xs.q.dot(r)])
+      if at.crenel and abs(at._local(x4)[0]) > 0.5:
+        continue
+      pos = (r + at.displacement(x4)[0]) / np.array([1.0, n, 1.0])
+      sc.append(xray.scatterer("%s_%d" % (at.label, L), tuple(pos), at.u_iso,
+                               at.occupancy_at(x4)[0] * at.site_weight, at.scattering_type))
+  xrs = xray.structure(crystal_symmetry=crystal.symmetry(uctbx.unit_cell(p), "P 1"), scatterers=sc)
+  xrs.scattering_type_registry(table="wk1995")
+  hh = np.rint((h + np.outer(m, xs.q)) * np.array([1, n, 1])).astype(int)
+  ms = miller.set(xrs.crystal_symmetry(), flex.miller_index([tuple(v) for v in hh.tolist()]), anomalous_flag=False)
+  fc = ms.structure_factors_from_scatterers(xrs, algorithm="direct").f_calc().data().as_numpy_array()
+  ref = fc / n * np.exp(2j * np.pi * m * t0)
+  worst = np.max(np.abs(f - ref)) / np.max(np.abs(ref))
+  assert worst < 1e-12, worst
+  print("  commensurate section with sawtooth and Legendre/crenel atoms = cctbx direct on the supercell: %.1e" % worst)
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
@@ -1493,6 +1569,8 @@ def run():
   test_blas_threads_windows_layout()
   test_commensurate_gradients_and_refine()
   test_twins()
+  test_twins_and_commensurate_with_average()
+  test_commensurate_sawtooth()
   test_gradients_aniso_occ_adp_crenel()
   test_gradients_all_wave_blocks()
   test_crenel_blocks_under_site_symmetry()

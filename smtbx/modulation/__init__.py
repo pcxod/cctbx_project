@@ -875,7 +875,7 @@ def commensurate_section(xs, t0, n):
   then the mean over the n values x4 = t0 + q.(x' + L) takes over the supercell translations L. The structure
   factor of a reflection (h, m) is the supercell's F(H), H = h + m q, divided by n and times exp(2 pi i m t0)
   (test_commensurate_section). Gradients of crenel centres and widths are not defined for a finite sum (the
-  points do not move with them); sawtooth atoms are not handled."""
+  points do not move with them)."""
   import copy
   every = _flags({k: True for k in ("site", "adp", "occupancy", "modulation", "occ_waves", "adp_waves", "crenel",
                                     "legendre", "xharm", "u_xharm")})
@@ -884,8 +884,6 @@ def commensurate_section(xs, t0, n):
   ssg.ops = identity[:1] or [superspace_operator(np.eye(3), np.zeros(3), 1, np.zeros(3))]
   atoms = []
   for at in xs.atoms:
-    if at.sawtooth is not None:
-      raise NotImplementedError("commensurate_section: sawtooth on %s" % at.label)
     blocks = _blocks(at, every)
     p = np.concatenate([np.atleast_1d(np.asarray(get(), dtype=float)) for _, _, get, _ in blocks]) if blocks else np.zeros(0)
     for k, op in enumerate(xs.ssg.ops):
@@ -897,8 +895,13 @@ def commensurate_section(xs, t0, n):
         put(v[i:i + m])
         i += m
       img.site = op.r.dot(at.site) + op.t
+      delta = op.m.dot(at.site) + op.tau
       if at.crenel:
-        img.crenel = (op.eps * at.crenel[0] + op.m.dot(at.site) + op.tau, at.crenel[1])
+        img.crenel = (op.eps * at.crenel[0] + delta, at.crenel[1])
+      if at.sawtooth is not None:
+        # u'(x4') = R u(eps (x4' - delta)); the sawtooth is odd about its centre: (eps R a, eps c + delta, w)
+        a, c, w = at.sawtooth
+        img.sawtooth = (op.eps * op.r.dot(a), op.eps * c + delta, w)
       img.section = (t0 + xs.q.dot(img.site), int(n))
       atoms.append(img)
   out = modulated_structure(xs.unit_cell, ssg, atoms, xs.scale, xs.dispersion)
@@ -2243,7 +2246,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
   to the crenel; the site correction of commensurate_compute does not carry the extinction factor). One slice.
   twins: [(3x3 matrix, mass fraction)] (mscif.read's data["twins"]): F^2 = sum_k f_k F_k^2 (twinned_calculator),
   the fractions refined under sum f_k = 1 (the first is 1 - the others); the list is updated in place. One
-  slice; not with average or commensurate.
+  slice; with average (the fractions after its columns), not with commensurate.
   n_x4: x4 nodes per atom, or "auto" (the default: auto_n_x4, within 1e-10 of 128 nodes, raised during the
   refinement if the amplitudes grow); 32 was the default before.
 
@@ -2295,11 +2298,12 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
     model = lambda: xs
   tc, nt = None, 0
   if twins is not None:
-    if average is not None or commensurate is not None:
-      raise NotImplementedError("refine: twins with average or commensurate")
+    if commensurate is not None:
+      raise NotImplementedError("refine: twins with a commensurate section")
     tc = twinned_calculator(h, m, xs.q, twins, n_x4=n_x4, table=table, radiation=radiation)
     nt = len(twins) - 1
-    zb = zb + [np.eye(nt)] if nt else zb
+    if link is None and nt:
+      zb = zb + [np.eye(nt)]
 
   def get_p():
     p = get_parameters(xs, flags)
@@ -2320,7 +2324,13 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
   lam = damping
   chi = None    # from the first gradient pass: the same F^2 a separate pass before the loop would give
   norm = None
-  project0 = (lambda d: _times_blocks(d, zb)) if link is None else link.jacobian
+  if link is None:
+    project0 = lambda d: _times_blocks(d, zb)
+  elif nt:
+    # with the average's parametrisation: its columns, then the free twin fractions as they are
+    project0 = lambda d: np.hstack([link.jacobian(d[:, :-nt]), d[:, -nt:]])
+  else:
+    project0 = link.jacobian
   max_rows = _rows_per_slice(model(), flags, max_memory_mb)
   for cycle in range(cycles):
     if commensurate is None and tc is None:
@@ -2371,7 +2381,12 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
       if link is None:
         set_p(p0 + _blocks_times(zb, x))
       else:
-        link.apply(p0, x)
+        if nt:
+          tc.fractions[1:] = p0[-nt:] + x[-nt:]
+          tc.fractions[0] = 1 - np.sum(tc.fractions[1:])
+          link.apply(p0[:-nt], x[:-nt])
+        else:
+          link.apply(p0, x)
       step = get_p() - p0
       with np.errstate(over="ignore", invalid="ignore"):
         fc_new = f_sq_now()
@@ -2383,7 +2398,12 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
         chi, lam, accepted = chi_new, max(lam / 3, 1e-9), True
         break
       if link is not None:
-        link.undo(p0, x)
+        if nt:
+          link.undo(p0[:-nt], x[:-nt])
+          tc.fractions[1:] = p0[-nt:]
+          tc.fractions[0] = 1 - np.sum(tc.fractions[1:])
+        else:
+          link.undo(p0, x)
       lam *= 5
     if not accepted:
       set_p(p0)
