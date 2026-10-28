@@ -2011,9 +2011,9 @@ class _blas_threads(object):
   (a higher count is left alone), its own count again after it. The libtbx dispatchers export
   OPENBLAS_NUM_THREADS=1 (libtbx/env_config.py), so under libtbx.python every dsyrk / potrf of a refinement ran
   single-threaded; the J^T J build and the damped solve run while the atom pool is idle and take the
-  calculator's thread count instead. threadpoolctl when it is
-  installed (every platform), else the openblas_{get,set}_num_threads symbols of the loaded libopenblas found
-  in /proc/self/maps (Linux); otherwise nothing changes."""
+  calculator's thread count instead. threadpoolctl when it is installed, else the OpenBLAS libraries
+  _openblas_libs finds (loaded ones on Linux, Windows and macOS, and the wheels' copies) through their
+  {,scipy_}openblas_{get,set}_num_threads{,64_} symbols; otherwise nothing changes."""
 
   def __init__(self, n):
     self.n, self.undo = n, None
@@ -2052,26 +2052,116 @@ class _blas_threads(object):
 
 _openblas_cache = []
 
+# the thread-count entry points under the names the OpenBLAS builds export: plain (distributions, older wheels),
+# "scipy_" + "64_" (scipy-openblas64, numpy >= 2 wheels: ILP64 symbol suffix) and "scipy_" alone
+# (scipy-openblas32, scipy wheels)
+_OPENBLAS_NAMES = [(p + "openblas_get_num_threads" + s, p + "openblas_set_num_threads" + s)
+                   for p in ("", "scipy_") for s in ("", "64_", "_64")]
+
+
+class _openblas_lib(object):
+  """One loaded OpenBLAS: openblas_get_num_threads() / openblas_set_num_threads(n) whatever the exported names."""
+
+  def __init__(self, lib, get_name, set_name, path=""):
+    self.lib, self.path = lib, path
+    self._get, self._set = getattr(lib, get_name), getattr(lib, set_name)
+
+  def openblas_get_num_threads(self):
+    return int(self._get())
+
+  def openblas_set_num_threads(self, n):
+    self._set(int(n))
+
+
+def _openblas_wrap(lib, path=""):
+  """An _openblas_lib for a ctypes library, or None when it exports no known pair of names."""
+  for get_name, set_name in _OPENBLAS_NAMES:
+    if hasattr(lib, get_name) and hasattr(lib, set_name):
+      return _openblas_lib(lib, get_name, set_name, path)
+  return None
+
+
+def _loaded_library_paths():
+  """The shared libraries loaded in this process: /proc/self/maps (Linux), EnumProcessModules (Windows),
+  the dyld image list (macOS); [] where none of them works."""
+  import sys
+  import ctypes
+  paths = []
+  try:
+    if sys.platform.startswith("linux"):
+      with open("/proc/self/maps") as f:
+        paths = [line.split()[-1] for line in f if "/" in line]
+    elif sys.platform == "win32":
+      from ctypes import wintypes
+      psapi, k32 = ctypes.WinDLL("psapi"), ctypes.WinDLL("kernel32")
+      k32.GetCurrentProcess.restype = wintypes.HANDLE
+      psapi.EnumProcessModules.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.HMODULE), wintypes.DWORD,
+                                           ctypes.POINTER(wintypes.DWORD)]
+      k32.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+      mods = (wintypes.HMODULE * 4096)()
+      need = wintypes.DWORD()
+      if psapi.EnumProcessModules(k32.GetCurrentProcess(), mods, ctypes.sizeof(mods), ctypes.byref(need)):
+        buf = ctypes.create_unicode_buffer(32768)
+        for k in range(min(need.value // ctypes.sizeof(wintypes.HMODULE), len(mods))):
+          if k32.GetModuleFileNameW(mods[k], buf, 32768):
+            paths.append(buf.value)
+    elif sys.platform == "darwin":
+      libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+      libc._dyld_image_count.restype = ctypes.c_uint32
+      libc._dyld_get_image_name.restype = ctypes.c_char_p
+      libc._dyld_get_image_name.argtypes = [ctypes.c_uint32]
+      paths = [libc._dyld_get_image_name(k).decode("utf-8", "replace") for k in range(libc._dyld_image_count())]
+  except Exception:
+    paths = []
+  return paths
+
+
+def _openblas_wheel_paths():
+  """OpenBLAS libraries shipped inside the numpy and scipy wheels: numpy.libs / scipy.libs (Windows, Linux
+  manylinux), numpy/.libs, numpy/.dylibs and scipy/.dylibs (macOS), numpy/_core next to the extension. Whether
+  one is loaded does not matter for Windows, where loading a DLL already in the process returns that one, and
+  numpy and scipy are imported here."""
+  import glob
+  out = []
+  for name in ("numpy", "scipy"):
+    try:
+      m = __import__(name)
+    except ImportError:
+      continue
+    d = os.path.dirname(m.__file__)
+    for sub in (os.path.join(os.path.dirname(d), name + ".libs"), os.path.join(d, ".libs"),
+                os.path.join(d, ".dylibs"), os.path.join(d, "_core"), os.path.join(d, "core")):
+      out += glob.glob(os.path.join(sub, "*openblas*"))
+  return out
+
+
+def _openblas_load(path):
+  import ctypes
+  mode = getattr(os, "RTLD_NOLOAD", 0) | getattr(ctypes, "RTLD_GLOBAL", 0)
+  try:
+    return ctypes.CDLL(path, mode=mode) if mode else ctypes.CDLL(path)
+  except OSError:
+    return None
+
 
 def _openblas_libs():
-  """The loaded OpenBLAS libraries (Linux), found once per process."""
+  """The OpenBLAS libraries of this process, found once per process (the list never changes while it runs):
+  every loaded library whose file name holds "openblas", then the wheels' copies (_openblas_wheel_paths); each
+  wrapped under the names it exports (_OPENBLAS_NAMES), one entry per distinct library file."""
   if not _openblas_cache:
-    import ctypes
-    paths = set()
-    try:
-      with open("/proc/self/maps") as f:
-        for line in f:
-          p = line.split()[-1]
-          if "openblas" in os.path.basename(p) and ".so" in p:
-            paths.add(p)
-    except (IOError, OSError):
-      pass
-    libs = []
-    for p in sorted(paths):
-      try:
-        libs.append(ctypes.CDLL(p, mode=getattr(os, "RTLD_NOLOAD", 0) | ctypes.RTLD_GLOBAL))
-      except OSError:
+    seen, libs = set(), []
+    for p in _loaded_library_paths() + _openblas_wheel_paths():
+      base = os.path.basename(p).lower()
+      if "openblas" not in base or not (".so" in base or base.endswith(".dll") or base.endswith(".dylib")):
         continue
+      key = os.path.normcase(os.path.realpath(p))
+      if key in seen:
+        continue
+      seen.add(key)
+      lib = _openblas_load(p)
+      w = None if lib is None else _openblas_wrap(lib, p)
+      if w is not None:
+        libs.append(w)
     _openblas_cache.append(libs)
   return _openblas_cache[0]
 

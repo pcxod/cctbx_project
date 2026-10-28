@@ -1416,6 +1416,57 @@ def test_twins():
         "refined back to %.1e" % (worst, err))
 
 
+def test_blas_threads_windows_layout():
+  """_openblas_libs and _blas_threads on a Windows-like process, mocked: the loaded-module list holds numpy's
+  scipy-openblas64 DLL (numpy.libs\\libscipy_openblas64_-<hash>.dll) and the library exports only
+  scipy_openblas_{get,set}_num_threads64_ (backed by a counter, or by this process's OpenBLAS when it has one).
+  The library must be found under those names, its count raised inside the block and restored after it, and a
+  count already higher left alone."""
+  real = mod._openblas_libs()
+
+  class fake_dll(object):
+    def __init__(self):
+      self.n = real[0].openblas_get_num_threads() if real else 1
+      self.calls = []
+
+    def scipy_openblas_get_num_threads64_(self):
+      return self.n
+
+    def scipy_openblas_set_num_threads64_(self, n):
+      self.calls.append(n)
+      self.n = n
+      if real:
+        real[0].openblas_set_num_threads(n)
+
+  dll = fake_dll()
+  saved = (mod._loaded_library_paths, mod._openblas_wheel_paths, mod._openblas_load, list(mod._openblas_cache),
+           mod.RAISE_BLAS_THREADS)
+  path = "C:\\Python312\\Lib\\site-packages\\numpy.libs\\libscipy_openblas64_-c16e4918366c6bc1f1cd71e28ca36fc0.dll"
+  try:
+    mod._loaded_library_paths = lambda: ["C:\\Windows\\System32\\kernel32.dll", path, path]
+    mod._openblas_wheel_paths = lambda: []
+    mod._openblas_load = lambda p: dll if p == path else None
+    mod._openblas_cache[:] = []
+    mod.RAISE_BLAS_THREADS = True
+    libs = mod._openblas_libs()
+    assert len(libs) == 1 and libs[0].path == path, libs
+    before = dll.n
+    with mod._blas_threads(4):
+      inside = dll.n
+    assert inside == max(4, before) and dll.n == before, (before, inside, dll.n)
+    dll.n = 8
+    with mod._blas_threads(4):
+      assert dll.n == 8
+    assert dll.n == 8
+    dll.scipy_openblas_set_num_threads64_(before)
+  finally:
+    (mod._loaded_library_paths, mod._openblas_wheel_paths, mod._openblas_load, cache,
+     mod.RAISE_BLAS_THREADS) = saved
+    mod._openblas_cache[:] = cache
+  print("  BLAS threads on a Windows-like layout (scipy_openblas_*64_ in numpy.libs): %d library found, %d -> %d"
+        " inside, restored; a higher count left alone" % (len(libs), before, inside))
+
+
 def run():
   # the tests below run on the numpy reference path, so that their output does not move with the compiled one's
   # rounding; test_compiled_* compare the compiled path with it and repeat the central differences on it
@@ -1439,6 +1490,7 @@ def run():
   test_commensurate_section()
   test_slice_workspace_equivalence()
   test_blas_threads_equivalence()
+  test_blas_threads_windows_layout()
   test_commensurate_gradients_and_refine()
   test_twins()
   test_gradients_aniso_occ_adp_crenel()
