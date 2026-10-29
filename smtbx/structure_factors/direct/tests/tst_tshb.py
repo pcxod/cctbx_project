@@ -15,7 +15,7 @@ What is checked:
 from __future__ import absolute_import, division, print_function
 
 import math, os, random, tempfile
-from cctbx import crystal, sgtbx, uctbx, xray, adptbx
+from cctbx import crystal, sgtbx, xray, adptbx
 from cctbx.array_family import flex
 from cctbx.development import random_structure
 import smtbx.structure_factors.direct as direct
