@@ -10,7 +10,7 @@
 #include <scitbx/math/modulo.h>
 #include <scitbx/array_family/versa.h>
 #include <scitbx/array_family/accessors/c_grid.h>
-#include <map>
+#include <algorithm>
 #include <vector>
 
 namespace cctbx { namespace masks {
@@ -267,55 +267,54 @@ namespace cctbx { namespace masks {
         return n_solvent;
       }
 
-      struct shrink_neighbors;
-      friend struct shrink_neighbors;
-
-      struct shrink_neighbors
+      // v[i] = any(v[i+d] for d in [a, b]) along one axis, periodic, in place
+      static void
+      dilate_axis(
+        std::vector<unsigned char>& v, int const* n, int axis, int a, int b)
       {
-        shrink_neighbors() {}
-
-        shrink_neighbors(
-          cctbx::uctbx::unit_cell const& unit_cell,
-          af::c_grid<3>::index_type const& gridding_n_real,
-          f_t const& shrink_truncation_radius)
-        {
-          int low[3];
-          int high[3];
-          for(unsigned i=0;i<3;i++) {
-            double x = shrink_truncation_radius
-                     * unit_cell.reciprocal_parameters()[i]
-                     * gridding_n_real[i];
-            low[i] = ifloor(-x);
-            high[i] = iceil(x);
+        std::size_t s[3] = {
+          static_cast<std::size_t>(n[1]) * n[2], static_cast<std::size_t>(n[2]), 1};
+        int o1 = (axis + 1) % 3, o2 = (axis + 2) % 3;
+        int len = n[axis];
+        std::size_t st = s[axis];
+        std::vector<unsigned char> line(len);
+        for (int i = 0; i < n[o1]; i++)
+        for (int j = 0; j < n[o2]; j++) {
+          unsigned char* p = &v[i * s[o1] + j * s[o2]];
+          for (int k = 0; k < len; k++) line[k] = p[k * st];
+          if (b - a + 1 >= len) {
+            unsigned char any = 0;
+            for (int k = 0; k < len; k++) any |= line[k];
+            for (int k = 0; k < len; k++) p[k * st] = any;
+            continue;
           }
-          int n0 = static_cast<int>(gridding_n_real[0]);
-          int n1 = static_cast<int>(gridding_n_real[1]);
-          int n2 = static_cast<int>(gridding_n_real[2]);
-          f_t shrink_truncation_radius_sq = shrink_truncation_radius
-                                          * shrink_truncation_radius;
-          cctbx::fractional<f_t> frac;
-          for(int p0=low[0];p0<=high[0];p0++) {
-            int m0 = scitbx::math::mod_positive(p0, n0);
-            frac[0] = static_cast<f_t>(p0) / n0;
-          for(int p1=low[1];p1<=high[1];p1++) {
-            int m1 = scitbx::math::mod_positive(p1, n1);
-            frac[1] = static_cast<f_t>(p1) / n1;
-          for(int p2=low[2];p2<=high[2];p2++) {
-            frac[2] = static_cast<f_t>(p2) / n2;
-            f_t dist_sq = unit_cell.length_sq(frac);
-            if (dist_sq < shrink_truncation_radius_sq) {
-              int m2 = scitbx::math::mod_positive(p2, n2);
-              table[m0][m1].push_back(m2);
-            }
-          }}}
+          int count = 0;
+          for (int d = a; d <= b; d++) {
+            count += line[scitbx::math::mod_positive(d, len)];
+          }
+          for (int k = 0; k < len; k++) {
+            p[k * st] = count > 0;
+            count -= line[scitbx::math::mod_positive(k + a, len)];
+            count += line[scitbx::math::mod_positive(k + 1 + b, len)];
+          }
         }
+      }
 
-        typedef std::vector<int> dim2;
-        typedef std::map<int, dim2> dim1;
-        typedef std::map<int, dim1> dim0;
-        dim0 table;
-      };
+      /* The shrink pass: a point of the probe shell (-1) becomes solvent if a
+         solvent point (1) lies closer than shrink_truncation_radius.
 
+         Checking every shell point against every grid offset in that ball
+         cost all but a few percent of the whole calculation: about 4000
+         offsets at a quarter of 0.5 A, and in a protein most shell points
+         have nothing in reach and ran the full list only to miss. Same
+         answer, less work: the ball is cut into runs along z (the distance
+         is a convex quadratic, so each (dx, dy) column of it is one run,
+         stored as maximal runs all the same), and a run is answered at once
+         from per-line prefix counts of the solvent points; runs go nearest
+         first, so a hit stops early. A periodic box dilation of the solvent
+         points first settles every point with no solvent inside the ball's
+         bounding box.
+       */
       void
       compute_contact_surface(
         cctbx::uctbx::unit_cell const& unit_cell,
@@ -331,61 +330,116 @@ namespace cctbx { namespace masks {
           contact_surface_fraction = accessible_surface_fraction;
           return;
         }
-        int nx = static_cast<int>(data_ref.accessor()[0]);
-        int ny = static_cast<int>(data_ref.accessor()[1]);
-        int nz = static_cast<int>(data_ref.accessor()[2]);
+        int n[3];
+        for (unsigned i = 0; i < 3; i++) {
+          n[i] = static_cast<int>(data_ref.accessor()[i]);
+        }
+        int nx = n[0], ny = n[1], nz = n[2];
         af::versa<DataType, af::c_grid<3> > datacopy = data.deep_copy();
-        af::const_ref<DataType, af::c_grid<3> >
-          datacopy_ref = datacopy.const_ref();
-        shrink_neighbors neighbors(
-          unit_cell,
-          data_ref.accessor(),
-          shrink_truncation_radius);
-        const DataType* datacopy_ptr = datacopy.begin();
-        for(std::size_t ilxyz=0;ilxyz<data_size;ilxyz++,datacopy_ptr++) {
-          if (*datacopy_ptr == -1) {
+        const DataType* dc = datacopy.begin();
+        // the ball as z-runs: (nearest distance, x, y offset, z start, length)
+        struct z_run { f_t d; int dx, dy, a, len; };
+        std::vector<std::pair<f_t, std::size_t> > order;
+        std::vector<z_run> runs;
+        int low[3], high[3], lo[3], hi[3];
+        for (unsigned i = 0; i < 3; i++) {
+          double x = shrink_truncation_radius
+                   * unit_cell.reciprocal_parameters()[i]
+                   * n[i];
+          low[i] = ifloor(-x);
+          high[i] = iceil(x);
+          lo[i] = high[i];
+          hi[i] = low[i];
+        }
+        f_t shrink_truncation_radius_sq = shrink_truncation_radius
+                                        * shrink_truncation_radius;
+        cctbx::fractional<f_t> frac;
+        for (int p0 = low[0]; p0 <= high[0]; p0++) {
+          frac[0] = static_cast<f_t>(p0) / nx;
+        for (int p1 = low[1]; p1 <= high[1]; p1++) {
+          frac[1] = static_cast<f_t>(p1) / ny;
+          bool open = false;
+        for (int p2 = low[2]; p2 <= high[2] + 1; p2++) {
+          bool in = false;
+          f_t dist_sq = 0;
+          if (p2 <= high[2]) {
+            frac[2] = static_cast<f_t>(p2) / nz;
+            dist_sq = unit_cell.length_sq(frac);
+            in = dist_sq < shrink_truncation_radius_sq;
+          }
+          if (in && !open) {
+            z_run r = {dist_sq, scitbx::math::mod_positive(p0, nx),
+                       scitbx::math::mod_positive(p1, ny), p2, 0};
+            runs.push_back(r);
+            open = true;
+          }
+          if (in) {
+            z_run& r = runs.back();
+            r.d = std::min(r.d, dist_sq);
+            r.len++;
+            int p[3] = {p0, p1, p2};
+            for (unsigned i = 0; i < 3; i++) {
+              lo[i] = std::min(lo[i], p[i]);
+              hi[i] = std::max(hi[i], p[i]);
+            }
+          }
+          open = in;
+        }}}
+        for (std::size_t i = 0; i < runs.size(); i++) {
+          order.push_back(std::make_pair(runs[i].d, i));
+        }
+        std::stable_sort(order.begin(), order.end());
+        std::vector<z_run> ball;
+        ball.reserve(runs.size());
+        for (std::size_t i = 0; i < order.size(); i++) {
+          ball.push_back(runs[order[i].second]);
+        }
+        // near[i]: some solvent point within the ball's bounding box of i
+        std::vector<unsigned char> near(data_size);
+        for (std::size_t i = 0; i < data_size; i++) near[i] = dc[i] == 1;
+        for (int axis = 0; axis < 3; axis++) {
+          dilate_axis(near, n, axis, lo[axis], hi[axis]);
+        }
+        // pre[l*(nz+1) + k]: solvent points among the first k of z-line l
+        std::size_t n_lines = static_cast<std::size_t>(nx) * ny;
+        std::vector<int> pre(n_lines * (nz + 1));
+        for (std::size_t l = 0; l < n_lines; l++) {
+          int* P = &pre[l * (nz + 1)];
+          const DataType* d = dc + l * nz;
+          P[0] = 0;
+          for (int k = 0; k < nz; k++) P[k + 1] = P[k] + (d[k] == 1);
+        }
+        std::size_t n_ball = ball.size();
+        for (std::size_t ilxyz = 0; ilxyz < data_size; ilxyz++) {
+          if (dc[ilxyz] != -1) continue;
+          DataType v = 0;
+          if (near[ilxyz]) {
             int ly = static_cast<int>(ilxyz / nz);
             int lz = static_cast<int>(ilxyz - ly * nz);
             int lx = ly / ny;
             ly -= lx * ny;
-            typename shrink_neighbors::dim0::const_iterator
-              tab_i_end = neighbors.table.end();
-            for(typename shrink_neighbors::dim0::const_iterator
-              tab_i = neighbors.table.begin();
-              tab_i != tab_i_end;
-              tab_i++) {
-              int mx = lx + tab_i->first;
-              while (mx >= nx) mx -= nx;
-              int mxny = mx * ny;
-              typename shrink_neighbors::dim1::const_iterator
-                tab_j_end = tab_i->second.end();
-              for(typename shrink_neighbors::dim1::const_iterator
-                tab_j = tab_i->second.begin();
-                tab_j != tab_j_end;
-                tab_j++) {
-                int my = ly + tab_j->first;
-                while (my >= ny) my -= ny;
-                const DataType*
-                  datacopy_mxnymynz = &datacopy_ref[(mxny + my) * nz];
-              typename shrink_neighbors::dim2::const_iterator
-                tab_k_end = tab_j->second.end();
-              for(typename shrink_neighbors::dim2::const_iterator
-                tab_k = tab_j->second.begin();
-                tab_k != tab_k_end;
-                tab_k++) {
-                  int mz = (*tab_k) + lz;
-                  while (mz >= nz) mz -= nz;
-                  if (datacopy_mxnymynz[mz] == 1) {
-                    data_ref[ilxyz] = 1;
-                    n_solvent++;
-                    goto end_of_neighbors_loop;
-                  }
-                }
+            for (std::size_t i = 0; i < n_ball; i++) {
+              z_run const& r = ball[i];
+              int mx = lx + r.dx; if (mx >= nx) mx -= nx;
+              int my = ly + r.dy; if (my >= ny) my -= ny;
+              const int* P = &pre[(static_cast<std::size_t>(mx) * ny + my) * (nz + 1)];
+              int count;
+              if (r.len >= nz) {
+                count = P[nz];
+              }
+              else {
+                int s = scitbx::math::mod_positive(lz + r.a, nz);
+                int e = s + r.len;
+                count = e <= nz ? P[e] - P[s] : P[nz] - P[s] + P[e - nz];
+              }
+              if (count > 0) {
+                v = 1;
+                n_solvent++;
+                break;
               }
             }
-            data_ref[ilxyz] = 0;
-            end_of_neighbors_loop:;
           }
+          data_ref[ilxyz] = v;
         }
         contact_surface_fraction = approx_surface_fraction_under_symmetry(
           data_ref.size(), n_solvent, space_group_order_z);

@@ -636,6 +636,22 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       return sum_of_rank_1_updates_t::omp_matrix_scratch(n_parameters, threads);
     }
 
+    /// What a threaded build charges one more per-thread copy against its budget
+    /** n^2 elements whichever accumulator, which is what
+        smtbx::refinement::least_squares::build_design_matrix_and_normal_equations
+        has always charged a normal matrix and what its share of the budget
+        was set against. It is not what a copy holds: the accumulator (packed
+        n(n+1)/2 or full n^2) and also reduced_ls, a packed n(n+1)/2 which the
+        constructor zero-fills and finalise() replaces without reading -- n(n+1)
+        elements for the packed accumulator, about 1.5 n^2 for the buffered one,
+        whose row buffer the builder budgets separately. Charging that would
+        move the thread count of Gauss-Newton builds wherever the budget binds,
+        a change to be measured on its own.
+     */
+    static std::size_t per_thread_bytes(int n_parameters) {
+      return std::size_t(n_parameters)*n_parameters*sizeof(scalar_t);
+    }
+
 #if defined(_OPENMP)
     /* These two touch nothing but the scalar sums, so they are the same
     whichever accumulator is in use. add_equations_omp does touch the matrix and
@@ -720,6 +736,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
 
       return *this;
     }
+
+    /// The accumulator of the normal matrix, for a threaded build to attach
+    /// its workers to; c.f. matrix::rank_n_update_shared_fold
+    sum_of_rank_1_updates_t &rank_1_updates() { return grad_yc_dot_grad_yc; }
 
     /// \f$\sum w y_o^2\f$
     /** This is the normalisation that guarantees
@@ -970,6 +990,11 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       return sum_of_rank_1_updates_t::omp_matrix_scratch(n_parameters, threads);
     }
 
+    /// as in non_linear_ls_with_separable_scale_factor
+    static std::size_t per_thread_bytes(int n_parameters) {
+      return std::size_t(n_parameters)*n_parameters*sizeof(scalar_t);
+    }
+
 #if defined(_OPENMP)
     void add_residuals_omp(const int& n,
       const int& start,
@@ -1033,6 +1058,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       throw SCITBX_NOT_IMPLEMENTED();
     }
 #endif
+
+    /// The accumulator of the normal matrix, for a threaded build to attach
+    /// its workers to; c.f. matrix::rank_n_update_shared_fold
+    sum_of_rank_1_updates_t &rank_1_updates() { return grad_yc_dot_grad_yc; }
 
     non_linear_ls_with_fixed_scale_factor
     &operator+=(non_linear_ls_with_fixed_scale_factor const &other) {

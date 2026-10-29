@@ -180,7 +180,7 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
     # 'unit' is not a fallback, it is the convention mmtbx.max_lik and mlf.h
     # jointly expect. The estimator returns beta in *Fo* units, while mlf.h
     # forms b = beta*k^2; so any k but 1 rescales a variance that was never on
-    # the Fc scale to begin with. Measured on jaca_A14: k = 1 refines
+    # the Fc scale to begin with. Measured on a small molecule: k = 1 refines
     # 0.0272 -> 0.0249 alongside least squares' 0.0244, while k = 0.22 - the
     # actual Fo/Fc scale, with alpha then coming out near 1 as theory says it
     # should - makes beta 20x too small, the weights 20x too large, and the
@@ -194,6 +194,32 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
     # Refmac's convention of folding the experimental variance into beta.
     # Off for the intensity target, which models that error explicitly.
     ml_add_sigma_squared_to_beta = None
+    # A multiplier on the restraint weights: Refmac's WMAT, the "matrix weight"
+    # of Tickle (2007) eq. 4. One leaves the behaviour exactly as it was.
+    #
+    # Measured on a small molecule (6819 reflections, 306 parameters, 60 bond
+    # restraints, shaken 0.05 A rms) under MLF: across five orders of magnitude
+    # of this scale R_free moves only 0.0276 -> 0.0266 while the bond r.m.s.
+    # deviation falls 0.0036 -> 0.0000 A, and LL_free and R_free choose the
+    # same value. At 22 reflections per parameter the weight is nearly free to
+    # choose. It is exposed for the regime where that stops being true - poor
+    # data-to-parameter ratios with many restraints, which is what proteins
+    # are - and because scanning it needs a knob to turn.
+    #
+    # Choose it by log_likelihood().free rather than by R_free. That is
+    # Tickle's argument: the free likelihood is the statistic that knows about
+    # the error model, and the weight is a statement about the error model.
+    restraints_weight_scale = 1.0
+    # Recompute the normalisation factor every cycle instead of fixing it at
+    # the first one.
+    #
+    # Off by default, and deliberately: measured on a shaken 17-atom structure
+    # over six cycles, what the formula would give drifts by 3.1x under least
+    # squares and 1.4x under the likelihood. So freezing it is not an
+    # approximation that the likelihood made worse - it affects least squares
+    # more - and switching it on changes long-established behaviour for every
+    # small-molecule refinement. Judge it by LL_free before turning it on.
+    restraints_normalisation_per_cycle = False
     # How much the BLAS 3 accumulator may buffer before folding its rows into
     # the normal matrix. Zero means take it from max_memory, which is the
     # budget the whole build is meant to keep to.
@@ -218,8 +244,14 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         return 0                      # no budget given: the accumulator decides
       n = int(n_parameters)
       result = (n*n + n*(n + 1)//2)*8
+      # Past max(32 MB, 512 rows) a larger buffer buys nothing (measured flat,
+      # 1950 and 5200 parameters) but has to be paged in afresh every cycle,
+      # the accumulator releasing it once the normal matrix is formed; the
+      # 512 rows keep a wide row from cutting the chunks thin. The same bound
+      # the threaded build gives its workers, max_worker_buffer_bytes.
+      cap = max(32 << 20, 512*n*8)
       return max(8 << 20,
-                 min(512 << 20, int(max_memory_mb)*1048576 - result))
+                 min(cap, 512 << 20, int(max_memory_mb)*1048576 - result))
 
     def __init__(self, observations, reparametrisation,
                  one_h_linearisation=None, **kwds):
@@ -245,6 +277,8 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       self.origin_fixing_restraint = self.origin_fixing_restraints_type(
         self.xray_structure.space_group())
       self.taken_step = None
+      # Both knobs on how hard the restraints pull, neither of them on by
+      # default. See the class attributes of the same names.
       self.restraints_normalisation_factor = None
 
     @property
@@ -278,6 +312,7 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         self.f_mask.data())
 
     def build_up(self, objective_only=False):
+      self._inverse_cache = None
       f_mask_data = self.mask_data()
 
       fc_correction = self.reparametrisation.fc_correction
@@ -328,6 +363,9 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         self.check_maximum_likelihood_accumulator()
         ml_data = self.build_ml_data(f_mask_data, fc_correction, scale_factor,
                                      f_calc=bootstrap_f_calc)
+      # kept so log_likelihood() reports the distribution this build used, and
+      # not one re-estimated afterwards from a model that has since moved
+      self.ml_data_last = ml_data
 
       self.reset()
       result = build_normal_eqns(scale_factor,
@@ -351,7 +389,8 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         # factor suggested in Giacovazzo and similar to that used by shelxl.
         # (shelx manual, page 5-1).
         # The factor 2 comes from the fact that we minimize 1/2 sum w delta^2
-        if self.restraints_normalisation_factor is None:
+        if (self.restraints_normalisation_factor is None
+            or self.restraints_normalisation_per_cycle):
           self.restraints_normalisation_factor \
               = 2 * self.objective_data_only/(self.n_equations-self.n_parameters)
         linearised_eqns = self.restraints_manager.build_linearised_eqns(
@@ -362,7 +401,8 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         self.reduced_problem().add_equations(
           linearised_eqns.deltas,
           linearised_eqns.design_matrix * jacobian,
-          linearised_eqns.weights * self.restraints_normalisation_factor,
+          linearised_eqns.weights * (self.restraints_normalisation_factor
+                                     * self.restraints_weight_scale),
           optimise_for_tall_matrix=False)
         self.n_restraints = linearised_eqns.n_restraints()
         self.chi_sq_data_and_restraints = self.chi_sq()
@@ -418,7 +458,7 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       give. Estimating them from the Fc the last build already computed costs
       nothing and lags them by one cycle; computing Fc again first costs a
       complete extra pass over every reflection - measured at 19% of an ML
-      refinement on crambin - and buys alpha and beta that describe the model
+      refinement on a protein - and buys alpha and beta that describe the model
       exactly as it stands.
 
       The lag is what Refmac and Phenix live with, sigma_A being estimated from
@@ -496,9 +536,23 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         self.ml_scale_factor = (flex.sum(fo*fc)/denom if denom > 0
                                 else (scale_factor or 1.0))
       k = self.ml_scale_factor
+      # ml_scale_mode 'unit', the default, leaves alpha carrying the Fo/Fc
+      # scale, so k is exactly one and the copy would be a whole complex array
+      # written to multiply by 1.0.
+      #
+      # That is the only saving here worth taking, and it is not a large one.
+      # Profiled per cycle, the likelihood's whole extra apparatus is 7.4% of a
+      # 295-parameter cycle and 0.3% of a 2984-parameter one, and within that
+      # this line, f_sq_as_f(), centric_flags(), epsilons() and the ml_data
+      # copy together are 0.4% and 0.0% respectively. Caching them was tried
+      # and taken out again: it bought nothing measurable and cost a cache to
+      # invalidate. Nearly all of the 7.4% and the 0.3% is sigma_a.alpha_beta,
+      # the estimator itself, which is where to look if this ever matters.
+      scaled = (f_calc if k == 1
+                else f_calc.customized_copy(data=f_calc.data()*k))
       alpha, beta = sigma_a.alpha_beta(
         f_obs=f_obs,
-        f_calc=f_calc.customized_copy(data=f_calc.data()*k),
+        f_calc=scaled,
         r_free_flags=self.ml_free_flags,
         free_reflections_per_bin=self.ml_free_reflections_per_bin,
         add_sigma_squared_to_beta=add_sigma_sq)
@@ -515,6 +569,64 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
                                      else flex.bool(alpha.size(), False)),
                          scale_factor=k)
 
+    def log_likelihood(self, free_only=False):
+      """ -ln L summed over the working and over the free reflections.
+
+      free_only leaves the working sums zero and evaluates the free set alone.
+      That is what a per-cycle report wants: the free set is a tenth of the
+      data, and under the intensity target every reflection costs a twenty-node
+      quadrature, so the full pair was measured at 12-21% of an MLI cycle
+      across eight structures where the free half is about a tenth of that.
+
+      None under least squares, and before the first build_up().
+
+      LL_free is the statistic Tickle (2007) argues should replace R_free when
+      weighting parameters are being chosen: it is the functional the
+      refinement is minimising, evaluated on reflections the refinement never
+      saw. R_free judges amplitude agreement alone and says nothing about the
+      error model, which under a likelihood target is precisely what the
+      weights are.
+
+      Costs one pass over the observations and no structure-factor
+      calculation - the free reflections carry no weight in the target, but Fc
+      is computed for every reflection regardless.
+
+      **Do not read a fall in this as the model improving, cycle by cycle.**
+      alpha and beta are re-estimated every cycle, so the density the free
+      reflections are scored against moves too, and a wider one raises the
+      likelihood of everything. Measured on a structure whose refinement was
+      going backwards: -LL_free fell from 1.859 to 1.830 over eight cycles
+      while R1 rose 0.091 to 0.097, R_free rose 0.095 to 0.111, and mean alpha
+      fell 0.94 to 0.87 - the error model was widening to accommodate a worse
+      fit, and the likelihood improved because of it, not in spite of it.
+
+      What it is good for is the comparison Tickle proposes: two *converged*
+      refinements of the same structure and data differing in a weighting
+      parameter, where the model is no longer moving and the error model has
+      settled. Within one run, watch R_free and mean alpha beside it; when the
+      three disagree, the likelihood is the one that can be fooled.
+
+      Reference: Tickle (2007) Acta Cryst. D63, 1274-1281.
+      """
+      ml = self.ml_data_last
+      fc_sq = getattr(self, 'fc_sq', None)
+      if ml is None or fc_sq is None:
+        return None
+      sigmas = self.observations.fo_sq.sigmas()
+      if sigmas is None:
+        # only the intensity target consults them, but the signature is shared
+        sigmas = flex.double(fc_sq.data().size(), 0)
+      return ext.ml_log_likelihood(
+        fo_sq=self.observations.fo_sq.data(),
+        sigma_fo_sq=sigmas,
+        observables=fc_sq.data(),
+        ml_data=ml,
+        free_only=free_only)
+
+    # The ml_data of the last build, so log_likelihood() can be asked for
+    # afterwards; None under least squares.
+    ml_data_last = None
+
     # The Fo^2/Fc^2 scale of the last build under a likelihood target; None
     # until one has happened. See scale_factor().
     ml_crystallographic_scale = None
@@ -528,8 +640,8 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       rather than the scale of the structure. R1, wR2, the difference map, the
       standard uncertainties and the CIF all read scale_factor(), and one in
       place of the true 0.08 makes them report a destroyed structure that is
-      not destroyed: crambin came back at R1 2.25 from a model whose real R1
-      was 0.33.
+      not destroyed: one protein came back at R1 2.25 from a model whose
+      real R1 was 0.33.
 
       Same variable projection the separable accumulator does, with the same
       weighting scheme, so the number means what it means everywhere else. The
@@ -609,7 +721,7 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
 
       Under a likelihood the accumulator's objective is over effective
       observations weighted by a curvature, so a wR2 or a goodness of fit built
-      from it is not comparable with a least-squares run: crambin reports 0.08
+      from it is not comparable with a least-squares run: one protein reports 0.08
       where a fitted model should be near one, and the number moves when the
       target changes rather than when the model does.
 
@@ -641,7 +753,7 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       Gauss-Newton curvature of -logL, 2a^2/(epsilon b), in absolute units, so
       the inverse matrix is already an inverse information and the goodness of
       fit is not a correction to anything - it is a quantity with no reason to
-      approach one, measured at 0.08 on crambin and 11.8 on the same structure
+      approach one, measured at 0.08 on a protein and 11.8 on the same structure
       without restraints. Applying it scaled every s.u. by between 1/140 and
       140 depending on which, which in turn is what ShelXL's DAMP divides the
       shifts by, so the step limiter was working in units that moved under it.
@@ -690,6 +802,32 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         scale_factor=math.sqrt(self.scale_factor()), assume_index_matching=True)
       return R1, f_obs.size()
 
+    def r_free(self):
+      """ R1 over the free reflections alone, and how many there are.
+
+      (None, 0) when there is no free set, which is every least-squares
+      refinement and any likelihood one that was handed no flags.
+
+      This is the conventional R_free, formed from |Fcalc|. Blanc et al. (2004)
+      section 5.1 and Tickle (2007) eq. 2 both argue that under a likelihood
+      target it should instead be formed from the *expected* amplitude, the
+      first moment of the Rice distribution, on the grounds that the
+      expectation is what the model actually predicts for an observation.
+      Worth having, and deliberately not done here: it would be a second
+      statistic under the same name, and the comparable-with-everyone-else one
+      is this.
+      """
+      free = self.ml_free_flags
+      fc_sq = getattr(self, 'fc_sq', None)
+      if free is None or fc_sq is None or free.count(True) == 0:
+        return None, 0
+      f_obs = self.observations.fo_sq.select(free).f_sq_as_f()
+      f_calc = fc_sq.select(free).f_sq_as_f()
+      return (f_obs.r1_factor(f_calc,
+                              scale_factor=math.sqrt(self.scale_factor()),
+                              assume_index_matching=True),
+              f_obs.size())
+
     def covariance_matrix(self,
                           jacobian_transpose=None,
                           normalised_by_goof=True):
@@ -726,15 +864,31 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
           raise RuntimeError(
             "the normal equations are still incomplete after a full build; "
             "there is no covariance matrix to take.")
-      if not self.step_equations().solved:
-        self.solve()
-      cov = linalg.inverse_of_u_transpose_u(
-        self.step_equations().cholesky_factor_packed_u())
-      cov /= self.sum_w_yo_sq()
+      # The inverse is the expensive part, n^3, and the same for every caller
+      # until the equations change: Olex2 asks three times after the last
+      # cycle (the shift analysis, the annotated matrix, the twin/extinction
+      # block), each of which used to invert afresh. Kept until the next build
+      # or restore, at the cost of holding the n(n+1)/2 inverse that long.
+      cov = self._inverse_cache
+      if cov is None:
+        if not self.step_equations().solved:
+          self.solve()
+        cov = linalg.inverse_of_u_transpose_u(
+          self.step_equations().cholesky_factor_packed_u())
+        cov /= self.sum_w_yo_sq()
+        self._inverse_cache = cov
       if jacobian_transpose is not None:
         cov = jacobian_transpose.self_transpose_times_symmetric_times_self(cov)
+      else:
+        cov = cov.deep_copy()   # the caller may scale it in place
       if normalised_by_goof: cov *= self.variance_goof_factor()
       return cov
+
+    _inverse_cache = None
+
+    def restore_step_equations(self, saved):
+      self._inverse_cache = None
+      return super(klass, self).restore_step_equations(saved)
 
     def covariance_matrix_and_annotations(self):
       jac_tr = self.reparametrisation.jacobian_transpose_matching_grad_fc()

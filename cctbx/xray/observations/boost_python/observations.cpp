@@ -81,6 +81,19 @@ namespace {
             arg("data"),
             arg("sigmas"),
             arg("merohedral_components"))))
+        .def(init<sgtbx::space_group const&,
+          scitbx::af::shared<cctbx::miller::index<> > const&,
+          scitbx::af::shared<FloatType> const&,
+          scitbx::af::shared<FloatType> const&,
+          scitbx::af::shared<
+          cctbx::xray::twin_component<FloatType>*> const&,
+          uctbx::unit_cell const& >
+          ((arg("space_group"),
+            arg("indices"),
+            arg("data"),
+            arg("sigmas"),
+            arg("merohedral_components"),
+            arg("unit_cell"))))
         .def(init<scitbx::af::shared<cctbx::miller::index<> > const&,
                   scitbx::af::shared<FloatType> const&,
                   scitbx::af::shared<FloatType> const&,

@@ -17,6 +17,9 @@
 #include <smtbx/refinement/least_squares_twinning.h>
 #include <smtbx/refinement/ml_target.h>
 #include <smtbx/refinement/weighting_schemes.h>
+#if defined(USE_FAST_LINALG)
+#include <fast_linalg/environment.h>
+#endif
 
 #include <algorithm>
 #include <vector>
@@ -72,6 +75,71 @@ namespace smtbx { namespace refinement { namespace least_squares {
     static af::versa<FloatType, af::c_grid<2> > const &
     get(af::versa<FloatType, af::c_grid<2> > const &m) { return m; }
   };
+
+  /** @brief Whether the workers of a threaded build can share one normal
+      matrix, and the means of doing it.
+
+  Only an accumulator that buffers rows can: matrix::rank_n_update, through
+  matrix::rank_n_update_shared_fold. For every other normal equations type --
+  the packed accumulator, the summaries the conjugate gradients use -- this is
+  the null version and the workers keep matrices of their own, as before.
+   */
+  //@{
+  template <class Accumulator>
+  struct shared_fold_for_accumulator {
+    static bool const available = false;
+    struct fold_t {};
+    template <class NE> static fold_t *make(NE &, int) { return 0; }
+    template <class NE> static void attach(NE &, fold_t &, int) {}
+    template <class NE> static void finish(NE &) {}
+  };
+
+  template <typename T>
+  struct shared_fold_for_accumulator<scitbx::matrix::rank_n_update<T> > {
+    static bool const available = true;
+    typedef scitbx::matrix::rank_n_update_shared_fold<T> fold_t;
+    template <class NE> static fold_t *make(NE &ne, int n_workers) {
+      return new fold_t(ne.rank_1_updates(), n_workers);
+    }
+    template <class NE> static void attach(NE &ne, fold_t &f, int worker) {
+      ne.rank_1_updates().attach(f, worker);
+    }
+    template <class NE> static void finish(NE &ne) {
+      ne.rank_1_updates().finish_shared();
+    }
+  };
+
+  template <class T> struct void_of { typedef void type; };
+
+  template <class NE, class = void>
+  struct shared_fold_of : shared_fold_for_accumulator<void> {};
+
+  template <class NE>
+  struct shared_fold_of<NE,
+    typename void_of<typename NE::sum_of_rank_1_updates_t>::type>
+    : shared_fold_for_accumulator<typename NE::sum_of_rank_1_updates_t> {};
+
+  /// OpenBLAS threads set for a scope and restored after it
+  struct blas_threads_scope {
+#if defined(USE_FAST_LINALG)
+    int saved;
+    explicit blas_threads_scope(int n) : saved(-1) {
+      if (n > 0 && fast_linalg::is_initialised()) {
+        fast_linalg::environment env;
+        saved = env.threads();
+        env.set_threads(n);
+      }
+    }
+    ~blas_threads_scope() {
+      if (saved > 0) {
+        fast_linalg::environment().set_threads(saved);
+      }
+    }
+#else
+    explicit blas_threads_scope(int) {}
+#endif
+  };
+  //@}
 
   template <typename FloatType>
   class builder_base {
@@ -173,6 +241,30 @@ namespace smtbx { namespace refinement { namespace least_squares {
     static int min_accumulator_threads() { return 3; }
     //@}
 
+    /** @brief The most rows one worker buffers before folding them in.
+
+    A ceiling on what the memory budget would otherwise give each worker. The
+    rows of a chunk are written by the structure factor pass and read back by
+    the syrk that folds them in, and that read is only cheap while the chunk is
+    still in cache: with several workers filling chunks at once, what they
+    share is the last level cache, so a chunk well beyond a share of it makes
+    the syrk read every row back from memory instead. Measured on a 4-core
+    machine, 3 workers, 1950 parameters: up to ~40 MB a worker the build time is
+    flat, while the 80-330 MB a generous budget hands out made it 50-65%
+    slower -- a larger budget gave a slower build. 32 MB leaves the default
+    budget's share (~25 MB) untouched and stops the large ones; with it a 2000 MB
+    budget measured 1.19 s against 1.51 s.
+
+    The floor in rows is the other side of the trade. Each chunk costs a pass
+    over the n^2 result, so for a wide row a byte cap alone would mean many
+    thin chunks and many passes: at 5200 parameters 8 MB chunks (190 rows)
+    measured 7% slower than the default. 512 rows keeps that pass rare however
+    large the structure.
+     */
+    static std::size_t max_worker_buffer_bytes(std::size_t row_bytes) {
+      return std::max<std::size_t>(32u << 20, 512*row_bytes);
+    }
+
     /** @brief A per-thread normal equations object, told its memory budget
         where the type in question has one to be told.
 
@@ -216,9 +308,13 @@ namespace smtbx { namespace refinement { namespace least_squares {
     Two constants because the accumulators differ greatly in m. The packed one
     keeps half a matrix and folds each row in as it arrives, so it merges less
     and wants more workers for the same work; the buffered one carries a full
-    matrix, a row buffer and a syrk besides. They are told apart as in
-    new_chunk_equations above -- the buffered accumulator is the one that takes
-    a buffer size.
+    matrix, a row buffer and a syrk besides. They are told apart by whether
+    the rank update buffers rows, which only rank_n_update does: it alone has a
+    default_buffer_bytes(). Not by whether the normal equations take a buffer
+    size, as new_chunk_equations above asks -- both wrappers take one, the
+    packed accumulator ignoring it so that the two stay interchangeable, and
+    that test handed the packed one the buffered one's constant as well. The
+    matrix-free summaries have no rank update and take the packed figure.
 
     Both values are deliberately conservative. Overshooting T* costs more than
     undershooting it, every extra worker being another copy of the matrix, and
@@ -227,7 +323,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
     //@{
     template <typename NE>
     static double accumulator_work_constant(
-      int, decltype(NE(0, true, std::size_t(0)))* = 0) { return 195.; }
+      int, decltype(NE::sum_of_rank_1_updates_t::default_buffer_bytes())* = 0)
+    {
+      return 195.;
+    }
 
     template <typename NE>
     static double accumulator_work_constant(long) { return 30.; }
@@ -392,13 +491,19 @@ namespace smtbx { namespace refinement { namespace least_squares {
 
     - twinning, because the components are summed as intensities and the
       amplitudes of different components do not add;
-    - a non-trivial Fc correction (extinction, SWAT), because it returns an
-      intensity multiplier which has no place in the amplitude distribution;
     - anything that is not one alpha, beta, epsilon and centric flag per
       reflection.
 
     Each of these would otherwise produce numbers rather than an error, which is
     the worse outcome. OpenMP is refused separately, in build().
+
+    An Fc correction (EXTI, SWAT) is not on the list. It multiplies the
+    observable before the likelihood sees it, so the model amplitude in the
+    distribution is the corrected one, sqrt(y)|Fc|; alpha and beta are
+    estimated against that same corrected Fc, and the correction's own
+    parameters reach the likelihood through d(observable)/dx, which is exact.
+    beta is not rescaled by y: the model error is that of the corrected
+    amplitude, the convention least squares uses for its residual too.
     */
     void check_maximum_likelihood() const {
       if (!ml.active()) {
@@ -406,7 +511,6 @@ namespace smtbx { namespace refinement { namespace least_squares {
       }
       SMTBX_ASSERT(ml.is_consistent_with(reflections_.size()));
       SMTBX_ASSERT(!reflections_.is_twinned());
-      SMTBX_ASSERT(fc_cr.is_trivial());
     }
 
     template<class NormalEquations>
@@ -528,13 +632,15 @@ namespace smtbx { namespace refinement { namespace least_squares {
           return;
         }
 #endif
-        /* Every worker keeps a normal matrix of its own, so what a threaded
-           build costs in memory grows with the thread count, and nothing in
-           `available_threads` knows that. On a large structure this is the
-           dominant allocation and can run to many times the budget asked for.
+        /* Every worker keeps a copy of the accumulator of its own, so what a
+           threaded build costs in memory grows with the thread count, and
+           nothing in `available_threads` knows that. For the accumulators which
+           form a normal matrix that copy is the matrix, which on a large
+           structure is the dominant allocation and can run to many times the
+           budget asked for.
 
-           Bounding the workers by what the budget holds is not the trade it
-           appears to be: past a handful of them the extra copies buy overhead
+           Bounding those workers by what the budget holds is not the trade it
+           appears to be: past a handful of them the extra matrices buy overhead
            and duplicate storage rather than arithmetic, the heavy kernel being
            threaded by the BLAS already. A build bounded this way is usually
            quicker as well as smaller.
@@ -559,9 +665,25 @@ namespace smtbx { namespace refinement { namespace least_squares {
             parent_t::template accumulator_work_constant<NormalEquations>(0),
             reflections_.size()));
         }
-        if (max_memory > 0 && normal_equations.n_parameters() > 0) {
-          std::size_t const n = normal_equations.n_parameters();
-          std::size_t const result_bytes = n*n*sizeof(FloatType);
+        typedef shared_fold_of<NormalEquations> shared_fold_t;
+        /* With a shared fold the workers keep no matrices of their own, only
+           row buffers (capped below), so there are no private copies for the
+           budget to bound and the cap that follows does not apply.
+         */
+        if (!shared_fold_t::available
+            && max_memory > 0 && normal_equations.n_parameters() > 0) {
+          /* Asked of the accumulator rather than assumed to be n x n. The
+             summary the stored-matrix conjugate gradients accumulate holds
+             O(n) -- two vectors, a lent row and the preconditioner blocks --
+             and charging it for a normal matrix it never allocates held a
+             protein's design matrix build to the floor of three workers; the
+             matrix-free mode's summary and product passes were held there
+             too. The normal equations accumulators are still charged n^2,
+             exactly as before; see their per_thread_bytes for why that is not
+             exact.
+           */
+          std::size_t const per_thread_bytes =
+            NormalEquations::per_thread_bytes(normal_equations.n_parameters());
           /* A quarter of the budget, not all of it. The private matrices are
              not what the budget was written for -- the row buffers are -- and
              giving them the whole of it lets a *generous* budget produce a
@@ -571,12 +693,15 @@ namespace smtbx { namespace refinement { namespace least_squares {
              Floored, and on a very large structure the floor matters more than
              the cap: once one matrix is itself larger than the share, the
              division alone would say a single worker and give up threading
-             altogether, costing far more than the memory it saves.
+             altogether, costing far more than the memory it saves. Capped
+             before the narrowing to int, which an O(n) charge against a large
+             budget could otherwise overflow.
            */
           std::size_t const budget = (std::size_t(max_memory) << 20)/4;
-          int const by_memory = static_cast<int>(
+          int const by_memory = static_cast<int>(std::min<std::size_t>(
+            parent_t::max_accumulator_threads(),
             std::max<std::size_t>(parent_t::min_accumulator_threads(),
-              budget/std::max<std::size_t>(1, result_bytes)));
+              budget/std::max<std::size_t>(1, per_thread_bytes))));
           thread_count = std::min(thread_count, by_memory);
         }
         /* Held here rather than in a boost::thread_group so that each thread
@@ -597,14 +722,34 @@ namespace smtbx { namespace refinement { namespace least_squares {
            the floor keeps that from becoming silly on a machine with many
            threads and a small budget.
          */
+        /* Capped as well, so that a generous budget does not buy chunks too
+           large to still be in cache when they are folded in -- see
+           max_worker_buffer_bytes. With no budget the cap is the size: the
+           accumulator's own default is far past it.
+         */
+        std::size_t const worker_cap = parent_t::max_worker_buffer_bytes(
+          std::size_t(normal_equations.n_parameters())*sizeof(FloatType));
         std::size_t const thread_buffer_bytes = max_memory > 0
-          ? std::max<std::size_t>(4u << 20,
-              ((std::size_t(max_memory) << 20)/4)/thread_count)
-          : 0;
+          ? std::min(worker_cap, std::max<std::size_t>(4u << 20,
+              ((std::size_t(max_memory) << 20)/4)/thread_count))
+          : worker_cap;
+        /* One matrix for all the workers, where the accumulator allows it;
+           see matrix::rank_n_update_shared_fold. The workers fold into it
+           themselves, tile by tile, so the BLAS must not thread underneath
+           them; its own setting comes back after the build.
+         */
+        boost::scoped_ptr<typename shared_fold_t::fold_t> shared_fold(
+          shared_fold_t::make(normal_equations, thread_count));
+        // each worker folds its own tiles: one BLAS thread apiece
+        blas_threads_scope blas_threads(shared_fold_t::available ? 1 : 0);
         for(int thread_idx=0; thread_idx<thread_count; thread_idx++) {
           normal_equations_ptr_t chunk_normal_equations(
             parent_t::template new_chunk_equations<NormalEquations>(
               normal_equations.n_parameters(), thread_buffer_bytes, 0));
+          if (shared_fold) {
+            shared_fold_t::attach(*chunk_normal_equations, *shared_fold,
+                                  thread_idx);
+          }
           accumulate_reflection_chunk_ptr_t accumulator(
             new accumulate_reflection_chunk_t(
               *this,
@@ -617,6 +762,12 @@ namespace smtbx { namespace refinement { namespace least_squares {
               objective_only,
               f_calc_.ref(), observables_.ref(), weights_.ref(),
               design_matrix_, ml));
+          accumulator->first = thread_idx;
+          accumulator->stride = thread_count;
+          if (shared_fold) {
+            accumulator->finish_shared = &shared_fold_t::template
+              finish<NormalEquations>;
+          }
           accumulators.push_back(accumulator);
           pool.push_back(boost::shared_ptr<boost::thread>(
             new boost::thread(boost::ref(*accumulator))));
@@ -728,6 +879,14 @@ namespace smtbx { namespace refinement { namespace least_squares {
       void reset() {
         current = 0;
       }
+      /// chunk k of the same partition, for a worker that takes every n-th
+      chunk at(int k) const {
+        int first = k*256;
+        if (first >= count) {
+          return chunk();
+        }
+        return chunk(first, std::min(count - first, 256));
+      }
     };
 
     /// the shared one, defined next to f_calc_function_base which uses it
@@ -826,6 +985,24 @@ namespace smtbx { namespace refinement { namespace least_squares {
        */
       ml_data<FloatType> const& ml;
       bool running;
+      /* Set when the worker deposits into a shared fold: called on every way
+         out of operator(), the early return on interruption and the error
+         paths included. A worker leaving without it would have the others wait
+         for its next buffer forever.
+       */
+      void (*finish_shared)(NormalEquations &);
+      struct finish_on_exit {
+        void (*f)(NormalEquations &);
+        NormalEquations &ne;
+        ~finish_on_exit() { if (f) f(ne); }
+      };
+      /* Chunks first, first + stride, ... of the scheduler's partition, or
+         whatever next() hands out while first is negative. The workers are
+         given a fixed share: taken first come first served, which rows a
+         worker sums into its private matrix, and so the rounding of the
+         merged normal equations, changed from one run to the next.
+       */
+      int first, stride;
       accumulate_reflection_chunk(
         builder_base<FloatType>& parent,
         Scheduler& scheduler,
@@ -858,11 +1035,14 @@ namespace smtbx { namespace refinement { namespace least_squares {
         f_calc(f_calc), observables(observables), weights(weights),
         design_matrix(design_matrix),
         ml(ml),
-        running(true)
+        running(true),
+        finish_shared(0),
+        first(-1), stride(1)
       {}
 
       void operator()() {
         running = true;
+        finish_on_exit finisher = { finish_shared, normal_equations };
         try {
           af::shared<FloatType> gradients;
           int n_params = jacobian_transpose_matching_grad_fc.n_rows();
@@ -909,8 +1089,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
            */
           f_calc_function.set_defer_grad_observable(
             fast && f_calc_function.raw_gradients());
-          while (true) {
-            chunk ch = scheduler.next();
+          for (int k = first; ; k += stride) {
+            chunk ch = first < 0 ? scheduler.next() : scheduler.at(k);
             if (ch.size == 0) {
               break;
             }
@@ -1252,6 +1432,137 @@ namespace smtbx { namespace refinement { namespace least_squares {
     }
     //@}
 
+    /** @brief The conjugate gradients' whole product in one pass over the
+        matrix.
+
+    With rows R_i = sqrt(w_i) j_i stored, linearised_problem in cgls.py forms
+
+        t  = (R x) * isw
+        u  = (t k + yc g) * w            (g = grad k* . x)
+        result = R^T (u * isw),   and the scalar yc . u
+
+    as two products, each a pass over the whole matrix -- which at the sizes
+    where the matrix is stored at all is bandwidth bound, so the second pass
+    costs as much as the first. Here the matrix is taken a tile of rows at a
+    time, small enough to stay in cache: the tile's part of R x, then its u,
+    then its part of R^T u while the rows are still there. Every element of t
+    and u is formed by the same operations in the same order as the vector
+    expressions; only the sums inside the products are associated differently,
+    which is rounding. Measured on 40000 x 2000: 124 ms for the two passes,
+    89 ms for this, single threaded, and the same ratio on four threads.
+
+    The threads take fixed slabs of tiles and add their partial results in
+    slab order, so the result is the same from one run to the next.
+
+    Returns n + 1 values: R^T (u * isw), then yc . u.
+     */
+    af::shared<FloatType> normal_times(
+      af::const_ref<FloatType> const &x,
+      af::const_ref<FloatType> const &inverse_sqrt_weights,
+      af::const_ref<FloatType> const &weights,
+      af::const_ref<FloatType> const &yc,
+      FloatType k, FloatType g) const
+    {
+      af::versa<StoreType, af::c_grid<2> > const &a = parent_t::design_matrix_;
+      int const m = static_cast<int>(a.accessor()[0]),
+                n = static_cast<int>(a.accessor()[1]);
+      SMTBX_ASSERT(x.size() == std::size_t(n))(x.size())(n);
+      SMTBX_ASSERT(inverse_sqrt_weights.size() == std::size_t(m));
+      SMTBX_ASSERT(weights.size() == std::size_t(m) && yc.size() == std::size_t(m));
+      af::shared<FloatType> result(n + 1, FloatType(0));
+      int const n_threads = parent_t::get_available_threads();
+      if (is_mixed_precision() && n_threads == 1) {
+        /* The one case the tiles lose: a narrow store on one thread, where
+           the plain loops of a tile run behind the matrix_*_mixed kernels
+           (measured 0.9x). The two passes then, with the same elementwise
+           arithmetic in between.
+         */
+        af::shared<FloatType> t(m, af::init_functor_null<FloatType>());
+        times_(m, n, a.begin(), x.begin(), t.begin());
+        FloatType yc_dot_u = 0;
+        for (int i = 0; i < m; i++) {
+          FloatType u = ((t[i]*inverse_sqrt_weights[i])*k + yc[i]*g)*weights[i];
+          yc_dot_u += yc[i]*u;
+          t[i] = u*inverse_sqrt_weights[i];
+        }
+        transpose_times_(m, n, a.begin(), t.begin(), result.begin());
+        result[n] = yc_dot_u;
+        return result;
+      }
+      fused_normal_times(m, n, a.begin(), x.begin(),
+        inverse_sqrt_weights.begin(), weights.begin(), yc.begin(), k, g,
+        result.begin(), n_threads);
+      return result;
+    }
+
+    /// The kernel of normal_times, on raw arrays; out is n + 1 long
+    template <typename S>
+    static void fused_normal_times(int m, int n, S const *a,
+      FloatType const *x, FloatType const *isw, FloatType const *w,
+      FloatType const *yc, FloatType k, FloatType g, FloatType *out,
+      int n_threads)
+    {
+      // rows per tile: about 256 KB of them, so that the second product
+      // finds the tile in L2, and never fewer than 16
+      int const tile = std::max(16,
+        int((256u << 10)/std::max<std::size_t>(1, std::size_t(n)*sizeof(S))));
+      int const n_tiles = (m + tile - 1)/tile;
+      int const n_slabs = std::max(1, std::min(n_threads, n_tiles));
+      std::vector<std::vector<FloatType> > partial(n_slabs,
+        std::vector<FloatType>(n + 1, FloatType(0)));
+      struct slab_job {
+        int first_tile, last_tile, tile, m, n;
+        S const *a; FloatType const *x, *isw, *w, *yc; FloatType k, g;
+        FloatType *out;
+        void operator()() const {
+          std::vector<FloatType> t(tile);
+          FloatType yc_dot_u = 0;
+          for (int b = first_tile; b < last_tile; b++) {
+            int const i0 = b*tile, rows = std::min(tile, m - i0);
+            S const *ab = a + std::size_t(i0)*n;
+            tile_times_(rows, n, ab, x, &t[0]);
+            for (int r = 0; r < rows; r++) {
+              int const i = i0 + r;
+              // as the vector expressions: t*isw, *k, + yc*g, *w
+              FloatType u = ((t[r]*isw[i])*k + yc[i]*g)*w[i];
+              yc_dot_u += yc[i]*u;
+              t[r] = u*isw[i];
+            }
+            tile_transpose_times_add_(rows, n, ab, &t[0], out);
+          }
+          out[n] = yc_dot_u;
+        }
+      };
+      std::vector<slab_job> jobs(n_slabs);
+      for (int s = 0; s < n_slabs; s++) {
+        slab_job j = { int((long long)n_tiles*s/n_slabs),
+                       int((long long)n_tiles*(s + 1)/n_slabs), tile, m, n,
+                       a, x, isw, w, yc, k, g, &partial[s][0] };
+        jobs[s] = j;
+      }
+      {
+        // the tiles are small: BLAS threading underneath would only get in
+        // the way of the slabs
+        blas_threads_scope blas_threads(1);
+        if (n_slabs == 1) {
+          jobs[0]();
+        }
+        else {
+          boost::thread_group pool;
+          for (int s = 1; s < n_slabs; s++) {
+            pool.create_thread(boost::ref(jobs[s]));
+          }
+          jobs[0]();
+          pool.join_all();
+        }
+      }
+      for (int j = 0; j <= n; j++) {
+        FloatType v = 0;
+        for (int s = 0; s < n_slabs; s++) v += partial[s][j];
+        out[j] = v;
+      }
+    }
+
   private:
     /* Overloaded rather than branched on is_mixed_precision(), because the
        BLAS calls only typecheck when the store and the vectors agree.
@@ -1274,6 +1585,41 @@ namespace smtbx { namespace refinement { namespace least_squares {
                                  FloatType const *x, FloatType *y) {
       scitbx::matrix::matrix_transposed_vector_mixed(m, n, a, x, y);
     }
+    /** @name The tiles of fused_normal_times: y = A x and y += A^T x on a
+        few rows, from inside its threads. BLAS for a store of FloatType; for a
+        narrower store, plain loops accumulating in FloatType -- the OpenMP in
+        the matrix_*_mixed kernels must not open a team per tile per thread.
+     */
+    //@{
+    static void tile_times_(int m, int n, FloatType const *a,
+                            FloatType const *x, FloatType *y) {
+      scitbx::matrix::matrix_vector(m, n, a, x, y);
+    }
+    template <typename S>
+    static void tile_times_(int m, int n, S const *a,
+                            FloatType const *x, FloatType *y) {
+      for (int i = 0; i < m; i++) {
+        S const *row = a + std::size_t(i)*n;
+        FloatType s = 0;
+        for (int j = 0; j < n; j++) s += static_cast<FloatType>(row[j])*x[j];
+        y[i] = s;
+      }
+    }
+    static void tile_transpose_times_add_(int m, int n, FloatType const *a,
+                                          FloatType const *x, FloatType *y) {
+      scitbx::matrix::matrix_transposed_vector(m, n, a, x, y,
+                                               FloatType(1), FloatType(1));
+    }
+    template <typename S>
+    static void tile_transpose_times_add_(int m, int n, S const *a,
+                                          FloatType const *x, FloatType *y) {
+      for (int i = 0; i < m; i++) {
+        S const *row = a + std::size_t(i)*n;
+        FloatType const xi = x[i];
+        for (int j = 0; j < n; j++) y[j] += static_cast<FloatType>(row[j])*xi;
+      }
+    }
+    //@}
   };
 
 }}}

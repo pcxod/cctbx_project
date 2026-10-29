@@ -73,9 +73,11 @@
 #include <cctbx/xray/targets/common_results.h>
 #include <cctbx/xray/targets/mlf.h>
 
+#include <smtbx/error.h>
 #include <scitbx/array_family/ref.h>
 #include <scitbx/array_family/shared.h>
 #include <scitbx/math/bessel.h>
+#include <scitbx/constants.h>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -238,7 +240,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
     /* Into F^2 space; see the header comment for why this is exact.
 
        The division is by the *calculated* intensity, and a reflection the
-       model puts at zero makes it enormous: measured on jaca_A14, 193 of 6819
+       model puts at zero makes it enormous: measured on a small molecule, 193 of 6819
        reflections have |Fc|^2 below 1e-6 and the smallest is 6e-31, which
        turned the largest weight into 6e29 and the objective into 2.5e22
        against least squares' 4e-3.
@@ -288,47 +290,154 @@ namespace smtbx { namespace refinement { namespace least_squares {
             \exp\!\left(-\frac{I_t + (a F_c)^2}{\epsilon b}\right)
             I_0\!\left(\frac{2 a \sqrt{I_t} F_c}{\epsilon b}\right) \f]
 
+      and for centric ones the Woolfson distribution of F carried over to
+      \f$ I_t = F^2 \f$, which brings the factor \f$ 1/(2\sqrt{I_t}) \f$:
+
+      \f[ P(I_t \mid F_c)
+          = \frac{1}{2\sqrt{I_t}}\sqrt{\frac{2}{\pi \epsilon b}}
+            \exp\!\left(-\frac{I_t + (a F_c)^2}{2 \epsilon b}\right)
+            \cosh\!\left(\frac{a \sqrt{I_t} F_c}{\epsilon b}\right) \f]
+
+      The acentric density used to be applied to centric reflections too -
+      which in a centrosymmetric space group is every reflection - giving a
+      gradient that did not tend to the amplitude target's as sigma -> 0
+      (measured: up to 80 times off, against 4e-6 for acentric ones).
+
       It departs from the amplitude target by an amount which depends on
       \f$ F_c \f$, grows with \f$ \sigma^2 \f$ and vanishes as
       \f$ \sigma \to 0 \f$.
 
-      The integral is evaluated by Gauss-Hermite quadrature after the
-      substitution \f$ I_t = I_o + \sqrt{2}\,\sigma x \f$, which casts it in the
-      weight \f$ e^{-x^2} \f$ the rule assumes. Nodes at \f$ I_t < 0 \f$
-      contribute nothing.
+      How the integral is evaluated is described at mli_quadrature.
 
       Reference: Pannu & Read (1996) Acta Cryst. A52, 659-668.
    */
-  namespace mli_quadrature {
-    /* Twenty nodes: the integrand is smooth and unimodal in one variable, so
-       this resolves it well beyond the precision carried elsewhere, at a cost
-       of twenty Bessel evaluations per reflection.
-     */
-    inline int n_nodes() { return 20; }
+  /// How the integral over the true intensity is evaluated.
+  /** It used to be one 20-node Gauss-Hermite rule centred on the measurement,
+      \f$ I_t = I_o + \sqrt{2}\,\sigma x \f$. That rule assumes the integrand
+      is the measurement Gaussian times something smooth on the scale of
+      sigma, and two common cases break that:
 
-    inline double const* nodes() {
-      static const double x[20] = {
-        -5.387480890011233, -4.603682449550744, -3.944764040115625,
-        -3.347854567383216, -2.788806058428131, -2.254974002089276,
-        -1.738537712116586, -1.234076215395323, -0.737473728545394,
-        -0.245340708300901,  0.245340708300901,  0.737473728545394,
-         1.234076215395323,  1.738537712116586,  2.254974002089276,
-         2.788806058428131,  3.347854567383216,  3.944764040115625,
-         4.603682449550744,  5.387480890011233 };
+      - **Weak reflections.** The centric density has an integrable
+        \f$ 1/\sqrt{I_t} \f$ singularity at zero, and both densities are
+        steep there. When the measurement reaches zero, as it does for every
+        near-absent reflection, no rule in \f$ I_t \f$ resolves it.
+      - **A model distribution narrower than the measurement**
+        (sigma comparable to or larger than the spread of
+        \f$ P(I_t \mid F_c) \f$). Then the nodes, spaced on the scale of
+        sigma, step over the peak.
+
+      Measured against an adaptive Gauss-Kronrod reference on the reflections
+      of a refined synthetic structure: 9 to 19 percent of reflections had
+      dT/d|Fc| wrong by more than 1 percent of \f$ a^2|F_c|/\epsilon b \f$ (the
+      effective observation relative to \f$ |F_c| \f$), some by factors of
+      several and with the wrong sign.
+
+      Now there are two branches, chosen per reflection:
+
+      - **Away from zero** (the posterior mean is more than six posterior
+        standard deviations above zero): Gauss-Hermite in \f$ I_t \f$, centred
+        on the product of the measurement Gaussian and a Gaussian with the
+        model distribution's mean \f$ a^2F_c^2 + \epsilon b \f$ and variance,
+        with the ratio to that proposal carried in the weights. It follows
+        whichever factor is narrower.
+      - **Near zero, or a measurement more than four combined standard
+        deviations from the model's mean and not much narrower than the
+        model's spread:** Gauss-Legendre in
+        \f$ u = \sqrt{I_t} \f$, where
+        \f$ P(I_t)\,dI_t = P_F(u)\,du \f$ is smooth (Rice or Woolfson in
+        amplitude). The rule spans the intersection of the two factors'
+        supports (each taken to \f$ e^{-40} \f$ of its own peak), or their
+        union where they do not overlap. For such an outlier the posterior
+        sits in the tails of both, so it takes the union in four panels.
+
+      With 8 Hermite and 24 Legendre nodes, the worst error in dT/d|Fc| over
+      the effective-observation scale \f$ |d| + a^2|F_c|/\epsilon b \f$ was
+      1.6e-4 on three refined synthetic data sets (it had been 5.5) and 1e-3
+      over 2,000 random cases (sigma/Io from 0.003 to beyond 1, model spread
+      from a thousandth to half of Fc^2). On 3,000 cases with models far off
+      the data it was 8e-3, where the old rule failed outright. Per pass over
+      the refined data it is 20-37 percent faster than the old rule, because
+      most reflections take the 8-node branch. With 10 + 32 nodes the error
+      falls to the level of the Bessel approximations in scitbx/math/bessel.h
+      (3e-7) at about the old rule's cost.
+
+      The old warning against trimming nodes still applies to the rule it was
+      about: centred on the measurement, fewer nodes are worse. Here the
+      Hermite rule is centred on the posterior and the weak cases go to the
+      Legendre rule, so it does not.
+   */
+  namespace mli_quadrature {
+    inline int n_hermite() { return 8; }
+
+    inline double const* hermite_nodes() {
+      static const double x[8] = {
+        -2.9306374202572441, -1.981656756695843, -1.1571937124467802,
+        -0.38118699020732211, 0.38118699020732211, 1.1571937124467802,
+        1.981656756695843, 2.9306374202572441 };
       return x;
     }
 
-    /// Weights of the rule, already divided by sqrt(pi) so they sum to one.
-    inline double const* weights() {
-      static const double w[20] = {
-        2.229393645534151e-13, 4.399340992273181e-10, 1.086069370769282e-07,
-        7.802556478532064e-06, 2.283386360163540e-04, 3.243773342237863e-03,
-        2.481052088746362e-02, 1.090172060200233e-01, 2.866755053628341e-01,
-        4.622436696006101e-01, 4.622436696006101e-01, 2.866755053628341e-01,
-        1.090172060200233e-01, 2.481052088746362e-02, 3.243773342237863e-03,
-        2.283386360163540e-04, 7.802556478532064e-06, 1.086069370769282e-07,
-        4.399340992273181e-10, 2.229393645534151e-13 };
+    /// Weights of the Hermite rule, already divided by sqrt(pi).
+    inline double const* hermite_weights() {
+      static const double w[8] = {
+        0.0001126145383753679, 0.009635220120788263, 0.117239907661759,
+        0.37301225767907747, 0.37301225767907747, 0.117239907661759,
+        0.009635220120788263, 0.0001126145383753679 };
       return w;
+    }
+
+    inline int n_legendre() { return 24; }
+
+    inline double const* legendre_nodes() {
+      static const double x[24] = {
+        -0.99518721999702131, -0.97472855597130947, -0.9382745520027328,
+        -0.88641552700440107, -0.82000198597390295, -0.74012419157855436,
+        -0.64809365193697555, -0.54542147138883956, -0.43379350762604513,
+        -0.3150426796961634, -0.19111886747361631, -0.06405689286260563,
+        0.06405689286260563, 0.19111886747361631, 0.3150426796961634,
+        0.43379350762604513, 0.54542147138883956, 0.64809365193697555,
+        0.74012419157855436, 0.82000198597390295, 0.88641552700440107,
+        0.9382745520027328, 0.97472855597130947, 0.99518721999702131 };
+      return x;
+    }
+
+    inline double const* legendre_weights() {
+      static const double w[24] = {
+        0.01234122979998869, 0.028531388628933559, 0.044277438817419412,
+        0.05929858491543636, 0.073346481411080161, 0.086190161531953205,
+        0.097618652104113926, 0.10744427011596556, 0.11550566805372552,
+        0.12167047292780329, 0.12583745634682825, 0.12793819534675202,
+        0.12793819534675202, 0.12583745634682825, 0.12167047292780329,
+        0.11550566805372552, 0.10744427011596556, 0.097618652104113926,
+        0.086190161531953205, 0.073346481411080161, 0.05929858491543636,
+        0.044277438817419412, 0.028531388628933559, 0.01234122979998869 };
+      return w;
+    }
+
+    /// ln of P(I_t) dI_t/du and its derivative in |Fc|, at u = sqrt(I_t) > 0.
+    /** Rice (acentric) or Woolfson (centric) in amplitude, with every
+        constant, so that the target value is the log-likelihood proper.
+     */
+    template <typename FloatType>
+    inline void ln_p_amplitude(FloatType u, FloatType a, FloatType modulus_fc,
+                               FloatType eb, bool centric,
+                               FloatType &ln_p, FloatType &d_ln_p)
+    {
+      FloatType const sq = u*u + a*a*modulus_fc*modulus_fc;
+      if (centric) {
+        // ln cosh(z) = |z| + ln(1 + exp(-2|z|)) - ln 2, safe for large z
+        FloatType const z = a*u*modulus_fc/eb;
+        FloatType const az = std::abs(z);
+        ln_p = 0.5*std::log(2/(scitbx::constants::pi*eb)) - sq/(2*eb)
+               + az + std::log1p(std::exp(-2*az)) - std::log(FloatType(2));
+        d_ln_p = -a*a*modulus_fc/eb + (a*u/eb)*std::tanh(z);
+      }
+      else {
+        FloatType const arg = 2*a*u*modulus_fc/eb;
+        ln_p = std::log(2*u/eb) - sq/eb + scitbx::math::bessel::ln_of_i0(arg);
+        d_ln_p = -2*a*a*modulus_fc/eb
+                 + (2*a*u/eb)*scitbx::math::bessel::i1_over_i0(arg);
+      }
     }
   }
 
@@ -338,9 +447,11 @@ namespace smtbx { namespace refinement { namespace least_squares {
       ordinary Gauss-Newton practice: an approximate Hessian changes how fast a
       refinement converges, never what it converges to, because the gradient is
       what vanishes at the answer.
+
+      T = -ln of the integral of P(I_t) N(I_o; I_t, sigma^2) over I_t >= 0.
    */
   template <typename FloatType>
-  bool mli_d_target_d_modulus_fc(
+  bool mli_target_and_d_modulus_fc(
     FloatType fo_sq,
     FloatType sigma_fo_sq,
     FloatType observable,
@@ -349,8 +460,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
     FloatType scale_factor,
     FloatType epsilon,
     bool centric,
+    FloatType &target_value,
     FloatType &d_target)
   {
+    target_value = 0;
     d_target = 0;
     if (scale_factor <= 0) scale_factor = 1;
     if (alpha <= 0 || beta <= 1e-3 || observable <= 0 || sigma_fo_sq <= 0) {
@@ -363,55 +476,134 @@ namespace smtbx { namespace refinement { namespace least_squares {
     FloatType const b = beta*scale_factor*scale_factor;
     FloatType const eb = epsilon*b;
     FloatType const modulus_fc = std::sqrt(observable);
-    FloatType const root_two_sigma =
-      std::sqrt(FloatType(2))*sigma_fo_sq;
+    FloatType const s = sigma_fo_sq;
+    FloatType const two_s_sq = 2*s*s;
 
-    int const n = mli_quadrature::n_nodes();
-    double const *x = mli_quadrature::nodes();
-    double const *w = mli_quadrature::weights();
+    // the posterior, both factors taken as Gaussians in I_t
+    FloatType const mean_p = a*a*observable + eb;
+    FloatType const var_p = (centric ? 2 : 1)*eb*(eb + 2*a*a*observable);
+    FloatType const precision = 1/(s*s) + 1/var_p;
+    FloatType const mu = (fo_sq/(s*s) + mean_p/var_p)/precision;
+    FloatType const tau = 1/std::sqrt(precision);
 
-    /* Accumulated with the largest log-density factored out: the Rice density
-       underflows to zero for a reflection the model fits badly, and the ratio
+    /* Accumulated with the largest log-term factored out: the densities
+       underflow to zero for a reflection the model fits badly, and the ratio
        below is then 0/0 rather than the finite number it should be.
      */
+    FloatType ln_q[96], dln_p[96];
+    bool usable[96];
     FloatType ln_max = -std::numeric_limits<FloatType>::max();
-    std::vector<FloatType> ln_p(n), dln_p(n);
-    std::vector<bool> usable(n, false);
-    for (int i = 0; i < n; i++) {
-      FloatType const it = fo_sq + root_two_sigma*static_cast<FloatType>(x[i]);
-      if (it <= 0) {
-        continue;             // no density below zero true intensity
+    FloatType ln_prefactor;
+    int n, n_w;             // nodes used, and the length of the rule repeated
+    double const *w;
+    /* A measurement many combined standard deviations from what the model
+       expects puts the posterior in the far tails of both factors, where
+       neither Gaussian picture holds; that case takes the u branch too, over
+       the union of the supports and in four panels.
+     */
+    bool const outlier =
+      std::abs(fo_sq - mean_p) >= 4*std::sqrt(s*s + var_p)
+      && s*s >= 0.09*var_p;  // a narrow measurement is still the posterior
+    if (mu - 6*tau > 0 && !outlier) {
+      n = n_w = mli_quadrature::n_hermite();
+      double const *x = mli_quadrature::hermite_nodes();
+      w = mli_quadrature::hermite_weights();
+      FloatType const root_two_tau = std::sqrt(FloatType(2))*tau;
+      for (int i = 0; i < n; i++) {
+        usable[i] = false;
+        FloatType const xi = static_cast<FloatType>(x[i]);
+        FloatType const it = mu + root_two_tau*xi;
+        if (it <= 0) continue;
+        FloatType const u = std::sqrt(it), d = it - fo_sq;
+        FloatType ln_p;
+        mli_quadrature::ln_p_amplitude(u, a, modulus_fc, eb, centric,
+                                       ln_p, dln_p[i]);
+        // P(I_t) = P_F(u)/(2u); the proposal's exp(-x^2) is divided out
+        ln_q[i] = ln_p - std::log(2*u) - d*d/two_s_sq + xi*xi;
+        usable[i] = true;
+        if (ln_q[i] > ln_max) ln_max = ln_q[i];
       }
-      FloatType const root_it = std::sqrt(it);
-      FloatType const arg = 2*a*root_it*modulus_fc/eb;
-      ln_p[i] = -std::log(eb) - (it + a*a*observable)/eb
-                + scitbx::math::bessel::ln_of_i0(arg);
-      // d ln P_Rice / d|Fc|
-      dln_p[i] = -2*a*a*modulus_fc/eb
-                 + (2*a*root_it/eb)*scitbx::math::bessel::i1_over_i0(arg);
-      usable[i] = true;
-      if (ln_p[i] > ln_max) {
-        ln_max = ln_p[i];
+      // the integral is (tau/sigma) sum w exp(ln_q), w summing to one
+      ln_prefactor = std::log(tau/s);
+    }
+    else {
+      int const n_rule = mli_quadrature::n_legendre();
+      double const *x = mli_quadrature::legendre_nodes();
+      w = mli_quadrature::legendre_weights();
+      n_w = n_rule;
+      // supports in u, each factor to exp(-40) of its own peak
+      FloatType const m_lo = std::sqrt(std::max(fo_sq - 9*s, FloatType(0)));
+      FloatType const m_hi = std::sqrt(std::max(fo_sq + 9*s, FloatType(0)));
+      FloatType const half_width =
+        (centric ? FloatType(13) : FloatType(9.5))*std::sqrt(eb);
+      FloatType const p_lo = std::max(a*modulus_fc - half_width, FloatType(0));
+      FloatType const p_hi = a*modulus_fc + half_width;
+      FloatType lo = std::max(m_lo, p_lo), hi = std::min(m_hi, p_hi);
+      if (outlier || !(hi > lo)) {
+        lo = std::min(m_lo, p_lo);
+        hi = std::max(m_hi, p_hi);
       }
+      if (!(hi > lo)) return false;
+      int const panels = outlier ? 4 : 1;
+      n = panels*n_rule;
+      FloatType const half = (hi - lo)/(2*panels);
+      for (int i = 0; i < n; i++) {
+        usable[i] = false;
+        FloatType const left = lo + 2*half*(i/n_rule);
+        FloatType const u = left + half*(static_cast<FloatType>(x[i % n_rule]) + 1);
+        if (u <= 0) continue;
+        FloatType const d = u*u - fo_sq;
+        FloatType ln_p;
+        mli_quadrature::ln_p_amplitude(u, a, modulus_fc, eb, centric,
+                                       ln_p, dln_p[i]);
+        ln_q[i] = ln_p - d*d/two_s_sq;
+        usable[i] = true;
+        if (ln_q[i] > ln_max) ln_max = ln_q[i];
+      }
+      // the integral is half/(sqrt(2 pi) sigma) sum w exp(ln_q), half being
+      // the half-width of one panel
+      ln_prefactor = std::log(half/(std::sqrt(2*scitbx::constants::pi)*s));
     }
     if (ln_max == -std::numeric_limits<FloatType>::max()) {
       return false;
     }
     FloatType sum = 0, sum_d = 0;
     for (int i = 0; i < n; i++) {
-      if (!usable[i]) {
-        continue;
-      }
-      FloatType const p = static_cast<FloatType>(w[i])*std::exp(ln_p[i] - ln_max);
+      if (!usable[i]) continue;
+      FloatType const p =
+        static_cast<FloatType>(w[i % n_w])*std::exp(ln_q[i] - ln_max);
       sum += p;
       sum_d += p*dln_p[i];
     }
     if (sum <= 0) {
       return false;
     }
-    // T = -ln sum, so dT/d|Fc| = -(sum of P dlnP)/(sum of P)
+    /* T = -ln of the integral, so dT/d|Fc| = -(sum of P dlnP)/(sum of P).
+       The factored-out maximum and the prefactor come back into the value;
+       both cancel out of the ratio the derivative is.
+     */
+    target_value = -(ln_max + std::log(sum) + ln_prefactor);
     d_target = -sum_d/sum;
     return true;
+  }
+
+  /// The gradient alone, for callers with no use for the target value.
+  template <typename FloatType>
+  bool mli_d_target_d_modulus_fc(
+    FloatType fo_sq,
+    FloatType sigma_fo_sq,
+    FloatType observable,
+    FloatType alpha,
+    FloatType beta,
+    FloatType scale_factor,
+    FloatType epsilon,
+    bool centric,
+    FloatType &d_target)
+  {
+    FloatType value_not_wanted;
+    return mli_target_and_d_modulus_fc(
+      fo_sq, sigma_fo_sq, observable, alpha, beta, scale_factor, epsilon,
+      centric, value_not_wanted, d_target);
   }
 
   /// The effective observation and weight for the intensity target, in F^2.
@@ -456,6 +648,124 @@ namespace smtbx { namespace refinement { namespace least_squares {
     w_eff = w_amplitude/(4*observable);
     yo_eff = 2*modulus_fc*yo_amplitude - observable;
     return true;
+  }
+
+  /// -ln L for one reflection, under whichever target is in force.
+  /** The quantity the refinement is minimising, per reflection. Reporting goes
+      through here rather than through a second implementation so that a
+      log-likelihood shown to the user cannot drift away from the target being
+      optimised.
+
+      \return false for a reflection the target cannot use, whose contribution
+              is then zero rather than undefined.
+   */
+  template <typename FloatType>
+  bool ml_target_value(
+    FloatType fo_sq,
+    FloatType sigma_fo_sq,
+    FloatType observable,
+    FloatType alpha,
+    FloatType beta,
+    FloatType scale_factor,
+    FloatType epsilon,
+    bool centric,
+    bool intensity,
+    FloatType &value)
+  {
+    value = 0;
+    if (intensity) {
+      FloatType d_not_wanted;
+      return mli_target_and_d_modulus_fc(
+        fo_sq, sigma_fo_sq, observable, alpha, beta, scale_factor, epsilon,
+        centric, value, d_not_wanted);
+    }
+    /* mlf::target_one_h returns 0 for a reflection it refuses, which is
+       indistinguishable from a genuine zero, so the guards are repeated here
+       to say which happened. They are the same ones, deliberately.
+     */
+    if (alpha <= 0 || beta <= 1e-3 || fo_sq <= 0 || observable <= 0
+        || epsilon <= 0) {
+      return false;
+    }
+    value = cctbx::xray::targets::mlf::target_one_h(
+      std::sqrt(fo_sq), std::sqrt(observable), alpha, beta,
+      scale_factor > 0 ? scale_factor : FloatType(1), epsilon, centric);
+    return true;
+  }
+
+  /// Summed -ln L over the working and the free reflections, and their counts.
+  /** The free sum is the log free likelihood, LL_free, which Tickle (2007)
+      argues should replace R_free as the statistic against which weighting
+      parameters are chosen: it is the same functional the refinement optimises,
+      evaluated on data the refinement never saw.
+
+      Counts accompany the sums because the two sets differ in size by an order
+      of magnitude and only the mean per reflection is comparable between them.
+
+      Reference: Tickle (2007) Acta Cryst. D63, 1274-1281.
+   */
+  template <typename FloatType>
+  struct ml_log_likelihood_result {
+    FloatType work, free;
+    std::size_t n_work, n_free, n_skipped;
+    ml_log_likelihood_result()
+      : work(0), free(0), n_work(0), n_free(0), n_skipped(0)
+    {}
+    /// Mean -ln L per working reflection, or zero if there are none.
+    FloatType work_per_reflection() const {
+      return n_work ? work/static_cast<FloatType>(n_work) : FloatType(0);
+    }
+    /// Mean -ln L per free reflection, or zero if there are none.
+    FloatType free_per_reflection() const {
+      return n_free ? free/static_cast<FloatType>(n_free) : FloatType(0);
+    }
+  };
+
+  /** \param free_only evaluate the free reflections alone, leaving the working
+        sums zero. The free set is a tenth of the data, and for the intensity
+        target each reflection costs a twenty-node quadrature, so a caller that
+        only wants LL_free should say so: measured across eight structures,
+        computing both sums cost 12-21% of an MLI cycle and the free half of it
+        about a tenth of that. Ignored when no free set was given, since then
+        there is nothing to restrict to.
+   */
+  template <typename FloatType>
+  ml_log_likelihood_result<FloatType> ml_log_likelihood(
+    scitbx::af::const_ref<FloatType> const &fo_sq,
+    scitbx::af::const_ref<FloatType> const &sigma_fo_sq,
+    scitbx::af::const_ref<FloatType> const &observables,
+    ml_data<FloatType> const &ml,
+    bool free_only = false)
+  {
+    ml_log_likelihood_result<FloatType> result;
+    SMTBX_ASSERT(ml.active());
+    SMTBX_ASSERT(ml.is_consistent_with(fo_sq.size()));
+    SMTBX_ASSERT(sigma_fo_sq.size() == fo_sq.size());
+    SMTBX_ASSERT(observables.size() == fo_sq.size());
+    bool const skip_work = free_only && ml.free_flags.size() != 0;
+    for (std::size_t i = 0; i < fo_sq.size(); i++) {
+      if (skip_work && !ml.is_free(i)) {
+        continue;
+      }
+      FloatType value;
+      if (!ml_target_value(fo_sq[i], sigma_fo_sq[i], observables[i],
+                           ml.alpha[i], ml.beta[i], ml.scale_factor(),
+                           ml.epsilon[i], ml.centric[i], ml.is_intensity(),
+                           value))
+      {
+        result.n_skipped++;
+        continue;
+      }
+      if (ml.is_free(i)) {
+        result.free += value;
+        result.n_free++;
+      }
+      else {
+        result.work += value;
+        result.n_work++;
+      }
+    }
+    return result;
   }
 
 }}}

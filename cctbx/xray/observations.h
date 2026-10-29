@@ -163,14 +163,28 @@ namespace cctbx { namespace xray {
     size_t total_data_cnt;
     // HKLF 2 etc but not HKLF 5/6
     bool twinned;
+    // reciprocal metric G*; all zero = no cell given, mates are only rounded
+    scitbx::sym_mat3<double> gstar_;
 
-    miller::index<> generate(scitbx::mat3<FloatType> const& tl,
-      miller::index<> const& h) const
+    /* The twin mate of h, rounded to the nearest node; false when a
+       non-integral law puts it more than 0.01 1/A off that node in reciprocal
+       space. SHELXL does the same (read from its Fc^2 with and without TWIN on
+       COD 2242694: mates kept up to 0.0085 1/A, dropped from 0.0113): the twin
+       spot misses the node, is not in the integrated intensity, and the
+       reflection keeps only its other terms. Rounding it instead pairs h with
+       an unrelated reflection (4086474, TWIN 1 0 0 -0.47 -1 0 -0.16 0 -1).
+       ponytail: fixed 0.01 1/A, the real overlap depends on spot size; partial
+       overlaps need HKLF 5 */
+    bool generate(scitbx::mat3<FloatType> const& tl,
+      miller::index<> const& h, miller::index<>& mi) const
     {
-      return miller::index<>(
-        scitbx::math::iround(tl[0]*h[0]+tl[3]*h[1]+tl[6]*h[2]),
-        scitbx::math::iround(tl[1]*h[0]+tl[4]*h[1]+tl[7]*h[2]),
-        scitbx::math::iround(tl[2]*h[0]+tl[5]*h[1]+tl[8]*h[2]));
+      scitbx::vec3<double> d;
+      for (int j = 0; j < 3; j++) {
+        FloatType x = tl[j]*h[0]+tl[j+3]*h[1]+tl[j+6]*h[2];
+        mi[j] = scitbx::math::iround(x);
+        d[j] = x - mi[j];
+      }
+      return (gstar_ * d) * d <= 0.01*0.01;
     }
 
     void build_indices_twin_components(
@@ -236,8 +250,9 @@ namespace cctbx { namespace xray {
           scitbx::af::shared<local_twin_component>());
 
         for (int mci = 0; mci < merohedral_laws_.size(); mci++) {
-          miller::index<> mi = generate(merohedral_laws_[mci], indices_[i]);
-          if (!space_group.is_sys_absent(mi)) {
+          miller::index<> mi;
+          if (generate(merohedral_laws_[mci], indices_[i], mi) &&
+              !space_group.is_sys_absent(mi)) {
             index_components_[i].push_back(
               local_twin_component(mi, cmps[mci]));
           }
@@ -262,7 +277,8 @@ namespace cctbx { namespace xray {
         twin_fractions_(twin_fractions),
         prime_fraction_(1),
         total_data_cnt(data.size()),
-        twinned(false)
+        twinned(false),
+        gstar_(0, 0, 0, 0, 0, 0)
     {
       index_components_.reserve(indices.size());
       for (int i = 0; i < indices.size(); i++) {
@@ -289,7 +305,27 @@ namespace cctbx { namespace xray {
         sigmas_(sigmas),
         prime_fraction_(1),
         total_data_cnt(data.size()),
-        twinned(merohedral_components.size() > 0)
+        twinned(merohedral_components.size() > 0),
+        gstar_(0, 0, 0, 0, 0, 0)
+    {
+      process_merohedral_components(space_group, merohedral_components);
+    }
+
+    // hklf 4 with the cell: non-integral twin mates off a node are dropped
+    observations(sgtbx::space_group const& space_group,
+      scitbx::af::shared<miller::index<> > const& indices,
+      scitbx::af::shared<FloatType> const& data,
+      scitbx::af::shared<FloatType> const& sigmas,
+      scitbx::af::shared<twin_component<FloatType>*> const&
+        merohedral_components,
+      uctbx::unit_cell const& unit_cell)
+      : indices_(indices),
+        data_(data),
+        sigmas_(sigmas),
+        prime_fraction_(1),
+        total_data_cnt(data.size()),
+        twinned(merohedral_components.size() > 0),
+        gstar_(unit_cell.reciprocal_metrical_matrix())
     {
       process_merohedral_components(space_group, merohedral_components);
     }
@@ -303,7 +339,8 @@ namespace cctbx { namespace xray {
         twin_fractions)
       : twin_fractions_(twin_fractions),
         total_data_cnt(data.size()),
-        twinned(true)
+        twinned(true),
+        gstar_(0, 0, 0, 0, 0, 0)
     {
       build_indices_twin_components(indices, data, sigmas, scale_indices);
       update_prime_fraction();
@@ -326,7 +363,8 @@ namespace cctbx { namespace xray {
         measured_scale_indices_(obs.measured_scale_indices_),
         twin_fractions_(twin_fractions),
         total_data_cnt(obs.total_data_cnt),
-        twinned(twin_fractions.size() > 0 || merohedral_components.size() > 0)
+        twinned(twin_fractions.size() > 0 || merohedral_components.size() > 0),
+        gstar_(obs.gstar_)
     {
       CCTBX_ASSERT(twin_fractions.size()==obs.twin_fractions_.size());
       CCTBX_ASSERT(!(twin_fractions.size() != 0 && merohedral_components.size() != 0));
@@ -400,6 +438,7 @@ namespace cctbx { namespace xray {
         merohedral_components, bool complete) const
     {
       observations res = detwin(space_group, anomalous_flag, fo_sq_indices, fc_sqs, complete);
+      res.gstar_ = gstar_;
       res.process_merohedral_components(space_group, merohedral_components);
       return res;
     }
