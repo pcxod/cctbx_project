@@ -200,7 +200,9 @@ class reparametrisation(ext.reparametrisation):
           self.add_new_twin_fraction_parameter(fraction)
     if (self.fc_correction is not None and self.fc_correction.grad
         and self.thickness is not None
-        and isinstance(self.fc_correction, xray.shelx_extinction_correction)):
+        and isinstance(self.fc_correction,
+                       (xray.shelx_extinction_correction,
+                        xray.shelx_aniso_extinction_correction))):
       """EXTI must not be refined against an **N-beam (dynamical)** model.
 
       **This is not a statement about electron diffraction in general.**
@@ -248,6 +250,9 @@ class reparametrisation(ext.reparametrisation):
         p = self.add(extinction_parameter, self.fc_correction)
       elif isinstance(self.fc_correction, xray.shelx_SWAT_correction):
         p = self.add(SWAT_parameter, self.fc_correction)
+      elif isinstance(self.fc_correction,
+                      xray.shelx_aniso_extinction_correction):
+        p = self.add(aniso_extinction_parameter, self.fc_correction)
       self.independent_scalar_parameters.append(p)
     self.thickness_param = None
     if self.thickness is not None and self.thickness.grad:

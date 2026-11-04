@@ -410,6 +410,28 @@ protected:
   SWAT_correction_t* swat;
 };
 
+/// Anisotropic extinction tensor, X11 X22 X33 X12 X13 X23
+class aniso_extinction_parameter : public independent_parameter {
+  typedef cctbx::xray::shelx_aniso_extinction_correction<double>
+    extinction_correction_t;
+public:
+  aniso_extinction_parameter(extinction_correction_t *exti)
+    : parameter(0),
+    independent_parameter(exti->grad),
+    exti(exti)
+  {}
+
+  virtual af::ref<double> components() {
+    return af::ref<double>(exti->values.begin(), 6);
+  }
+  virtual size_t n_param() const {
+    return 6;
+  }
+
+protected:
+  extinction_correction_t *exti;
+};
+
 /// Coefficients of the radial falloff shared by f' and f''
 /** All of them, of every group, as one vector-valued parameter: they are
     refined together and there is nothing to be gained from telling them apart

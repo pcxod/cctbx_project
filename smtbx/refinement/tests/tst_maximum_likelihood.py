@@ -602,7 +602,17 @@ def exercise_an_fc_correction_reaches_the_likelihood():
              [0.05]),
     "SWAT": (lambda v: xray.shelx_SWAT_correction(uc, v[0], v[1]),
              [0.3, 2.0]),
+    "EXTI aniso": (
+      lambda v: xray.shelx_aniso_extinction_correction(uc, 0.71073, tuple(v)),
+      [0.05, 0.03, 0.07, 0.01, -0.005, 0.008]),
   }
+  # X = x*I is the isotropic correction
+  iso = xray.shelx_extinction_correction(uc, 0.71073, 0.05)
+  aniso = xray.shelx_aniso_extinction_correction(
+    uc, 0.71073, (0.05, 0.05, 0.05, 0, 0, 0))
+  for h in fo_sq.indices()[:50]:
+    assert abs(iso.compute(h, 300., False)
+               - aniso.compute(h, 300., False)) < 1e-12
 
   def build(target, make, values, held=None):
     xs2 = xs.deep_copy_scatterers()
