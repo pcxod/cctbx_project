@@ -859,7 +859,9 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         solver_scale = getattr(self, 'solver_scale_factor', None)
         if solver_scale is not None and self.overridden_scale_factor is None:
           self.overridden_scale_factor = solver_scale
-        self.build_up()
+        # spelled out: overrides such as AC's ED normal equations take it
+        # without a default
+        self.build_up(objective_only=False)
         if not self.normal_equations_are_complete:
           raise RuntimeError(
             "the normal equations are still incomplete after a full build; "
