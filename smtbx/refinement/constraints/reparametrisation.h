@@ -424,6 +424,7 @@ public:
   virtual af::ref<double> components() {
     return af::ref<double>(exti->values.begin(), 6);
   }
+  virtual void validate();
   virtual size_t n_param() const {
     return 6;
   }

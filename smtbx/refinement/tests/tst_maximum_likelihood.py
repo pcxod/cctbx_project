@@ -660,6 +660,15 @@ def exercise_an_fc_correction_reaches_the_likelihood():
         # agreement is 2e-5 to 4e-5, the difference's own error
         assert abs(fd) > 1e-6, (target, name, i, fd)
         assert abs(g + fd) < 1e-3*abs(fd), (target, name, i, g, fd)
+  # a shift through zero stops the diagonal of X at 0, the off-diagonal not
+  make, values = corrections["EXTI aniso"]
+  ls, first = build("mlf", make, values)
+  rep = ls.reparametrisation
+  shifts = flex.double(rep.n_independents, 0)
+  shifts[first + 1] = shifts[first + 3] = -1
+  rep.apply_shifts(shifts)
+  x = rep.fc_correction.values
+  assert x[1] == 0 and abs(x[3] - (values[3] - 1)) < 1e-12, tuple(x)
   print("\tEXTI and SWAT reach both likelihoods with the right gradient")
 
 
