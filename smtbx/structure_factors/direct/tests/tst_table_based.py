@@ -379,11 +379,84 @@ def exercise_a_partial_tscb_falls_back_on_spherical(file_name):
     list(partial.scatterers_not_in_table())
 
 
+def exercise_an_8_byte_id_block_is_named_not_misread(good_name, legacy_name):
+  """ SCATTERER_IDS records were 8 bytes, now 16, with no width field; at the
+  wrong width ids are misframed, not rejected, so the reader infers the width
+  from the file size and must name a legacy file instead of misreading it.
+  """
+  xs = smtbx.development.random_xray_structure(
+    sgtbx.space_group_info('P1'), elements=['C'] * 4 + ['O'] * 2,
+    u_iso=0.05, random_u_iso=False)
+  n = xs.scatterers().size()
+  ext = structure_factors.ext.table_based_scatterer_contribution
+
+  def build(name):
+    return ext.build(xs.unit_cell(), xs.scatterers(), name, xs.space_group(),
+                     not xs.space_group().is_origin_centric())
+
+  write_tscb(good_name, xs, list(range(n)))
+  build(good_name)
+
+  # the same table with its id block repacked as the old scatterer_id_5 uint64
+  with open(good_name, 'rb') as f:
+    blob = f.read()
+  head = struct.unpack_from('<i', blob, 0)[0]
+  start = 4 + head + 4
+  old = b''
+  for i in range(n):
+    x, y, z, part, Z, _ = struct.unpack_from('<iiihBB', blob, start + 16 * i)
+    packed = Z
+    for c, shift in zip((x, y, z), (8, 24, 40)):
+      packed |= (int(round(c / ENCODE_SCALE * 65535 / 16)) & 0xFFFF) << shift
+    old += struct.pack('<Q', packed)
+  with open(legacy_name, 'wb') as f:
+    f.write(blob[:start] + old + blob[start + 16 * n:])
+
+  try:
+    build(legacy_name)
+    raise AssertionError('an 8-byte id block was read as 16-byte records')
+  except RuntimeError as e:
+    assert '8-byte' in str(e), e
+
+  # and a table cut off inside its id block is not a table of Z=0 atoms
+  with open(legacy_name, 'wb') as f:
+    f.write(blob[:start + 16 * n - 5])
+  try:
+    build(legacy_name)
+    raise AssertionError('a truncated .tscb was accepted')
+  except RuntimeError as e:
+    assert 'cannot determine' in str(e), e
+
+
+def exercise_a_path_outside_the_ansi_code_page_opens(directory):
+  """ Python passes the path as UTF-8, which a narrow fopen on Windows reads in
+  the ANSI code page; both the text and the binary reader must open it.
+  """
+  xs = smtbx.development.random_xray_structure(
+    sgtbx.space_group_info('P1'), elements=['C'] * 4 + ['O'] * 2,
+    u_iso=0.05, random_u_iso=False)
+  n = xs.scatterers().size()
+  ext = structure_factors.ext.table_based_scatterer_contribution
+  os.mkdir(directory)
+  text_name = os.path.join(directory, u'\u8868\u683c.tsc')
+  binary_name = os.path.join(directory, u'\u8868\u683c.tscb')
+  write_table(text_name, xs)
+  write_tscb(binary_name, xs, list(range(n)))
+  for name in (text_name, binary_name):
+    contribution = ext.build(xs.unit_cell(), xs.scatterers(), name,
+                             xs.space_group(),
+                             not xs.space_group().is_origin_centric())
+    assert contribution.scatterers_not_in_table().size() == 0, name
+
+
 def run():
   flex.set_random_seed(0)
   random.seed(0)
   file_name = 'tst_table_based_tmp.tsc'
   binary_file_name = 'tst_table_based_tmp.tscb'
+  legacy_file_name = 'tst_table_based_tmp_8byte.tscb'
+  # a directory name outside every single-byte code page
+  unicode_directory = u'tst_table_based_tmp_\u6d4b\u8bd5'
   try:
     exercise_table_survives_a_refinement(file_name)
     exercise_another_structure_is_refused(file_name)
@@ -393,10 +466,17 @@ def run():
     exercise_a_partial_table_falls_back_on_spherical(file_name)
     exercise_a_partial_tscb_falls_back_on_spherical(binary_file_name)
     exercise_a_table_outlives_the_structure_it_was_built_for(binary_file_name)
+    exercise_an_8_byte_id_block_is_named_not_misread(
+      binary_file_name, legacy_file_name)
+    exercise_a_path_outside_the_ansi_code_page_opens(unicode_directory)
   finally:
-    for name in (file_name, binary_file_name):
+    for name in (file_name, binary_file_name, legacy_file_name):
       if os.path.isfile(name):
         os.remove(name)
+    if os.path.isdir(unicode_directory):
+      for name in os.listdir(unicode_directory):
+        os.remove(os.path.join(unicode_directory, name))
+      os.rmdir(unicode_directory)
   print('OK')
 
 

@@ -8,11 +8,73 @@
 #include <scitbx/array_family/accessors/c_grid_padded.h>
 #include <scitbx/array_family/accessors/flex_grid.h>
 
+#include <boost/python/init.hpp>
+
 #include <smtbx/ab_initio/density_modification.h>
+#include <smtbx/ab_initio/charge_flipping_cycle.h>
+#include <cctbx/miller/phase_transfer.h>
+#include <smtbx/error.h>
+
+#include <cmath>
+#include <complex>
 
 namespace smtbx { namespace ab_initio { namespace boost_python {
 
   namespace af = scitbx::af;
+
+  namespace {
+
+    // Release the GIL for the duration of a call that touches no Python API.
+    struct gil_release
+    {
+      gil_release() : state_(PyEval_SaveThread()) {}
+      ~gil_release() { PyEval_RestoreThread(state_); }
+    private:
+      PyThreadState* state_;
+      gil_release(gil_release const&);
+      gil_release& operator=(gil_release const&);
+    };
+
+  }
+
+  /* the Oszlanyi-Suto phase transfer of charge_flipping._array_extension in
+     one GIL-free call: the weak head takes modulus from the source and its
+     phase shifted by delta_varphi, the strong tail takes modulus from f_obs
+     and the source phase; cctbx::miller::phase_transfer applies the centric
+     restrictions
+   */
+  af::shared<std::complex<double> >
+  oszlanyi_suto_phase_transfer(
+    cctbx::sgtbx::space_group const& space_group,
+    af::const_ref<cctbx::miller::index<> > const& miller_indices,
+    af::const_ref<double> const& f_obs_data,
+    af::const_ref<std::complex<double> > const& source_data,
+    std::size_t cut,
+    double delta_varphi)
+  {
+    SMTBX_ASSERT(f_obs_data.size() == source_data.size());
+    SMTBX_ASSERT(f_obs_data.size() == miller_indices.size());
+    SMTBX_ASSERT(cut <= f_obs_data.size());
+    gil_release nogil;
+    std::size_t n = f_obs_data.size();
+    af::shared<double> moduli(n, af::init_functor_null<double>());
+    af::shared<double> phases(n, af::init_functor_null<double>());
+    for (std::size_t i = 0; i < n; i++) {
+      std::complex<double> const& g = source_data[i];
+      double phase = std::atan2(g.imag(), g.real());
+      if (i < cut) {
+        moduli[i] = std::abs(g);
+        phases[i] = phase + delta_varphi;
+      }
+      else {
+        moduli[i] = f_obs_data[i];
+        phases[i] = phase;
+      }
+    }
+    return cctbx::miller::phase_transfer(
+      space_group, miller_indices, moduli.const_ref(), phases.const_ref(),
+      false);
+  }
 
   template<class FloatType, class AccessorType>
   struct density_modification_wrapper
@@ -25,12 +87,44 @@ namespace smtbx { namespace ab_initio { namespace boost_python {
           static_cast<f_t>(flip_charges_in_place));
       def("low_density_elimination_in_place_tanaka_et_al_2001",
           static_cast<f_t>(low_density_elimination_in_place_tanaka_et_al_2001));
+      /* old: oszlanyi_suto_phase_transfer was def'd here, once per grid
+         instantiation; it does not depend on the grid, so init_module does it
+       */
     }
   };
+
+  void charge_flipping_cycle_run(charge_flipping_cycle& self, double delta) {
+    gil_release nogil;
+    self.run(delta);
+  }
 
   void init_module() {
     density_modification_wrapper<double, af::c_grid_padded<3> >::wrap();
     density_modification_wrapper<double, af::flex_grid<> >::wrap();
+    using namespace boost::python;
+    def("oszlanyi_suto_phase_transfer", oszlanyi_suto_phase_transfer,
+        (arg("space_group"), arg("miller_indices"), arg("f_obs_data"),
+         arg("source_data"), arg("cut"), arg("delta_varphi")));
+    typedef charge_flipping_cycle wt;
+    class_<wt>("charge_flipping_cycle", no_init)
+      .def(init<af::tiny<int, 3> const&,
+                af::const_ref<cctbx::miller::index<> > const&,
+                af::const_ref<double> const&,
+                af::const_ref<cctbx::miller::index<> > const&,
+                double, double, std::size_t, double>(
+           (arg("n_real"), arg("indices_obs"), arg("f_obs"),
+            arg("indices_free"), arg("fft_scale"), arg("volume_scale"),
+            arg("cut"), arg("delta_varphi"))))
+      .def("load", &wt::load)
+      .def("run", charge_flipping_cycle_run)
+      .def("sigma", &wt::sigma)
+      .def("skewness", &wt::skewness)
+      .def("f_calc", &wt::f_calc)
+      .def("f_calc_free", &wt::f_calc_free)
+      .def("g_obs", &wt::g_obs)
+      .def("f_000", &wt::f_000)
+      .def("g_000", &wt::g_000)
+      ;
   }
 
 }}} // namespace smtbx::ab_initio::boost_python

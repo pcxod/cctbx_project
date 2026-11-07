@@ -206,6 +206,21 @@ namespace boost_python {
     }
   };
 
+  struct aniso_extinction_parameter_wrapper
+  {
+    typedef aniso_extinction_parameter wt;
+
+    static void wrap() {
+      using namespace boost::python;
+      class_<wt,
+        bases<independent_parameter>,
+        boost::shared_ptr<wt> >("aniso_extinction_parameter", no_init)
+        .def(init<cctbx::xray::shelx_aniso_extinction_correction<double>*>((
+          arg("extinction"))));
+      implicitly_convertible<boost::shared_ptr<wt>, boost::shared_ptr<parameter> >();
+    }
+  };
+
   struct dispersion_radial_parameter_wrapper
   {
     typedef dispersion_radial_parameter wt;
@@ -680,6 +695,7 @@ namespace boost_python {
     extinction_parameter_wrapper::wrap();
 
     SWAT_parameter_wrapper::wrap();
+    aniso_extinction_parameter_wrapper::wrap();
     dispersion_radial_parameter_wrapper::wrap();
 
     thickness_parameter_wrapper::wrap();

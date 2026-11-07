@@ -36,16 +36,17 @@ namespace {
     static void wrap(char const *name)
     {
       using namespace boost::python;
+      typedef double(w_t::*scalar_t)(double) const;
+      typedef af::shared<double>(w_t::*array_t)(af::const_ref<double> const&) const;
       class_<w_t>(name, no_init)
-        .def("at_stol_sq", &w_t::at_stol_sq)
-        .def("at_stol", &w_t::at_stol)
-        .def("at_d_star_sq",
-          (double(w_t::*)(double) const)
-            &w_t::at_d_star_sq)
-        .def("at_d_star_sq",
-          (af::shared<double>(w_t::*)(af::const_ref<double> const&) const)
-            &w_t::at_d_star_sq)
-        .def("at_d_star", &w_t::at_d_star)
+        .def("at_stol_sq", (scalar_t) &w_t::at_stol_sq)
+        .def("at_stol_sq", (array_t) &w_t::at_stol_sq)
+        .def("at_stol", (scalar_t) &w_t::at_stol)
+        .def("at_stol", (array_t) &w_t::at_stol)
+        .def("at_d_star_sq", (scalar_t) &w_t::at_d_star_sq)
+        .def("at_d_star_sq", (array_t) &w_t::at_d_star_sq)
+        .def("at_d_star", (scalar_t) &w_t::at_d_star)
+        .def("at_d_star", (array_t) &w_t::at_d_star)
         ;
     }
   };

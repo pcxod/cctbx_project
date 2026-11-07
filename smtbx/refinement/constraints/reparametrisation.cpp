@@ -35,6 +35,16 @@ namespace smtbx { namespace refinement { namespace constraints {
     }
   }
 
+  // the diagonal X11 X22 X33 kept >= 0, as the isotropic x above; the
+  // off-diagonal terms stay free
+  void aniso_extinction_parameter::validate() {
+    for (int i = 0; i < 3; i++) {
+      if (exti->values[i] < 0) {
+        exti->values[i] = 0;
+      }
+    }
+  }
+
   // SWAT correction
   void SWAT_parameter::validate() {
     if (swat->values[0] <= 0) {

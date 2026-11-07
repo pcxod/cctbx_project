@@ -99,6 +99,35 @@ namespace {
     }
   };
 
+  template <typename FloatType>
+  struct shelx_aniso_extinction_correction_wrapper {
+    typedef shelx_aniso_extinction_correction<FloatType> wt;
+
+    static scitbx::sym_mat3<FloatType> get_values(wt const& c) {
+      return c.values;
+    }
+    static void set_values(wt& c, scitbx::sym_mat3<FloatType> const& v) {
+      c.values = v;
+    }
+
+    static void wrap() {
+      using namespace boost::python;
+      class_<wt,
+        bases<fc_correction<FloatType> > >
+          ("shelx_aniso_extinction_correction", no_init)
+        .def(init<uctbx::unit_cell const &,
+                  FloatType,
+                  scitbx::sym_mat3<FloatType> const &>
+             ((arg("unit_cell"),
+               arg("wavelength"),
+               arg("values"))))
+        .add_property("values", &get_values, &set_values)
+        .def_readwrite("wavelength", &wt::wavelength)
+        .def_readwrite("grad_index", &wt::grad_index)
+        ;
+    }
+  };
+
 } // namespace anonymous
 
   void wrap_extinction_correction() {
@@ -106,6 +135,7 @@ namespace {
     dummy_fc_correction_wrapper<double>::wrap();
     shelx_extinction_correction_wrapper<double>::wrap();
     shelx_SWAT_correction_wrapper<double>::wrap();
+    shelx_aniso_extinction_correction_wrapper<double>::wrap();
   }
 
 }}} // namespace cctbx::xray::boost_python
