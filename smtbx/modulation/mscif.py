@@ -53,7 +53,7 @@ def _harmonics(block, q):
     return {i: int(_num(c)) for i, c in zip(ids, coeff)}
   xyz = [_col(block, "_atom_site_Fourier_wave_vector_" + a, ["0"] * len(ids)) for a in "xyz"]
   if ids and any(a in block for a in ("_atom_site_Fourier_wave_vector_x", "_atom_site_Fourier_wave_vector_z")):
-    # a component JANA leaves out (2104860 has no _y column) is 0
+    # a component JANA leaves out is 0
     return {i: int(round(np.dot([_num(xyz[j][k]) or 0.0 for j in range(3)], q) / q.dot(q)))
             for k, i in enumerate(ids)}
   return {"1": 1}
@@ -128,8 +128,8 @@ def read(cif_path, fcf_path=None, xharm_basis="plain"):
     mult = [sgtbx.site_symmetry(uc, ssg.basic, (xyz0[0][k], xyz0[1][k], xyz0[2][k]), 0.1).multiplicity()
             for k in range(len(labels))]
   factor = [_num(v) / order for v in mult]
-  # JANA exports occupancies either chemical (2108430: Sb1 on a 2-fold, occupancy 1) or with the site factor
-  # mult/order folded in (2108042: every atom <= its factor, those on special positions exactly at it)
+  # JANA exports occupancies either chemical or with the site factor mult/order folded in (then every atom is
+  # <= its factor, those on special positions exactly at it)
   if (all(o <= f + 1e-3 for o, f in zip(occ, factor))
       and any(f < 1 - 1e-3 and abs(o - f) < 1e-3 for o, f in zip(occ, factor))):
     occ = [o / f for o, f in zip(occ, factor)]
@@ -153,7 +153,7 @@ def read(cif_path, fcf_path=None, xharm_basis="plain"):
   if "_atom_site_occ_Fourier_atom_site_label" in block:
     p = "_atom_site_occ_Fourier"
     # JANA: p(x4) = ai (a0 + sum), _atom_site_occupancy = ai a0, a0 listed per atom in this JANA loop; the
-    # coefficients are therefore scaled by occupancy / a0 (2108430: a0 = 1, 1560711: a0 = occupancy)
+    # coefficients are therefore scaled by occupancy / a0
     a0 = dict(zip(_col(block, "_jana_atom_site_occ_fourier_absolute_site_label", []),
                   [_num(v) for v in _col(block, "_jana_atom_site_occ_fourier_absolute", [])]))
     occ_of = dict(zip(labels, occ))
@@ -223,8 +223,8 @@ def read(cif_path, fcf_path=None, xharm_basis="plain"):
     weight = factor[k]
     p0 = occ[k]
     if lab in crenel and abs(p0 - crenel[lab][1]) > 2e-3:
-      # crenel: the listed occupancy is the average (2108432: occupancy = width) or, as here, the value
-      # inside the crenel (2108042: Al2 + Si2 share one crenel and sum to 1 there); modulated_atom wants the average
+      # crenel: the listed occupancy is the average (then equal to the width) or, as here, the value inside the
+      # crenel; modulated_atom wants the average
       p0 *= crenel[lab][1]
     w = waves[lab]
     nd = max(w["d"]) if w["d"] else 1

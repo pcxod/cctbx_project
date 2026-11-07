@@ -1,9 +1,5 @@
-"""Boundary smearing of the solvent mask.
-
-Checks the three things that decide whether it is safe to turn on: that off
-means exactly off, that the damping is the Gaussian it claims to be, and that
-it removes the high-angle solvent contribution it is meant to remove without
-touching the low-angle one that carries the physics.
+"""Boundary smearing of the solvent mask: off is exactly off, the weight stays
+in [0, 1] and changes only the boundary shell, and it reaches f_mask.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -15,21 +11,15 @@ from smtbx import masks
 
 
 def structure_and_data(d_min=1.1):
-  """A model with a genuinely empty region, and data that is not.
-
-  The obvious setup - take Fc of the model as Fo - makes f_obs - f_calc zero
-  everywhere, so the difference map is zero, f_mask is zero, and every
-  assertion about it passes on empty arrays while testing nothing. The solvent
-  has to be in the data and absent from the model, which is the situation the
-  mask exists for.
+  """A model with an empty region, and data with solvent in it. Fo from the
+  model alone would make f_mask zero and every assertion vacuous.
   """
   cs = crystal.symmetry(unit_cell=uctbx.unit_cell((22, 22, 22, 90, 90, 90)),
                         space_group_symbol="P1")
-  def sphere(centre, n, element, radius=0.10, seed=0):
+  def sphere(centre, n, element, radius=0.10):
     out = flex.xray_scatterer()
-    rnd = flex.random_generator = None
     for i in range(n):
-      # deterministic offsets: a test that moves under it is untestable
+      # deterministic offsets
       f = ((i*37 % 17)/17. - 0.5, (i*53 % 19)/19. - 0.5, (i*71 % 23)/23. - 0.5)
       site = tuple(centre[k] + 2*radius*f[k] for k in range(3))
       out.append(xray.scatterer(label="%s%d" % (element, i),
@@ -63,8 +53,7 @@ def run():
   xs, fo_sq = structure_and_data()
 
   plain = make(xs, fo_sq, 0)
-  # Without this the whole test passes on empty arrays: an all-zero f_mask
-  # makes every comparison below trivially true. It happened.
+  # an all-zero f_mask would make every comparison below trivially true
   assert plain.n_voids() > 0, "no solvent void, so there is nothing to smear"
   assert flex.max(flex.abs(plain.f_mask().data())) > 1e-6, \
       "f_mask is identically zero, so the test would assert nothing"
@@ -78,10 +67,7 @@ def run():
   again = make(xs, fo_sq, 0)
   assert plain.f_mask().data().all_eq(again.f_mask().data())
 
-  # The weight map is the thing being changed, so it is what gets checked.
-  # It must stay a step at zero smearing, stay bounded in [0, 1], and - the
-  # property that matters - leave the interior at full weight, because the
-  # density there is observed and must not be attenuated.
+  # the weight: a 0/1 step at zero smearing, in [0, 1] otherwise
   hard = plain.solvent_weight_map()
   assert approx_equal(flex.max(hard), 1)
   assert approx_equal(flex.min(hard), 0)
@@ -113,18 +99,14 @@ def run():
 
   print("\tsmearing radius %.2f A, from a %.1f A probe" % (0.5*1.2, 1.2))
 
-  # End to end it must change f_mask - otherwise the weight is not reaching
-  # the map - without moving it wildly, since only a boundary shell is touched.
+  # it must reach f_mask, but only move it as much as a boundary shell can
   assert not a.data().all_eq(b.data()), "smearing did not reach f_mask"
   rel = flex.sum(flex.abs(b.data() - a.data()))/flex.sum(flex.abs(a.data()))
   print("\tf_mask moved by R = %.4f against the hard-edged mask" % rel)
   assert rel < 0.5, "a boundary shell should not rewrite the whole f_mask"
 
-  # Deliberately not asserted here: that the high-angle content falls. The
-  # void in this test is filled with oxygen atoms, so its density has genuine
-  # high-resolution structure and smoothing the edge cannot remove that.
-  # Real disordered solvent is smooth and the edge is the only sharp thing in
-  # it, which is a question for a real structure, not for a synthetic one.
+  # high-angle content is not asserted to fall: this void holds O atoms, whose
+  # density is genuinely sharp
   hi_sel = a.d_star_sq().data() > 1/(1.5**2)
   print("\tmean |f_mask| beyond 1.5 A: %.4f -> %.4f (informational)"
         % (flex.mean(flex.abs(a.data().select(hi_sel))),

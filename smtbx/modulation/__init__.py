@@ -1,6 +1,6 @@
 """(3+1)D modulated structures: superspace symmetry, satellite structure factors and their refinement.
 
-A first, Python/numpy implementation. The superspace group is built from the basic (average-structure) space
+The superspace group is built from the basic (average-structure) space
 group and the modulation wave vector q, so the average structure from a 3D solution (FLINT, SHELXT, ...) is the
 starting model directly; ``superspace_group.from_ops`` takes the operators of an msCIF verbatim instead, and
 ``change_of_basis`` carries a model between settings. ``smtbx.modulation.mscif`` reads JANA's msCIF models.
@@ -1276,8 +1276,8 @@ class calculator(object):
                       "ux": np.zeros((nref, len(at.u_xharm), 6), complex)})
     if compiled and gradients:
       # one (N, columns) block per atom, the gradient dict entries views of it; all atoms' blocks in one flat
-      # buffer, reused from slice to slice when _normal_equations lends a workspace (a fresh ~0.3 GB per slice
-      # costs page faults that serialise the atom threads: 1.5-2.3 s per large slice instead of 1.2-1.4)
+      # buffer, reused from slice to slice when _normal_equations lends a workspace (a fresh buffer per slice
+      # costs page faults that serialise the atom threads)
       grads = []
       widths = [nref * comp[ia]["ncol"] for ia in range(len(xs.atoms))]
       flat = _take(self._workspace, "g", (sum(widths),), complex, zero=True)
@@ -1325,7 +1325,7 @@ class calculator(object):
         np.dot(sp, disp.T, out=th)
         np.add(th, np.outer(mp, x4), out=th)       # in place: th and e are the enclosing function's buffers
         np.multiply(th, TWO_PI, out=th)
-        np.cos(th, out=e.real)   # 1.5x faster than exp(1j th) on (17754, 32), the same bits
+        np.cos(th, out=e.real)   # faster than exp(1j th), the same bits
         np.sin(th, out=e.imag)
         if uw is not None:
           # a real factor on the real and imaginary parts: not a complex product (numpy would promote it)
@@ -1463,7 +1463,7 @@ class calculator(object):
           d_fsq[:, j:j + len(sel)] = fr * g.real + fi * g.imag
         elif sel:
           d_fsq[:, j:j + len(sel)] = fr * g.real[:, sel] + fi * g.imag[:, sel]
-      # in the pool as well: on the large slices this assembly was a quarter of a 4-thread gradient pass
+      # in the pool as well: on large slices the assembly is a sizeable share of the gradient pass
       if n_threads == 1:
         for ia in range(len(xs.atoms)):
           assemble(ia)
@@ -1783,7 +1783,7 @@ def _block_diag(blocks):
 
 def _times_blocks(a, blocks):
   """a Z for the block-diagonal Z, block by block: the dense (N, n) x (n, n_free) product with a Z that is mostly
-  zeros (the identity for atoms in general positions) was the largest serial cost of an LM cycle. Identity
+  zeros (the identity for atoms in general positions) is a large serial cost of an LM cycle. Identity
   blocks are copied, and when Z is the identity a itself is returned (the caller must not modify it then)."""
   ident = [b.shape[0] == b.shape[1] and _is_identity(b) for b in blocks]
   if all(ident) and a.shape[1] == sum(b.shape[0] for b in blocks):
@@ -2012,8 +2012,7 @@ RAISE_BLAS_THREADS = True    # False: _blas_threads leaves the process's BLAS th
 class _blas_threads(object):
   """with _blas_threads(n): OpenBLAS (the library numpy and scipy call) runs at least n threads inside the block
   (a higher count is left alone), its own count again after it. The libtbx dispatchers export
-  OPENBLAS_NUM_THREADS=1 (libtbx/env_config.py), so under libtbx.python every dsyrk / potrf of a refinement ran
-  single-threaded; the J^T J build and the damped solve run while the atom pool is idle and take the
+  OPENBLAS_NUM_THREADS=1 (libtbx/env_config.py), which would make every dsyrk / potrf single-threaded; the J^T J build and the damped solve run while the atom pool is idle and take the
   calculator's thread count instead. threadpoolctl when it is installed, else the OpenBLAS libraries
   _openblas_libs finds (loaded ones on Linux, Windows and macOS, and the wheels' copies) through their
   {,scipy_}openblas_{get,set}_num_threads{,64_} symbols; otherwise nothing changes."""
@@ -2228,7 +2227,7 @@ def _rows_per_slice(xs, flags, max_memory_mb):
   the atoms' complex gradient blocks (all of an atom's blocks, refined or not), 8 for every refined parameter's
   real dF^2/dp and 8 for its projection, 5 % on top for the node buffers and block temporaries. The compiled path
   keeps the gradient blocks and dF^2/dp in the pass's workspace while the projection is made, so all three are
-  alive at once (33 bytes per parameter on the large test problem)."""
+  alive at once."""
   n_p = len(get_parameters(xs, flags))
   n_c = sum(3 + (1 if at.u_star is None else 6) + 1 + 6 * at.n_harmonics + 2 * len(at.occ_sin) + 12 * len(at.u_sin)
             + (2 if at.crenel else 0) + 3 * len(at.legendre) + 3 * len(at.xharm) + 6 * len(at.u_xharm)
@@ -2248,7 +2247,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
   the fractions refined under sum f_k = 1 (the first is 1 - the others); the list is updated in place. One
   slice; with average (the fractions after its columns), not with commensurate.
   n_x4: x4 nodes per atom, or "auto" (the default: auto_n_x4, within 1e-10 of 128 nodes, raised during the
-  refinement if the amplitudes grow); 32 was the default before.
+  refinement if the amplitudes grow).
 
   The x4 origin of a wave is free unless an eps = -1 operation fixes it; the damping keeps that direction
   (a rotation of every (A_n, B_n) pair together) from running away.

@@ -465,9 +465,8 @@ namespace scitbx { namespace matrix {
 
   /** @brief One normal matrix for all the workers of a threaded build.
 
-  A worker of a threaded build used to keep an n x n matrix of its own, all of
-  them added up at the end: T workers, T + 1 matrices, which at 5200 parameters
-  and 3 workers is 820 MB against 260 MB single-threaded. Here there is one.
+  Instead of T private n x n matrices added up at the end (T + 1 in all),
+  every worker folds into one.
 
   The upper triangle is cut into tiles of whole rows, of roughly equal work.
   Each worker folds its own buffer of rows into the tiles itself, tile by tile

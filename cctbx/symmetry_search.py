@@ -51,9 +51,9 @@ class shift_refinement(object):
     self.f_obs = f_obs
     self.fc_in_p1 = fc_in_p1
     self.initial_shift = initial_shift
-    # what symmetrised_shifted_structure_factors and its misfit build without
-    # depending on the shift (the P1 f_calc map, F^2, multiplicities) is built
-    # once here, not on every L-BFGS evaluation; the same arithmetic
+    # the shift-independent inputs of symmetrised_shifted_structure_factors
+    # and its misfit (P1 f_calc map, F^2, multiplicities), built once instead
+    # of on every L-BFGS evaluation
     assert f_obs.unit_cell().is_similar_to(fc_in_p1.unit_cell())
     assert f_obs.is_xray_amplitude_array() or f_obs.is_xray_intensity_array()
     self._f_c_map = miller.f_calc_map(fc_in_p1.indices(), fc_in_p1.data(),
@@ -71,6 +71,13 @@ class shift_refinement(object):
     self.f_x = miller.array(f_obs, self.f_x)
 
   def compute_functional_and_gradients(self):
+    # old: rebuilt the shift-independent inputs on every evaluation
+    # sssf = symmetrised_shifted_structure_factors(self.f_obs,
+    #                                              self.fc_in_p1,
+    #                                              tuple(self.x),
+    #                                              compute_gradient=True)
+    # self.symmetrised_shifted_sf = sssf
+    # goos = sssf.misfit(self.f_obs)
     s = ext.symmetrised_shifted_structure_factors(
       self.f_obs.space_group(), self.f_obs.indices(), self._f_c_map,
       tuple(self.x), True)
@@ -160,8 +167,9 @@ class structure_factor_symmetry(object):
       if t.count(0) > 1: continue
       unique_denominators = list(dict(
         [ (r.denominator(), 1) for r in t if r.numerator() != 0 ]).keys())
-      # ponytail: mixed denominators (1/2,1/3,0) are a spurious peak, not a
-      # centring; skip it instead of aborting the whole search
+      # mixed denominators (1/2,1/3,0) are a spurious peak, not a centring
+      # old: aborted the whole search on one
+      # assert len(unique_denominators) in (0, 1)
       if len(unique_denominators) > 1: continue
       if len(unique_denominators) == 1:
         den = unique_denominators[0]

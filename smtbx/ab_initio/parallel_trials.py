@@ -1,37 +1,12 @@
 """ Charge-flipping trials spread over several processes.
 
-Trials are independent, so this is the one part of the pipeline that
-parallelises without any argument. What made it awkward is that Olex2 embeds
-Python: it ships `python38.dll` and, for a long time, appeared to ship no
-interpreter, so `multiprocessing` was unusable -- Windows offers only the spawn
-start method, which re-executes `sys.executable`, and inside Olex2 that is
-`olex2.exe`. Threads were no help either when this was written: nothing in
-the FFT/flip path released the GIL, and two threads measured 0.97x. That has
-since changed - the fftpack, maptbx and ab_initio wrappers now release it, and
-multi_trial.solve(n_threads=...) runs trials on threads in-process - so this
-module is the route for an interpreter that cannot use that, not the only one.
-
-The way through is `pyl.exe`, the small script launcher Olex2 ships. It runs a
-Python file and starts in about 0.7 s. It does **not** accept `-c`, so
-`multiprocessing` still cannot drive it -- spawn launches children as
-`<exe> -c "from multiprocessing.spawn import spawn_main; ..."`. So the work is
-split by hand: each worker is a separate `pyl.exe` running `_trial_worker.py`
-over its own slice of the seeds, and the parent picks the best result.
-
-**Two things this design has to get right.**
-
-The parent passes its own `sys.path` to the workers. Inside Olex2 libtbx's
-environment is already configured, and a worker rediscovering it goes looking
-for paths like `C:\\Python38\\Library\\share\\cctbx` that are not there.
-Whatever the parent imports from successfully is by definition correct.
-
-Startup is amortised per worker, never per trial. At ~0.7 s to start plus the
-cctbx import, launching one process per trial would spend more time starting
-than solving -- a trial takes well under a second. Workers therefore each run a
-contiguous block of seeds.
-
-Falls back to running in-process on any failure. A solution path that dies
-because a helper executable moved is worse than a slow one.
+For an interpreter that cannot use multi_trial.solve(n_threads=...).
+`multiprocessing` cannot be used inside Olex2: on Windows its spawn method
+re-executes `sys.executable`, which is `olex2.exe`, and the `pyl.exe` launcher
+Olex2 ships does not accept `-c`. So each worker is a `pyl.exe` running
+`_trial_worker.py` over a contiguous block of seeds (process start-up costs
+more than a trial), the parent passes its own `sys.path`, and picks the best
+result. Falls back to running in-process on any failure.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -73,10 +48,9 @@ def solve(f_obs,
           out=None):
   """ Run `n_trials` charge-flipping trials across processes; best result.
 
-  Returns the same shape as `multi_trial.solve` for the fields a caller uses --
-  `f_calc`, `shift`, `cc_peak_height`, `r1`, `f_calc_in_p1`, `best_seed` -- plus
-  `n_workers_used` and `fell_back`, so a caller can report honestly what
-  actually happened rather than assuming the fast path was taken.
+  Returns the fields of `multi_trial.solve` a caller uses -- `f_calc`, `shift`,
+  `cc_peak_height`, `r1`, `f_calc_in_p1`, `best_seed` -- plus `n_workers_used`
+  and `fell_back`.
   """
   import pickle
   import shutil
@@ -92,8 +66,7 @@ def solve(f_obs,
   if python_executable is None:
     python_executable = default_python_executable()
   if n_workers is None:
-    # Leave a core for the GUI: a solve that makes Olex2 unresponsive is not
-    # obviously better than a slower one.
+    # leave a core for the GUI
     try:
       n_workers = max(1, (os.cpu_count() or 2) - 1)
     except Exception:
@@ -123,8 +96,7 @@ def solve(f_obs,
     procs, outputs = [], []
     seed = 1
     for i in range(n_workers):
-      # Spread the remainder over the first workers rather than giving it all
-      # to the last one, which would leave every other core idle at the end.
+      # the remainder spread over the first workers
       count = n_trials//n_workers + (1 if i < n_trials % n_workers else 0)
       if count == 0:
         continue
@@ -156,11 +128,9 @@ def solve(f_obs,
         continue
       if payload.get("cc_peak_height") is None:
         continue
-      # The lowest R1, as multi_trial.solve picks within a worker: the
-      # correlation peak height does not tell a symmetric wrong solution from
-      # the right one, and choosing by it here could return a different answer
-      # from the serial run on the very same trials. The peak height breaks
-      # ties, and a worker without an R1 (an older one) ranks last.
+      # lowest R1, as multi_trial.solve ranks (the peak height does not tell a
+      # symmetric wrong solution from the right one); the peak height breaks
+      # ties, a worker without an R1 ranks last
       def key(p):
         r1 = p.get("r1")
         return (r1 is None, r1 if r1 is not None else 0,
@@ -169,9 +139,8 @@ def solve(f_obs,
         best = payload
 
     if best is None:
-      # Every worker failed or found nothing. Falling back re-does the work in
-      # process rather than reporting "no solution", because the two are very
-      # different answers and only one of them is about the structure.
+      # every worker failed or found nothing: a worker failure is not
+      # "no solution", so redo the work in process
       return _in_process(f_obs, n_trials, weak_reflection_fraction,
                          max_solving_iterations, good_enough_cc_peak_height,
                          out, reason="all workers returned nothing")
@@ -199,7 +168,6 @@ def solve(f_obs,
 def _in_process(f_obs, n_trials, weak_reflection_fraction,
                 max_solving_iterations, good_enough_cc_peak_height, out,
                 reason):
-  import sys
   import time
   from smtbx.ab_initio import charge_flipping, multi_trial
 

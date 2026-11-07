@@ -72,15 +72,8 @@ namespace scitbx { namespace matrix { namespace cholesky {
   /// How many OpenBLAS threads the inverse below runs on, given n
   /** Not the library's default of every core: on this inverse the thread
       pool costs more than it saves until n is in the thousands, and a
-      small-molecule refinement takes it every cycle, for the s.u. that limit
-      the shifts. Measured October 2026 on OpenBLAS 0.3.28 (Haswell kernels,
-      24 threads by default), Windows, i9-13900 (24 cores: 8 hyperthreaded
-      performance and 16 efficiency, 32 threads), synthetic factors: one
-      thread is fastest up to
-      n ~ 600 (n = 300: 0.57 ms, against 3.6 ms on 24), three or four around
-      n = 1000, six for n = 1200-2400 and eight above that, still 9 % quicker
-      than 24 at n = 6400. n/200 - 2 between one and eight is within 9 % of
-      the best count over n = 100-6400. Never more than the caller had set.
+      small-molecule refinement takes it every cycle. n/200 - 2, clamped to
+      [1, 8] and never above the caller's count, tracks the fastest count.
       The inverse changes in its last bits with the thread count, as with any
       change of blocking.
    */
@@ -115,6 +108,7 @@ namespace scitbx { namespace matrix { namespace cholesky {
       // since U is stored rowwise
       using namespace fast_linalg;
       unsigned n = u.accessor().n;
+      // old: no hold, ran on every thread the caller had set
       blas_threads_held held(inverse_of_u_transpose_u_threads(
         n, environment().threads()));
       af::versa<f_t, af::packed_u_accessor> result(

@@ -73,15 +73,13 @@ namespace cctbx { namespace xray {
     int grad_index;
   };
 
-  /* anisotropic form of shelx_extinction_correction, as NoSpherA2's
-  `extinction shelx aniso` (Src/core/extinction.h): x is replaced by
-  x(h) = sum_p a_p X_p, X in Voigt order X11 X22 X33 X12 X13 X23 in the
-  Cartesian frame of uctbx (the frame of NoSpherA2's rcm, so the tensor
-  transfers as is), u the unit scattering vector and
+  /* anisotropic shelx_extinction_correction, as NoSpherA2's
+  `extinction shelx aniso`: x becomes x(h) = sum_p a_p X_p, X in Voigt order
+  X11 X22 X33 X12 X13 X23 in the uctbx Cartesian frame (NoSpherA2's rcm, so
+  the tensor transfers as is), u the unit scattering vector and
   a = (0.5(1-u1^2), 0.5(1-u2^2), 0.5(1-u3^2), -u1u2, -u1u3, -u2u3).
-  X = x*I gives x(h) = x, the isotropic correction.
-  ponytail: X is not constrained to the Laue symmetry, like NoSpherA2; add
-  the point-group constraints when this leaves debug mode.
+  X = x*I gives the isotropic correction. X is not constrained to the Laue
+  symmetry, as in NoSpherA2
   */
   template <typename FloatType>
   struct shelx_aniso_extinction_correction : public fc_correction<FloatType> {

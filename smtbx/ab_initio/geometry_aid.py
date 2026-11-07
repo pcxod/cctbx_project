@@ -1,35 +1,19 @@
 """ Element proposals from local geometry, using a trained SOAP model.
 
-The classical assignment in `element_assignment.py` reads integrated density,
-which is a direct measure of how many electrons sit at a peak and knows nothing
-about chemistry. It is therefore good at "heavy or light" and poor exactly where
-chemistry is informative: C, N and O differ by one electron and overlap badly at
-ordinary resolution.
+Integrated density (`element_assignment`) separates heavy from light but not
+C, N and O. This describes each atom by the arrangement of its neighbours (a
+SOAP power spectrum within a cutoff) and asks a trained classifier which
+element has that environment. Geometry cannot tell Br from I, density cannot
+tell C from N; `combine` merges the two.
 
-This is the complementary signal. It describes each atom by the *arrangement*
-of its neighbours -- a SOAP power spectrum within a cutoff -- and asks a trained
-classifier which element has that environment. A carbonyl oxygen and a ring
-carbon have nearly the same density in a 0.7 A sphere and completely different
-surroundings.
+The model is a PCA projection and dense layers stored in an .npz and evaluated
+with numpy: no scikit-learn, no unpickling at run time.
 
-**The two must be measured separately and then together.** Neither is the
-answer on its own: geometry cannot tell bromine from iodine, density cannot
-tell carbon from nitrogen. The point of running the classical assignment first
-and this second is that the comparison is then a real one -- what does geometry
-add to what density already knew -- rather than a claim that one method wins.
-
-**No scikit-learn at run time.** The model is a mean vector, a PCA projection
-and four dense layers; `export_geometry_aid.py` writes them to an .npz and this
-evaluates them with numpy. Unpickling a scikit-learn model in Olex2 would tie
-the plugin to one library version and would execute whatever the file contains.
-
-**Preconditions, both of which have bitten.** The descriptor is meaningless
-unless the coordinates are assembled into connected molecules first, because an
-atom whose bonded neighbours live in another symmetry image has a nearly empty
-environment -- see `assemble.py`. And the descriptor must be computed with the
-same SOAP hyperparameters the model was trained on; a vector of the wrong length
-is caught here, but one of the right length computed with a different cutoff
-would not be, and would silently produce confident nonsense.
+Preconditions: the sites must be assembled into connected molecules first
+(`assemble`), or an atom whose neighbours sit in another symmetry image has an
+empty environment; and the descriptor must use the hyperparameters the model
+was trained on. A wrong length is caught, a right length from different
+hyperparameters is not.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -38,10 +22,8 @@ import os
 
 from libtbx import group_args
 
-# The hyperparameters the shipped models were trained with, from the greedy
-# search in geometry-aid (`multi_layer_classifier/c_only_training.py`). They
-# are recorded here because the feature count alone does not pin them down and
-# a mismatch is undetectable downstream.
+# the hyperparameters the shipped models were trained with; the feature count
+# alone does not pin them down and a mismatch is undetectable downstream
 SOAP_HYPERPARAMETERS = {
   "cutoff": {"radius": 3.5,
              "smoothing": {"type": "ShiftedCosine", "width": 0.7}},
@@ -78,10 +60,9 @@ class Model(object):
     if meta.get("out_activation") != "softmax":
       raise ValueError("only a softmax output is supported, got %s"
                        % meta.get("out_activation"))
-    # The PCA projection is the whole cost of the classifier, and the c_only
-    # model was trained on all-carbon environments: 746 of its 42042 columns
-    # are nonzero, so only those are multiplied. The gather costs more than it
-    # saves on a dense model (full: 49049 of 49686).
+    # the PCA projection is the classifier's whole cost; a model trained on
+    # all-carbon environments has few nonzero columns, so only those are
+    # multiplied, while on a dense model the gather costs more than it saves
     j = np.flatnonzero(np.any(self.components != 0, axis=0))
     self._cols = ((j, self.mean[j], np.ascontiguousarray(self.components[:, j].T))
                   if len(j) < self.n_features//2 else ())
@@ -125,17 +106,9 @@ class Model(object):
 def descriptor_via_nospherA2(xyz_path, exe, work_dir=None):
   """ SOAP power spectrum from NoSpherA2, which Olex2 already ships.
 
-  This is the dependency-free route: featomic is linked into the executable,
-  so nothing needs installing next to Olex2.
-
-  **Currently unusable with the shipped models**, and deliberately not hidden.
-  The build of 30 Jul 2026 hard-codes the older hyperparameters from
-  `external_script.py` (cutoff 2.5, density width 0.15, max_angular 9,
-  max_radial 4) and produces 16,500 features, while every trained model in
-  geometry-aid was fitted on the greedy-search values above, which give 42,042.
-  Passing numbers after the flag does not change it. The fix belongs in
-  NoSpherA2 -- either update the constants or expose them -- and until then the
-  length check in `Model.probabilities` is what stops a silent mismatch.
+  Unusable with the shipped models: NoSpherA2 hard-codes older SOAP
+  hyperparameters than `SOAP_HYPERPARAMETERS`, and the length check in
+  `Model.probabilities` rejects its output. The fix belongs in NoSpherA2.
   """
   import subprocess
 
@@ -157,16 +130,10 @@ Z_OF = dict(B=5, C=6, N=7, O=8, F=9, Si=14, P=15, S=16, Cl=17, Br=35, I=53)
 def density_likelihood(observed, elements, sigma):
   """ p(observed density | element) over `elements`, normalised.
 
-  The density estimate is a scalar on the carbon-calibrated scale, and
-  `element_assignment.expected_density` says where each element should sit on
-  it. A Gaussian around that expectation turns "sulfur reads 22.2" into a
-  distribution rather than a single winner, which is what makes it combinable
-  with the classifier's output.
-
-  `sigma` scales with the expectation. Absolute width would be wrong: a whole
-  electron of error means something very different at carbon than at bromine,
-  and a fixed sigma either makes C/N/O a coin toss or makes every heavy call
-  certain.
+  A Gaussian about `element_assignment.expected_density` on the carbon scale,
+  so the density call is a distribution that can be multiplied with the
+  classifier's. The width is `sigma` times the expectation: one electron of
+  error means more at carbon than at bromine.
   """
   import math
 
@@ -191,43 +158,16 @@ def combine(classical, proposals, geometry_weight=0.5, sigma=0.15,
             elements=None):
   """ One element per atom, from the density call and the geometry call.
 
-  The two are combined as **distributions, not as a preference order**. An
-  earlier version routed light elements to geometry and heavy ones to density,
-  which scored *between* the two methods rather than above either: whichever
-  source it ignored for an atom, it threw that atom's other opinion away.
+  Density gives a likelihood over the candidate elements, the classifier a
+  posterior; their product is renormalised and the argmax taken, so each
+  breaks the other's ties. Combined as distributions, not by routing light
+  atoms to one source and heavy to the other, which discards an opinion.
 
-  Here density becomes a likelihood over the candidate elements and the
-  classifier supplies a posterior; the product is renormalised and the
-  argmax taken. The two disagree in different places -- density separates
-  Br from I and cannot see C from N, geometry the reverse -- so multiplying is
-  the operation that lets each break the other's ties.
+  `geometry_weight` is the exponent on the classifier term: 0 is density
+  alone, a large value geometry alone; 0.5 is the measured optimum.
 
-  `geometry_weight` raises the classifier term to a power: 0 recovers density
-  alone, a large value recovers geometry alone, and 1 weights them equally.
-  One knob spanning both baselines makes the comparison a scan rather than
-  three unrelated numbers.
-
-  **Default 0.5, from measurement.** It was 1.0 because that is the neutral
-  value, not because anything had been measured -- the scan had never been run.
-  Over 5,473 COD structures and 131,345 scorable atoms, 0.5 is the best value
-  on every metric at once:
-
-      weight   atom    exact   <=1 wrong   <=2 wrong
-      0.00    0.6941   0.0682    0.1325      0.2143     density alone
-      0.25    0.7592   0.0753    0.1588      0.2803
-      0.50    0.7706   0.0780    0.1597      0.2794     <- here
-      1.00    0.7624   0.0703    0.1513      0.2595     <- was here
-      2.00    0.7522   0.0621    0.1370      0.2439
-      4.00    0.7445   0.0546    0.1268      0.2289
-
-  Equally weighted was over-trusting the classifier: geometry is worth +0.077
-  per atom over density alone at 0.5, and 1.0 gave back a fifth of that. The
-  gain from the change itself is +0.008 per atom and +0.008 on the fraction of
-  structures within one misassignment.
-
-  Atoms whose density call is outside the classifier's element set keep the
-  density answer -- the classifier cannot express it, so there is nothing to
-  combine.
+  An atom whose density call is outside the classifier's element set keeps
+  the density answer.
   """
   candidates = list(elements or sorted(Z_OF, key=lambda s: Z_OF[s]))
   out = []
@@ -264,8 +204,7 @@ def combine(classical, proposals, geometry_weight=0.5, sigma=0.15,
   return out
 
 
-# Chemistry priors measured on the CSD (971796 ordered 3D entries, 40.4 M heavy
-# atoms, CSD bond assignment, 19 Sep 2026). P(n heavy neighbours | element),
+# Chemistry priors measured on the CSD. P(n heavy neighbours | element),
 # index 6 holds six and more.
 NEIGHBOUR_COUNT = {
   'C': (0.000, 0.128, 0.525, 0.312, 0.034, 0.001, 0.001),
@@ -364,8 +303,8 @@ METAL_DONOR = {
   'Cm': {'O': 0.608, 'N': 0.304, 'S': 0.082, 'Cl': 0.006},
   'Bk': {'C': 0.474, 'O': 0.437, 'N': 0.089},
 }
-# metal -> donor element -> (median bond length, robust sd, count); bonded = covalent
-# radii sum + 0.45 A, 12 of 74 CSD export parts (bond_windows.py), pairs under 50 dropped
+# metal -> donor -> (CSD median bond length, robust sd, count), bonded meaning
+# within the covalent radii sum + 0.45 A; pairs with under 50 entries omitted
 BOND_WINDOW = {
   'Ag': {'N': (2.243, 0.141, 16780), 'As': (2.67, 0.101, 207), 'O': (2.388, 0.131, 10713), 'P': (2.431, 0.061, 2915), 'C': (2.269, 0.245, 8036), 'Cl': (2.64, 0.145, 824), 'Br': (2.735, 0.11, 1501), 'S': (2.536, 0.091, 8386), 'Se': (2.628, 0.05, 978), 'I': (2.864, 0.08, 3378)},
   'Al': {'N': (1.926, 0.088, 5009), 'C': (1.994, 0.053, 6728), 'O': (1.827, 0.118, 12682), 'I': (2.549, 0.05, 100), 'S': (2.245, 0.093, 166), 'Cl': (2.139, 0.05, 1221), 'P': (2.45, 0.075, 382), 'Br': (2.312, 0.052, 209), 'F': (1.772, 0.061, 528), 'Si': (2.488, 0.05, 164)},
@@ -454,7 +393,10 @@ def specialist_label(element):
     return "C" if tiny_pse.table(element).atomic_number() <= 10 else "Zn"
   except Exception:
     return "C"
-BASE_RATE = {'C': 0.699, 'N': 0.077, 'O': 0.121, 'F': 0.020, 'Cl': 0.014, 'Br': 0.004, 'I': 0.003, 'S': 0.012, 'P': 0.008, 'B': 0.005, 'Si': 0.003}
+
+
+# P(element) over non-H atoms, to turn the posterior tables into likelihoods
+BASE_RATE ={'C': 0.699, 'N': 0.077, 'O': 0.121, 'F': 0.020, 'Cl': 0.014, 'Br': 0.004, 'I': 0.003, 'S': 0.012, 'P': 0.008, 'B': 0.005, 'Si': 0.003}
 
 
 def heavy_neighbours(xs, slack=0.45):
@@ -500,18 +442,17 @@ def neighbour_prior(element, neighbours, floor=0.02):
   neighbours = [x if isinstance(x, tuple) else (None, x) for x in neighbours]
   n, syms = len(neighbours), [e for d, e in neighbours]
   base = BASE_RATE.get(element, 0.01)
-  # every table enters as its square root: the full ratios won 22 mistypes
-  # on 100 hard cases and lost 10 on a 1000-id holdout
+  # every table enters as its square root: the full ratios over-ride the
+  # density on held-out structures
   p = max(NEIGHBOUR_COUNT.get(element, (0.05,)*7)[min(n, 6)], floor)**0.5
   if n == 1 and syms[0] in TERMINAL_ON:
     p *= (max(TERMINAL_ON[syms[0]].get(element, 0.0), floor)/base)**0.5
   for e in set(syms):
     if e in METAL_DONOR:
       p *= (max(METAL_DONOR[e].get(element, 0.0), floor)/base)**0.5
-  # ponytail: a metal-donor bond has a length per element pair (Cu-O 1.98,
-  # Cu-Cl 2.30, Cu-I 2.66 on the CSD); a Gaussian on the CSD median, its
-  # spread widened by the 0.08 A a raw solution is off, floored and damped
-  # like the tables; a pair the CSD has under 50 of carries no opinion
+  # ponytail: a Gaussian on the CSD metal-donor bond length, its spread
+  # widened by 0.08 A for raw-solution error, floored and damped like the
+  # tables; a pair missing from BOND_WINDOW carries no opinion
   for d, e in neighbours:
     w = BOND_WINDOW.get(e, {}).get(element) if d is not None else None
     if w:

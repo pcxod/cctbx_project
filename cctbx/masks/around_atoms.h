@@ -300,20 +300,66 @@ namespace cctbx { namespace masks {
         }
       }
 
-      /* The shrink pass: a point of the probe shell (-1) becomes solvent if a
-         solvent point (1) lies closer than shrink_truncation_radius.
+      /* old: replaced by the z-run search in compute_contact_surface, same
+         result; testing every offset of the ball per shell point dominated
+         the run time (needs #include <map>)
+      struct shrink_neighbors;
+      friend struct shrink_neighbors;
 
-         Checking every shell point against every grid offset in that ball
-         cost all but a few percent of the whole calculation: about 4000
-         offsets at a quarter of 0.5 A, and in a protein most shell points
-         have nothing in reach and ran the full list only to miss. Same
-         answer, less work: the ball is cut into runs along z (the distance
-         is a convex quadratic, so each (dx, dy) column of it is one run,
-         stored as maximal runs all the same), and a run is answered at once
-         from per-line prefix counts of the solvent points; runs go nearest
-         first, so a hit stops early. A periodic box dilation of the solvent
-         points first settles every point with no solvent inside the ball's
-         bounding box.
+      struct shrink_neighbors
+      {
+        shrink_neighbors() {}
+
+        shrink_neighbors(
+          cctbx::uctbx::unit_cell const& unit_cell,
+          af::c_grid<3>::index_type const& gridding_n_real,
+          f_t const& shrink_truncation_radius)
+        {
+          int low[3];
+          int high[3];
+          for(unsigned i=0;i<3;i++) {
+            double x = shrink_truncation_radius
+                     * unit_cell.reciprocal_parameters()[i]
+                     * gridding_n_real[i];
+            low[i] = ifloor(-x);
+            high[i] = iceil(x);
+          }
+          int n0 = static_cast<int>(gridding_n_real[0]);
+          int n1 = static_cast<int>(gridding_n_real[1]);
+          int n2 = static_cast<int>(gridding_n_real[2]);
+          f_t shrink_truncation_radius_sq = shrink_truncation_radius
+                                          * shrink_truncation_radius;
+          cctbx::fractional<f_t> frac;
+          for(int p0=low[0];p0<=high[0];p0++) {
+            int m0 = scitbx::math::mod_positive(p0, n0);
+            frac[0] = static_cast<f_t>(p0) / n0;
+          for(int p1=low[1];p1<=high[1];p1++) {
+            int m1 = scitbx::math::mod_positive(p1, n1);
+            frac[1] = static_cast<f_t>(p1) / n1;
+          for(int p2=low[2];p2<=high[2];p2++) {
+            frac[2] = static_cast<f_t>(p2) / n2;
+            f_t dist_sq = unit_cell.length_sq(frac);
+            if (dist_sq < shrink_truncation_radius_sq) {
+              int m2 = scitbx::math::mod_positive(p2, n2);
+              table[m0][m1].push_back(m2);
+            }
+          }}}
+        }
+
+        typedef std::vector<int> dim2;
+        typedef std::map<int, dim2> dim1;
+        typedef std::map<int, dim1> dim0;
+        dim0 table;
+      };
+      */
+
+      /* shrink pass: a probe-shell point (-1) becomes solvent if a solvent
+         point (1) lies closer than shrink_truncation_radius. The ball is cut
+         into z-runs (the distance is a convex quadratic, so each (dx, dy)
+         column is one run) answered from per-line prefix counts of solvent
+         points, nearest run first so a hit stops early; a periodic box
+         dilation first settles every point with no solvent in the ball's
+         bounding box
        */
       void
       compute_contact_surface(
@@ -409,6 +455,61 @@ namespace cctbx { namespace masks {
           P[0] = 0;
           for (int k = 0; k < nz; k++) P[k + 1] = P[k] + (d[k] == 1);
         }
+        /* old: per-point walk over the full shrink_neighbors offset table,
+           replaced by the z-run search below (same result)
+        af::const_ref<DataType, af::c_grid<3> >
+          datacopy_ref = datacopy.const_ref();
+        shrink_neighbors neighbors(
+          unit_cell,
+          data_ref.accessor(),
+          shrink_truncation_radius);
+        const DataType* datacopy_ptr = datacopy.begin();
+        for(std::size_t ilxyz=0;ilxyz<data_size;ilxyz++,datacopy_ptr++) {
+          if (*datacopy_ptr == -1) {
+            int ly = static_cast<int>(ilxyz / nz);
+            int lz = static_cast<int>(ilxyz - ly * nz);
+            int lx = ly / ny;
+            ly -= lx * ny;
+            typename shrink_neighbors::dim0::const_iterator
+              tab_i_end = neighbors.table.end();
+            for(typename shrink_neighbors::dim0::const_iterator
+              tab_i = neighbors.table.begin();
+              tab_i != tab_i_end;
+              tab_i++) {
+              int mx = lx + tab_i->first;
+              while (mx >= nx) mx -= nx;
+              int mxny = mx * ny;
+              typename shrink_neighbors::dim1::const_iterator
+                tab_j_end = tab_i->second.end();
+              for(typename shrink_neighbors::dim1::const_iterator
+                tab_j = tab_i->second.begin();
+                tab_j != tab_j_end;
+                tab_j++) {
+                int my = ly + tab_j->first;
+                while (my >= ny) my -= ny;
+                const DataType*
+                  datacopy_mxnymynz = &datacopy_ref[(mxny + my) * nz];
+              typename shrink_neighbors::dim2::const_iterator
+                tab_k_end = tab_j->second.end();
+              for(typename shrink_neighbors::dim2::const_iterator
+                tab_k = tab_j->second.begin();
+                tab_k != tab_k_end;
+                tab_k++) {
+                  int mz = (*tab_k) + lz;
+                  while (mz >= nz) mz -= nz;
+                  if (datacopy_mxnymynz[mz] == 1) {
+                    data_ref[ilxyz] = 1;
+                    n_solvent++;
+                    goto end_of_neighbors_loop;
+                  }
+                }
+              }
+            }
+            data_ref[ilxyz] = 0;
+            end_of_neighbors_loop:;
+          }
+        }
+        */
         std::size_t n_ball = ball.size();
         for (std::size_t ilxyz = 0; ilxyz < data_size; ilxyz++) {
           if (dc[ilxyz] != -1) continue;

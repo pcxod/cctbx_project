@@ -785,7 +785,7 @@ def test_normal_equations_and_pool_equivalence():
   """J^T J and J^T r summed over slices of the reflections against the dense product (one slice), and a refine
   cycle with a budget that forces slices against one that does not: shifts to 1e-10, F to 1e-12. The pool by
   slices of the reflections against the pool by atoms: F and gradients to 1e-14 (bit for bit only with one BLAS
-  thread; OpenBLAS threading / kernel choice reorders the sums, seen on an i9-13950HX)."""
+  thread; OpenBLAS threading / kernel choice reorders the sums)."""
   from cctbx import adptbx
   xs = model(n_harmonics=2, amp=0.02)
   for at in xs.atoms:
@@ -1198,8 +1198,8 @@ def test_extinction():
 def test_xharm_against_jana():
   """COD 2108551 and 2108550 (crenels with JANA x-harmonics, Legendre terms, ADP x-harmonics) against JANA's
   F^2calc of their refln loops, the x-harmonics read as plain and as orthonormalised, when the samples are on this
-  machine (E:\\olex2-samples\\cod_<id>\\<id>.cif and .hkl, as COD distributes them). Only m = 0 is asserted
-  (0.6 % and 1.1 % with the plain basis); the satellite figures are reported."""
+  machine (E:\\olex2-samples\\cod_<id>\\<id>.cif and .hkl, as COD distributes them). Only m = 0 is asserted;
+  the satellite figures are reported."""
   from smtbx.modulation import mscif
   found = False
   for cid in ("2108551", "2108550"):

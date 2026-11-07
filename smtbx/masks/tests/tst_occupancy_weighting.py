@@ -2,22 +2,11 @@ from __future__ import absolute_import, division, print_function
 
 """ The solvent a partially occupied atom wrongly excludes.
 
-cctbx::masks::around_atoms takes sites and radii and no occupancies, so an atom
-at quarter occupancy blocks bulk solvent from all of the volume it touches
-instead of a quarter of it. Afonine et al. (2024) name this as one of the three
-failings of the flat model and note the error does not stay in the solvent - it
-shows up as residual density over each conformer, or is absorbed into wrongly
-refined occupancies and ADPs.
-
-What is checked here is the arithmetic of the correction, on structures small
-enough that the answer is known in advance:
-
-  * a fully occupied structure must be untouched, exactly;
-  * an atom at occupancy q must give back weight 1-q where it alone sits, and
-    nothing where a full atom sits;
-  * two overlapping half-occupied conformers must leave 1/4, not 1/2, because
-    the groups multiply;
-  * the weight must never leave [0, 1].
+cctbx::masks::around_atoms takes no occupancies, so an atom at occupancy q
+blocks solvent from all of the volume it touches (Afonine et al. 2024). The
+correction gives back 1-q where only that atom sits and nothing under a full
+atom, distinct overlapping groups multiply, a fully occupied structure is
+untouched exactly, and the weight stays in [0, 1].
 """
 
 from cctbx import xray
@@ -83,23 +72,21 @@ def exercise_a_partial_atom_gives_back_one_minus_q():
 
 
 def exercise_two_conformers_multiply():
-  """ Overlapping halves leave a quarter, not a half. """
+  """ Overlapping groups never give back more than 1-min(q). """
   xs = structure_with([0.5, 0.5],
                       sites=[(0.5, 0.5, 0.5), (0.53, 0.5, 0.5)])
   m = mask_for(xs)
   m.occupancy_weighting = True
   correction = m.occupancy_weight_map()
-  # the two groups have the same occupancy, so they are one group and the
-  # overlap leaves 1-q; distinct values are what multiply. Check the invariant
-  # that matters either way: never more than 1-min(q).
+  # equal occupancies are one group, so the overlap leaves 1-q; distinct
+  # values multiply
   assert flex.max(correction) <= 0.5 + 1e-9, flex.max(correction)
   xs2 = structure_with([0.5, 0.25],
                        sites=[(0.5, 0.5, 0.5), (0.53, 0.5, 0.5)])
   m2 = mask_for(xs2)
   m2.occupancy_weighting = True
   c2 = m2.occupancy_weight_map()
-  # where both reach, (1-0.5)(1-0.25) = 0.375; where only the 0.25 one does,
-  # 0.75. So the largest value present must be 0.75 and never above it.
+  # (1-0.5)(1-0.25) = 0.375 where both reach, 0.75 where only the 0.25 does
   assert flex.max(c2) <= 0.75 + 1e-9, flex.max(c2)
   print("\toverlapping groups multiply and never give back more than they took")
 
@@ -149,18 +136,11 @@ def exercise_the_weight_stays_in_range():
 
 
 def exercise_the_flag_actually_reaches_the_weight_map():
-  """ With partial atoms present, turning it on shall change the weight map.
-
-  This is the test that was missing. The correction was first added only after
-  the boundary-smearing branch of solvent_weight_map, which returns early at
-  the default of no smearing - so the flag did nothing at all, and four
-  refinements came back bit-identical with it on and off. Every other check
-  here passed throughout, because none of them asked whether the flag was
-  connected to anything.
-  """
+  """ With partial atoms present, turning it on changes the weight map, on
+  the unsmeared path (which returns early) as well as the smeared one. """
   xs = structure_with([1.0, 0.25], sites=[(0.2, 0.5, 0.5), (0.7, 0.5, 0.5)])
   m = mask_for(xs)
-  m.boundary_smearing = 0            # the default, and the path that was dead
+  m.boundary_smearing = 0            # the default, the early-return path
   m.occupancy_weighting = False
   without = m.solvent_weight_map()
   m.occupancy_weighting = True

@@ -1,8 +1,7 @@
-// The per-class x4 sums of smtbx.modulation.calculator for one atom: F and the complex gradient columns, the
-// numpy path of calculator._compute_rows (atom_sum, x4_sums) fused into one loop over reflections, operation
-// classes and x4 nodes. The arrays come in through the buffer protocol (C-contiguous numpy arrays, checked on the
-// Python side) and the GIL is released for the whole loop, so the calculator's atom pool runs atoms in parallel.
-// The extension itself does not thread: one level of parallelism, the pool's.
+// The per-class x4 sums of smtbx.modulation.calculator for one atom (F and the complex gradient columns): the
+// numpy path of calculator._compute_rows fused into one loop over reflections, operation classes and x4 nodes.
+// C-contiguous numpy arrays come in through the buffer protocol; the GIL is released for the whole loop so the
+// calculator's atom pool is the only level of parallelism.
 
 #include <boost/python/module.hpp>
 #include <boost/python/def.hpp>
@@ -101,14 +100,13 @@ namespace smtbx { namespace modulation { namespace {
   // sum_k e_k w_k over the nodes for every column, e = c + i s, w (K, M) with M a multiple of 8 (zero-padded
   // columns, _compiled_atom): eight columns at a time over all nodes, elementwise in the eight lanes - no
   // reduction across lanes, so compilers vectorise it without an "omp simd reduction" clause (which MSVC ignores,
-  // C4849) and without reassociating sums. Measured 10x faster than column-by-column dot products.
+  // C4849) and without reassociating sums
   X4_CLONES
   void node_sums(const double *c, const double *s, const double *w, std::size_t K, std::size_t M, cd *r)
   {
     const std::size_t K4 = K & ~std::size_t(3);
     for (std::size_t jb = 0; jb < M; jb += 8) {
-      // four node chains, so that the multiply-adds of consecutive nodes do not wait on each other: 5x faster
-      // than one chain
+      // four node chains, so that the multiply-adds of consecutive nodes do not wait on each other
       double a0[8] = {0}, a1[8] = {0}, a2[8] = {0}, a3[8] = {0}, b0[8] = {0}, b1[8] = {0}, b2[8] = {0}, b3[8] = {0};
       for (std::size_t k = 0; k < K4; k += 4) {
         const double *w0 = w + k * M + jb, *w1 = w0 + M, *w2 = w1 + M, *w3 = w2 + M;

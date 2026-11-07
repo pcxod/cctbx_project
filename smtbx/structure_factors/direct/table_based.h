@@ -20,18 +20,11 @@
 namespace smtbx { namespace structure_factors { namespace table_based {
 
 #if defined(_WIN32)
-  /** The path as the wide Win32 file APIs want it, or false if it is not UTF-8.
-
-      Boost.Python hands a Python str over as UTF-8, and the narrow fopen and
-      ifstream read that in the process's ANSI code page. A path with anything
-      outside that page -- a folder named in Chinese on a Western Windows --
-      cannot be opened by them at all, whatever bytes it is spelled in. The
-      wide overloads take UTF-16, which holds every path there is.
-
-      Decoded by hand rather than through <windows.h>, which this header would
-      then push, min/max macros and all, into everything that includes it.
-      Bytes that are not UTF-8 are left to the narrow open, so a caller still
-      passing an ANSI-encoded path is served the way it always was.
+  /* UTF-8 path to UTF-16 for the wide Win32 open, false if not valid UTF-8.
+     Boost.Python passes str as UTF-8 but narrow fopen/ifstream read the ANSI
+     code page, so a path outside it cannot be opened narrow at all. Decoded by
+     hand to keep <windows.h> (and its min/max macros) out of this header;
+     non-UTF-8 bytes fall back to the narrow open
    */
   inline bool utf8_to_wide(const std::string &utf8, std::wstring &wide) {
     wide.clear();
@@ -91,16 +84,9 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     stream.open(name.c_str(), mode);
   }
 
-  /** A read-only file handle over C stdio.
-
-      std::ifstream reads a .tscb at about 1.3 GB/s on this platform where the
-      same bytes through fread go at 2.9, measured on a real 3.5 GB table with
-      both arms returning identical data. Chunking the ifstream does not help,
-      so it is the stream itself and not the per-call overhead. A protein table
-      is measured in gigabytes, so this is worth a handle of its own.
-
-      fread is portable; only the 64-bit seek needs platform code, because
-      fseek takes a long and that is 32 bits on Windows.
+  /* read-only C stdio handle: fread moves a multi-GB .tscb about twice as fast
+     as std::ifstream, chunked or not. Only the seek is platform code, since
+     fseek takes a long, which is 32 bits on Windows
    */
   class c_file {
     std::FILE *f_;
@@ -302,14 +288,40 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         }
         // data
         else {
-          /* Parsed in place. Splitting each row into strings first, then
-             cutting each "re,im" into two more, made three heap strings per
-             value; and the OpenMP loop over a row's columns opened a parallel
-             region per row, hundreds of thousands of them for a work load of
-             a few hundred numbers each. A 150-atom expanded table (245,000
-             rows) took 6.2 s to read that way, and takes 2.0 s now with the
-             same numbers to the bit.
-           */
+          /* old: replaced by the in-place parse below, which gives the same
+             numbers without three heap strings per value and without an OpenMP
+             region per row
+          boost::split(toks, line, boost::is_any_of(" "));
+          // as many columns as the table names, which need not be as many
+          // atoms as the structure has
+          SMTBX_ASSERT(toks.size() == 3 + sc_indices.size());
+          cctbx::miller::index<> mi(
+            atoi(toks[0].c_str()),
+            atoi(toks[1].c_str()),
+            atoi(toks[2].c_str()));
+          parent_t::miller_indices_.push_back(mi);
+          vector<complex_type> row;
+          // an atom the table misses keeps a zero and is served elsewhere
+          row.assign(scatterers.size(), complex_type(0));
+#pragma omp parallel for
+          for (int sci = 3; sci < toks.size(); sci++) {
+            if (sc_indices[sci - 3] == ~0) {
+              continue;
+            }
+            size_t ci = toks[sci].find(',');
+            if (ci != string::npos) {
+              complex_type v(
+                  atof(toks[sci].substr(0, ci).c_str()),
+                  atof(toks[sci].substr(ci + 1).c_str()));
+              row[sc_indices[sci - 3]] = v;
+            }
+            else {
+              row[sc_indices[sci - 3]] = complex_type(
+                boost::lexical_cast<float_type>(toks[sci]));
+            }
+          }
+          parent_t::data_.push_back(row);
+          */
           const char *p = line.c_str();
           char *end;
           int hkl[3];
@@ -325,8 +337,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           // as many columns as the table names, which need not be as many
           // atoms as the structure has
           const char *const line_end = p + std::strlen(p);
-          // std::from_chars: correctly rounded like strtod, so the same
-          // numbers, but several times faster and independent of the locale
+          // from_chars: correctly rounded like strtod, faster, locale-independent
           auto number = [&](float_type &v) {
             while (*p == ' ' || *p == '\t') p++;
             if (*p == '+') p++;
@@ -362,16 +373,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       }
     }
 
-    /* the marker SCATTERER_IDS named an 8-byte record before 29 July 2026 and a
-    16-byte one after, and the format carries no width. Read at the wrong width
-    the ids are not rejected, they are silently misframed, and the failure
-    surfaces much later as a table that matches no atom.
-
-    The id block is not length-prefixed but everything after it is: the int that
-    follows it is the reflection count and the rest of the file is that many rows
-    of three int indices plus one complex<double> per column. Only the true width
-    divides evenly, so the file states its own format even where the header does
-    not. Leaves the stream where it found it.
+    /* SCATTERER_IDS records are 8 bytes in legacy files and 16 now, and the
+    header need not say which; read at the wrong width the ids are silently
+    misframed and match no atom. The id block is followed by the reflection
+    count and that many rows of 3 ints + n_columns complex<double>, so only the
+    true width makes the file size come out exact. Leaves the stream where it
+    found it
     */
     static void check_id_record_size(std::ifstream &tsc_file,
       const std::string &file_name, const std::string &header_str, std::size_t n_columns)
@@ -536,15 +543,9 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       int nr_hkl[1] = { 0 };
       tsc_file.read((char*)&nr_hkl, intsize);
 
-      // Everything above is a few kilobytes; everything below is the table, and
-      // for a protein that is gigabytes - 22 GB for an 8,566-atom structure.
-      // std::ifstream moves those bytes at about 1.3 GB/s while the same reads
-      // through C stdio go at 2.9, measured on a real 3.5 GB table with both
-      // arms returning identical data. Chunking the ifstream does not help, so
-      // it is the stream itself and not the per-call overhead.
-      //
-      // The header keeps the stream because scatterer_id_t is constructed from
-      // an istream; only the payload changes hands.
+      /* the payload (up to gigabytes) is read through c_file, see there; the
+      header stays on the stream because scatterer_id_t is built from an istream
+      */
       const std::streamoff payload_start = tsc_file.tellg();
       c_file payload(file_name);
       SMTBX_ASSERT(payload.ok());
@@ -569,13 +570,14 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           }
         }
       }
-      // With a filter the kept count is not known in advance, so rows are
-      // appended and the oversized reserve above is trimmed at the end.
+      // a filter keeps fewer rows; data_ is trimmed to them at the end
       const bool filtering = !wanted_.empty();
       const std::streamoff row_bytes =
         static_cast<std::streamoff>(n_columns * complex_doublesize);
       std::size_t kept = 0;
       for (int run = 0; run < *nr_hkl; run++) {
+        // old (std::ifstream is slower, see c_file):
+        // tsc_file.read((char*)&index, 3*intsize);
         SMTBX_ASSERT(payload.read(&index, 3*intsize));
         cctbx::miller::index<> mi(index[0], index[1], index[2]);
         if (filtering && wanted_.find(mi) == wanted_.end()) {
@@ -588,12 +590,14 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         vector<complex_type> &target = parent_t::data_[kept++];
         target.assign(nr_scat, complex_type(0));
         if (scatterers_are_in_file_order) {
+          // old: tsc_file.read((char*)target.data(), nr_scat * complex_doublesize);
           SMTBX_ASSERT(payload.read(target.data(), nr_scat * complex_doublesize));
         }
         else {
           // A read per scatterer spends more in stream bookkeeping than it
           // moves, and a table holds one row per reflection: take the row in one
           // read and put the scatterers in their places afterwards.
+          // old: tsc_file.read((char*)&buffer[0], n_columns * complex_doublesize);
           SMTBX_ASSERT(payload.read(&buffer[0], n_columns * complex_doublesize));
           for (size_t i = 0; i < n_columns; i++) {
             if (sc_indices[i] != ~0) {
@@ -610,20 +614,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     }
 
   public:
-    /** wanted: the Miller indices this table will ever be asked for, or empty
-        to keep every row as before.
-
-        A .tscb is generated over the whole index box of the reflection FILE so
-        that SHEL and OMIT cannot invalidate it, and a box holds far more than
-        the measurement inside it - for 1IEE, 958,467 rows against 72,347
-        measured reflections. Every row is loaded and only 7.5% of them can ever
-        be reached through get(), which cost 48 GB of resident memory.
-
-        The caller passes the indices it will ask for; +-h is added here rather
-        than left to the caller, because a binary table is always expanded and
-        may store the opposite Friedel half to the one the data lists - which is
-        exactly what 1IEE does, table h -81..0 against data h 0..81. Forgetting
-        that closure would drop every row the refinement needs.
+    /** wanted: the Miller indices this table will be asked for, or empty to
+        keep every row. A .tscb covers the whole index box of the reflection
+        file (so SHEL/OMIT cannot invalidate it), which can be many times the
+        measured data; filtering keeps only reachable rows in memory.
      */
     table_reader(const uctbx::unit_cell& u_cell,
       af::shared<xray::scatterer<float_type> > const &scatterers,
@@ -633,16 +627,11 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         af::shared<cctbx::miller::index<> >())
       : u_cell(u_cell)
     {
-      // The rows that must survive are NOT the wanted indices, nor those closed
-      // under +-h. lookup_based_anisotropic::resolve_rows() walks h * R for every
-      // rotation of the space group and asserts each one is present, falling back
-      // to -h only when the data are not anomalous. So the closure is the full
-      // ORBIT of every wanted index, plus Friedel mates.
-      //
-      // Getting this wrong is not a slow answer but a dead one: filtering to +-h
-      // alone dropped (0,1,-4) on 1IEE, in P 4(3) 2(1) 2, and the first build_up
-      // asserted. The expansion belongs here, next to the reader, and not in any
-      // caller - a caller cannot be expected to know resolve_rows() exists.
+      /* keep the full orbit of every wanted index plus Friedel mates, not just
+      +-h: lookup_based_anisotropic::resolve_rows() asserts h * R is present for
+      every rotation, and the expanded table may hold the other Friedel half.
+      Done here so callers need not know resolve_rows()
+      */
       for (std::size_t i = 0; i < wanted.size(); i++) {
         for (std::size_t j = 0; j < space_group.n_smx(); j++) {
           cctbx::miller::index<> h = wanted[i] * space_group.smx(j).r();
@@ -1070,11 +1059,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     af::shared<bool> covered_;
     std::size_t n_smx_;
     mutable std::vector<complex_type> tmp_;
-    /* The spherical half reads the form factors at_d_star_sq set and holds
-       nothing before it is first called: an uncovered atom asked for before
-       that read an empty array. The f_calc loops always call it first; a
-       Python caller of get or get_full may not, and gets an error instead.
-     */
+    // the spherical half is empty until at_d_star_sq(); the f_calc loops call
+    // it first, a Python caller of get/get_full may not and gets an error
     bool d_star_sq_set_;
     void check_d_star_sq() const {
       SMTBX_ASSERT(d_star_sq_set_)
@@ -1224,12 +1210,9 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           new harmonic_expansion_data<FloatType>(u_cell, scatterers, file_name,
             space_group));
         af::shared<bool> const &covered = densities->covered;
-        /* A density file is meant to describe the whole model, every PART
-        and the atoms a Thakkar fill supplies included. An atom it misses is
-        refused, with every such atom named, rather than given a spherical
-        form factor quietly: that is how a file written for one PART alone
-        refined the others as IAM. allow_spherical_fallback restores the
-        spherical stand-in, for a caller that asks for it.
+        /* a density file must cover every atom (all PARTs, Thakkar-filled
+        ones too); missing atoms are named in an error rather than silently
+        refined as IAM, unless allow_spherical_fallback is set
         */
         std::string missing;
         std::size_t n_missing = 0;

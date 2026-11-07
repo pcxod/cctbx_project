@@ -195,12 +195,8 @@ def exercise_mli_approaches_mlf_as_the_error_vanishes():
   amplitude one as sigma tends to zero, and departs from it when the error is
   real.
 
-  Centric reflections too - in a centrosymmetric space group they are all of
-  them. The acentric density used to be applied to them, which this test, run
-  acentric only, could not see: centric, the gap stayed at 0.36 instead of
-  falling. The gradient was the acentric one while the weight was the centric
-  one, half the acentric curvature, so Gauss-Newton steps came out up to twice
-  too long and could go uphill.
+  Centric reflections too: they need their own density, and the acentric one
+  applied to them does not converge on the amplitude gradient.
   """
   from smtbx.refinement import least_squares as ls_ext
   ext = ls_ext.ext
@@ -489,10 +485,8 @@ def exercise_log_likelihood_against_the_cctbx_target():
   assert approx_equal(ours.work_per_reflection(), oracle.target_work(), 1e-12)
   assert approx_equal(ours.free_per_reflection(), oracle.target_test(), 1e-12)
 
-  # free_only is what the per-cycle report calls, so it must give the same free
-  # sum as the full pass and simply not pay for the working one. Worth pinning:
-  # a skip that also skipped free reflections would show up as a plausible
-  # smaller number rather than as an error.
+  # free_only must give the same free sum as the full pass and skip only the
+  # working one; skipping free reflections too would pass as a smaller number
   only = ml_log_likelihood(fo_sq=fo*fo, sigma_fo_sq=flex.double(n, 0.5),
                            observables=modulus_fc*modulus_fc, ml_data=ml,
                            free_only=True)
@@ -657,7 +651,7 @@ def exercise_an_fc_correction_reaches_the_likelihood():
           ll.append(build(target, make, v, held)[0].log_likelihood().work)
         fd = (ll[0] - ll[1])/(2*h)
         g = rhs[first + i]
-        # agreement is 2e-5 to 4e-5, the difference's own error
+        # the tolerance sits above the finite difference's own error
         assert abs(fd) > 1e-6, (target, name, i, fd)
         assert abs(g + fd) < 1e-3*abs(fd), (target, name, i, g, fd)
   # a shift through zero stops the diagonal of X at 0, the off-diagonal not

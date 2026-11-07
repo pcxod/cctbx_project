@@ -380,11 +380,9 @@ def exercise_a_partial_tscb_falls_back_on_spherical(file_name):
 
 
 def exercise_an_8_byte_id_block_is_named_not_misread(good_name, legacy_name):
-  """ SCATTERER_IDS named an 8-byte record before 29 July 2026 and a 16-byte one
-  after, and the format has no field for the width. Read at the wrong width the
-  ids are not rejected, they are misframed, and the failure surfaces much later
-  as a table that matches no atom -- so the reader works the width out from the
-  file's own size, which only comes out even for the true one.
+  """ SCATTERER_IDS records were 8 bytes, now 16, with no width field; at the
+  wrong width ids are misframed, not rejected, so the reader infers the width
+  from the file size and must name a legacy file instead of misreading it.
   """
   xs = smtbx.development.random_xray_structure(
     sgtbx.space_group_info('P1'), elements=['C'] * 4 + ['O'] * 2,
@@ -431,10 +429,8 @@ def exercise_an_8_byte_id_block_is_named_not_misread(good_name, legacy_name):
 
 
 def exercise_a_path_outside_the_ansi_code_page_opens(directory):
-  """ Python hands the path over as UTF-8, and a narrow fopen on Windows reads
-  that in the ANSI code page, so a table in a folder named in Chinese on a
-  Western Windows could not be opened at all -- whichever bytes it was spelled
-  in. Both readers, text and binary, go through the same open.
+  """ Python passes the path as UTF-8, which a narrow fopen on Windows reads in
+  the ANSI code page; both the text and the binary reader must open it.
   """
   xs = smtbx.development.random_xray_structure(
     sgtbx.space_group_info('P1'), elements=['C'] * 4 + ['O'] * 2,

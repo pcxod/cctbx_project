@@ -1,71 +1,36 @@
 """ Which element is each peak? From integrated density, with no model.
 
-A solution gives unlabelled maxima. Calling them all carbon -- which is what
-this pipeline did until now -- produces a .res a user must retype by hand, and
-is the difference between "a structure appeared" and "a structure I can refine".
+Integrated density rather than peak height: height depends on how tight the
+atom is, while spreading an atom out moves density within a small sphere rather
+than out of it.
 
-**Integrated density, not peak height.** The obvious quantity is the height of
-the maximum, and it is the wrong one: height depends on how tight the atom is,
-so a heavy atom with a large displacement parameter can peak lower than a light
-one that is well ordered. Summing the density in a small sphere is insensitive
-to that, because spreading an atom out moves density around within the sphere
-rather than out of it.
+Integrated densities are on an arbitrary scale. Carbon supplies the reference:
+peak pairs a typical C-C distance apart are set to a mean Z of 6, using only
+the geometry already there and no user formula.
 
-**The scale comes from the structure itself.** Integrated densities are on an
-arbitrary scale -- they depend on the data, the map, and the resolution -- so
-they cannot be turned into atomic numbers without a reference. Carbon supplies
-one: in almost any organic structure there are pairs of peaks separated by a
-typical C-C distance, and setting their mean to Z = 6 fixes the scale using
-only the geometry that is already there. No formula from the user, no
-assumption about what is present.
-
-That last point matters given what was measured about user-supplied formulas
-elsewhere in this project: every realistic corruption of a formula made
-normalisation *worse* than using none at all, so a method that needs no formula
-is preferable on evidence, not only on convenience.
-
-**What this deliberately does not do.** It does not try to be clever about
-elements that are close in atomic number. C, N and O differ by one electron
-each and at ordinary resolution their integrated densities overlap; the honest
-output is a best guess plus the information that the guess is marginal, which
-`assign` reports as a confidence. Pretending otherwise is how an automatic
-assignment quietly produces a wrong formula that a user then refines for an
-hour.
+C, N and O overlap at ordinary resolution; `assign` gives a best guess and
+flags it as marginal rather than pretending to certainty.
 """
 from __future__ import absolute_import, division, print_function
 
 from libtbx import group_args
 
-# Integration radius. Large enough to capture an atom's density, small enough
-# that neighbours at a bonding distance (>= 1.2 A) do not overlap much.
+# captures an atom's density with little overlap from neighbours >= 1.2 A away
 DEFAULT_RADIUS = 0.7
 
-# A C-C single bond, generously bracketed. Used only to identify which peak
-# pairs set the scale, so it does not need to be tight -- it needs to exclude
-# non-bonded contacts (>= 2.2 A) and fused-ring short contacts.
+# a C-C single bond, loosely bracketed: it only has to exclude non-bonded and
+# fused-ring short contacts
 CC_MIN, CC_MAX = 1.25, 1.65
-# P-O, S-O, Si-O and M=O bonds sit in that window too, and one of them in the
-# calibration set inflates the scale by its density ratio. On the curve a C-F
-# pair reads 1.7, Si-O 2.1, P-O 2.3: pairs beyond this are not two light atoms.
+# P-O, S-O, Si-O and M=O also fall in that window and would inflate the scale;
+# a density ratio beyond this (C-F reads 1.7, Si-O 2.1) is not two light atoms
 CC_MAX_RATIO = 1.9
 
-# Integrated density is **not** proportional to Z. A heavy atom keeps a larger
-# share of its electrons inside the integration sphere, while a light atom's
-# valence density spills outside it, so a scale calibrated on carbon over-reads
-# everything heavier: sulfur first measured 24.6 against a true Z of 16 and was
-# assigned chromium, which is why sulfur and chlorine scored exactly zero.
-#
-# The relation is not a clean power law either -- the ratio d/Z climbs from
-# 0.97 at carbon to about 1.4 at chlorine and then flattens -- so rather than
-# fit a functional form, this is the measured curve itself: median density
-# (with the carbon scale applied) against true Z, over 3049 atoms of 150
-# structures whose elements are known. `calibrate_density_z.py` regenerates it.
-#
-# Iodine was measured at 488 against a true Z of 53 on five atoms and is
-# deliberately excluded: five atoms in a handful of structures is not a
-# calibration, and one absurd anchor would distort every heavy assignment.
-# Above bromine the curve is extrapolated, and `assign` marks those calls
-# marginal for that reason.
+# Integrated density is not proportional to Z: a heavy atom keeps more of its
+# electrons inside the sphere, so a carbon scale over-reads everything heavier,
+# and d/Z rises to about 1.4 at chlorine then flattens. Hence the measured
+# curve itself, median carbon-scaled density against true Z over structures of
+# known composition. Iodine is left out (too few atoms to calibrate); above
+# bromine the curve is extrapolated and `assign` marks those calls marginal.
 DENSITY_CURVE = (
   (6, 5.83), (7, 7.69), (8, 9.02), (9, 10.00),
   (15, 20.30), (16, 22.23), (17, 24.29), (35, 47.28),
@@ -90,9 +55,8 @@ def expected_density(z):
   return d1 + (z - z1)*(d1 - d0)/(z1 - z0)
 
 
-# Elements this will consider, with atomic numbers. Restricted to what turns up
-# in small-molecule work: offering the whole periodic table would let noise pick
-# an implausible heavy element on a single bad peak.
+# small-molecule elements only: the whole periodic table would let noise pick
+# an implausible heavy element on a single bad peak
 COMMON_ELEMENTS = (
   ("C", 6), ("N", 7), ("O", 8), ("F", 9), ("Na", 11), ("Mg", 12), ("Al", 13),
   ("Si", 14), ("P", 15), ("S", 16), ("Cl", 17), ("K", 19), ("Ca", 20),
@@ -127,12 +91,10 @@ def site_radii(xs, lo=DEFAULT_RADIUS, hi=1.2, light_z=10):
   distance to the nearest modelled neighbour, within [lo, hi], for sites
   heavier than `light_z`; `lo` for the rest.
 
-  A wrongly typed heavy site refines to the U that mimics the true atom
-  over the data, and inside a small sphere the two densities then agree
-  (a Mn typed Se read 91 % of Se at 0.7 A, 84 % at 1.0 A): the deficit only
-  shows out where the model's broader atom trails off. Light sites keep
-  `lo`: their neighbours sit at 1.2-1.5 A, and a neighbour not yet modelled
-  would bleed into a wider sphere.
+  A wrongly typed heavy site refines to the U that mimics the true atom, so
+  inside a small sphere the densities agree and the deficit only shows where
+  the model's broader atom trails off. Light sites keep `lo`: a neighbour at
+  1.2-1.5 A not yet modelled would bleed into a wider sphere.
   """
   from cctbx import crystal
   from cctbx.eltbx import tiny_pse
@@ -156,22 +118,10 @@ def site_radii(xs, lo=DEFAULT_RADIUS, hi=1.2, light_z=10):
 def carbon_scale(unit_cell, sites_frac, densities, space_group=None):
   """ Density per electron, from peaks a C-C distance apart. Or None.
 
-  Returns None rather than guessing when no bonded pair is found -- an
-  inorganic or heavily-substituted structure may genuinely have none, and a
-  fabricated scale would mislabel every atom in it.
-
-  **Distances are minimum-image, and symmetry images count.** `unit_cell.distance`
-  measures between the fractional coordinates exactly as written, so a genuine
-  C-C bond whose two atoms sit either side of a cell boundary reads as most of
-  a cell and is missed, while two atoms with nothing between them can read as
-  1.4 A apart and be counted as a bonded pair. Both directions corrupt the
-  scale, and the scale divides the density of *every* atom in the structure --
-  so a calibration set contaminated this way walks the whole model up or down
-  the periodic table.
-
-  `space_group` is optional only so existing callers keep working; pass it
-  whenever it is known, because a bonded neighbour is often a symmetry image
-  rather than another atom of the asymmetric unit.
+  None when no bonded pair is found, since a fabricated scale would mislabel
+  every atom. Distances are minimum-image over the symmetry operators of
+  `space_group`; pass it whenever known, as a bonded neighbour is often a
+  symmetry image.
   """
   from cctbx.array_family import flex
 
@@ -202,20 +152,14 @@ def carbon_scale(unit_cell, sites_frac, densities, space_group=None):
   return mean/6.0
 
 
-
-
 def formula_scale(densities, formula_zs, trust=0.75):
   """ Density per electron from the declared formula, by rank. Or None.
 
-  The second path, for a crystal without a C-C pair (oxides, halides,
-  boranes, the metal-only asymmetric unit). The peaks sorted by density are
-  set against the formula's atoms sorted by Z at the same quantile, so it is
-  the shape of the composition that is used, not the count the user typed
-  (cell, asymmetric unit or "one of each" all give the same ranks); the
-  weakest quarter of the peaks is left out, that is where the noise sits, and
-  the ratio is a median so one missing heavy atom does not move it. Rank for
-  rank with a Z' factor was tried on 49 carbon-free COD cases and typed
-  worse (67.5 against 74.2 %).
+  For a crystal without a C-C pair. Peaks sorted by density are set against
+  the formula's atoms sorted by Z at the same quantile, so only the shape of
+  the composition matters, not the counts typed; the weakest quarter of the
+  peaks (the noise) is left out, and the median ratio is robust to one
+  missing heavy atom.
   """
   n, m = densities.size(), len(formula_zs)
   if n < 2 or m < 1:
@@ -232,27 +176,17 @@ def assign(unit_cell, sites_frac, densities, elements=None,
            formula_zs=None):
   """ An element per site, with a flag where the call is close.
 
-  `elements` restricts the candidates -- pass the user's expected element list
-  when there is one, since knowing that only C, N, O and S are possible removes
-  most of the ambiguity for free. With no list, COMMON_ELEMENTS is used.
+  `elements` restricts the candidates (default COMMON_ELEMENTS).
 
-  `scale` overrides the density-per-electron that would otherwise be derived
-  from these same sites; `formula_zs` (one Z per non-H atom the user declared)
-  is the fallback when no C-C pair exists, and the only path when the formula
-  has no carbon. Pass one whenever the site list contains peaks you do
-  not yet trust. The scale is a *calibration*, so every site's element depends
-  on it: `carbon_scale` averages the peaks a C-C distance apart, and a site
-  sitting on weak residual density inside that window pulls the mean down,
-  which raises `density/scale` for every atom in the structure and walks the
-  whole model up the periodic table. Sites added from a difference map are
-  exactly that case -- weak by construction, and placed at a bonding distance
-  -- so they must be typed against the scale set by the atoms already trusted,
-  not against one they helped compute.
+  `scale` overrides the density per electron derived from these sites; pass
+  one whenever the list holds peaks not yet trusted. A weak site inside the
+  C-C window pulls the carbon scale down and walks every atom up the periodic
+  table, so difference-map sites must be typed against the scale of the
+  trusted atoms. `formula_zs` (one Z per declared non-H atom) is the fallback
+  without a C-C pair, and the only path when the formula has no carbon.
 
-  Each assignment carries `marginal`: true when the second-best element is
-  within `marginal_fraction` of an electron of the best. Those are the
-  assignments a user should look at, and C/N/O will populate them heavily,
-  which is the honest outcome rather than a defect.
+  Each assignment carries `marginal`: the runner-up is within
+  `marginal_fraction` of the gap between the two candidates.
   """
   scale_from = "given"
   # A formula without carbon has no C-C pair; whatever falls in the window
@@ -279,27 +213,22 @@ def assign(unit_cell, sites_frac, densities, elements=None,
   out = []
   for i in range(sites_frac.size()):
     if scale is None or scale <= 0:
-      # No scale means no basis for a claim. Carbon is the convention for an
-      # unassigned peak, and it is reported as such rather than as a result.
+      # no scale, no claim: carbon by convention, flagged
       out.append(group_args(element="C", z_estimate=None, marginal=True,
                             reason="no C-C pair to set the scale"))
       continue
-    # Compare in *density* space, not in Z space. The candidates' expected
-    # densities come from the measured curve, so the non-linearity is handled
-    # where it belongs rather than by fudging the scale.
+    # compared in density space, where the curve carries the non-linearity
     observed = densities[i]/scale
     ranked = sorted(table, key=lambda sz: abs(expected_density(sz[1])
                                               - observed))
     best, second = ranked[0], (ranked[1] if len(ranked) > 1 else ranked[0])
     d_best = abs(expected_density(best[1]) - observed)
     d_second = abs(expected_density(second[1]) - observed)
-    # Marginal when the runner-up is nearly as good, judged relative to the
-    # gap between the two candidates rather than as an absolute -- one electron
-    # of difference means something quite different at carbon and at bromine.
+    # relative to the gap between the two candidates: one electron means
+    # something different at carbon and at bromine
     span = max(1e-6, abs(expected_density(second[1])
                          - expected_density(best[1])))
     marginal = (d_second - d_best) < marginal_fraction*span
-    # Beyond the calibrated range the curve is extrapolated, so say so.
     extrapolated = best[1] > DENSITY_CURVE[-1][0]
     out.append(group_args(
       element=best[0], z_estimate=observed,

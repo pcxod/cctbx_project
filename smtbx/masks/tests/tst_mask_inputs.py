@@ -2,18 +2,13 @@ from __future__ import absolute_import, division, print_function
 
 """ What the caller hands the mask: hydrogen atoms and F_calc.
 
-  * ignore_hydrogen_atoms used to be accepted and ignored. With it set, the
-    region must be exactly the region of the structure with its H deleted,
-    and a partially occupied H must give nothing back through the occupancy
-    correction either.
-  * structure_factors(f_calc=...) is how a caller with aspherical form factors
-    (Olex2 with a NoSpherA2 table) gets its own F_calc into the mask. Handed
-    the very F_calc the mask would compute, it must reproduce the internal
-    path bit for bit, in whatever order the reflections come.
-  * x_h_length draws the region with every H at one distance from its parent
-    (or one per parent element, as Olex2's neutron.dist gives them), the
-    parent found through symmetry and within its own PART, so that IAM and
-    aspherical models of one structure get the same region.
+ignore_hydrogen_atoms gives exactly the region of the H-deleted structure,
+and a partial H then gives nothing back through the occupancy correction.
+A handed-in F_calc (non-spherical form factors) reproduces the internal path
+bit for bit, in any reflection order. x_h_length puts every H at one distance
+from its parent (or one per parent element), the parent found through
+symmetry and within its own PART, so IAM and non-spherical models of one
+structure get the same region.
 """
 
 from cctbx import crystal, xray

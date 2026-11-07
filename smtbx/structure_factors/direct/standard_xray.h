@@ -885,25 +885,19 @@ namespace smtbx { namespace structure_factors { namespace direct {
         return af::shared<std::size_t>();
       }
 
-      /* The other half of a mismatch: entries of a density file (.tshb)
-      that describe no scatterer of the structure, for the caller to report.
-      Empty for everything else.
-      */
+      // .tshb entries that match no scatterer; empty for everything else
       virtual af::shared<std::string> records_not_in_structure() const {
         return af::shared<std::string>();
       }
 
-      /* Entries of a density file found on a symmetry image of the site they
-      were made for (move, compaq, inv) and rotated there, with the operation.
-      */
+      // .tshb entries found on a symmetry image of their site (move, compaq,
+      // inv) and rotated there, with the operation
       virtual af::shared<std::string> records_moved_by_symmetry() const {
         return af::shared<std::string>();
       }
 
-      /* How many scatterers an index may name, for the Python wrappers to
-      check get/get_full against before the unchecked lookups below them;
-      ~0 for a contribution that cannot tell.
-      */
+      // upper bound for get/get_full indices, checked by the Python wrappers;
+      // ~0 if unknown
       virtual std::size_t n_scatterers() const { return ~std::size_t(0); }
 
       virtual scatterer_contribution *raw_fork() const = 0;

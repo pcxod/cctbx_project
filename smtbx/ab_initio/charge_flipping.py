@@ -65,17 +65,10 @@ class _array_extension(oop.injector, miller.array):
     """ As per ref. [2] """
     cut = int(weak_reflection_fraction * source.size())
     if not need_sorting:
-      # **The whole step in one C++ call, with the GIL released.** Driven from
-      # Python this is six flex operations with the GIL held between them, and
-      # it measured 0.150 ms of a 0.78 ms charge-flipping cycle scaling 0.97x
-      # on four threads while the FFT steps around it reached 2.56x and 3.32x.
-      #
-      # Only the unsorted path: sorting first would need the permutation
-      # applied to both arrays, and the hot path (weak_reflection_improved_
-      # iterator) passes need_sorting=False.
-      #
-      # Falls back to the Python below if the extension is older than this --
-      # a missing symbol must not take the solver down.
+      # the whole step in one C++ call with the GIL released, instead of six
+      # flex operations holding it; only the unsorted path, since sorting
+      # would need the permutation applied to both arrays. An older extension
+      # without the symbol falls back to the Python below
       try:
         return miller.array(self, ab_initio.ext.oszlanyi_suto_phase_transfer(
           space_group=self.space_group(),
@@ -303,12 +296,12 @@ class weak_reflection_improved_iterator(basic_iterator):
       self.weak_reflection_fraction,
       need_sorting=False)
 
-  # The whole cycle in one C++ call over a persistent map (ext.
-  # charge_flipping_cycle), the same bits as the steps above. f_calc,
-  # f_calc_free, _g, _g_000 and f_000 come out of it only when read; rho_map
-  # answers sigma() and skewness() from it and builds the fft_map for anything
-  # else. Anything that recomputes the map (normalise) ends the fused run with
-  # what the caller changed kept, and the next cycle starts a new one.
+  # The whole cycle in one C++ call over a persistent map
+  # (ext.charge_flipping_cycle), bit-identical to the steps above. f_calc,
+  # f_calc_free, _g, _g_000 and f_000 are fetched from it only when read;
+  # rho_map answers sigma() and skewness() from it and builds the fft_map for
+  # anything else. Recomputing the map (normalise) ends the fused run, keeping
+  # what the caller changed; the next cycle starts a new one.
   _cf_attributes = ('f_calc', 'f_calc_free', '_g', '_g_000', 'f_000')
 
   def _cf_lazy(self):
@@ -420,10 +413,9 @@ class low_density_elimination_iterator(density_modification_iterator):
 
 max_shift_refinements = 3
 
-# crystal_gridding.tags() builds the symmetry tags of the whole grid (0.01-0.11
-# s) and was rebuilt on every call although it depends only on the gridding and
-# the space group. peak_list writes into the tag array it is given, so one
-# pristine copy is kept and each search gets a fresh copy of it
+# crystal_gridding.tags() depends only on the gridding and the space group, so
+# it is cached; peak_list writes into the tag array it is given, so each search
+# gets a fresh copy of the pristine one
 _tags_cache = {}
 
 def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
@@ -467,8 +459,12 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
     general_positions_only=False,
     min_cross_distance=f_obs.d_min()/2)
   ## The correlation map is not a miller.fft_map, just a 3D flex.double
-  # crystal_gridding_tags.peak_search with the tag array taken from the cache
-  key = (tuple(crystal_gridding.n_real()),
+  # old: rebuilt the grid tags on every call; now crystal_gridding_tags.
+  # peak_search unrolled with the tag array taken from the cache
+  # correlation_map_peaks = crystal_gridding.tags().peak_search(
+  #   map=correlation_map,
+  #   parameters=search_parameters)
+  key =(tuple(crystal_gridding.n_real()),
          crystal_gridding.space_group_info().type().hall_symbol())
   tags = _tags_cache.get(key)
   if tags is None:
@@ -492,8 +488,11 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
     max_clusters=p.max_clusters(),
     min_cubicle_edge=p.min_cubicle_edge())
   # iterate over the strong peak; for each, shift and symmetrised f_calc
-  # ponytail: only the first solution is ever used, and each shift refinement
-  # is ~30 ms of Python-driven LBFGS -- 78 per trial was 91 % of a trial
+  # ponytail: capped because only the best solution is used and each shift
+  # refinement is a Python-driven LBFGS dominating the trial
+  # old: refined every peak above min_cc_peak_height
+  # for peak in correlation_map_peaks:
+  #   if peak.height < min_cc_peak_height: break
   for i, peak in enumerate(correlation_map_peaks):
     if peak.height < min_cc_peak_height or i >= max_shift_refinements: break
     sr = symmetry_search.shift_refinement(
@@ -652,14 +651,10 @@ class solving_iterator(object):
       low, high = 0.8, 1.
       if low <= r <= high:
         yield self.solving
-        # Control only comes back here when solving failed, and the way back
-        # passes through the starting state, which has already given the
-        # flipping iterator a fresh set of random phases. So there is nothing
-        # to restart -- only the delta to guess again. This used to call
-        # flipping.restart(), which no iterator in this module has ever
-        # defined, so the whole c_tot_over_c_flip method raised AttributeError
-        # the first time an attempt failed. It went unnoticed because a
-        # structure that solves on the first attempt never reaches this line.
+        # back here only after solving failed, via the starting state, which
+        # already gave fresh random phases: only delta needs guessing again
+        # old: no iterator defines restart(), so this raised AttributeError
+        # flipping.restart()
         delta_needs_initialisation = True
       else:
         if self.yield_during_delta_guessing:
@@ -691,15 +686,14 @@ class solving_iterator(object):
   def _solving(self):
     while True:
       i_attempt = 0
-      # Later attempts get a longer run at it. Held locally and recomputed from
-      # the configured value on each pass: this used to multiply
-      # self.max_solving_iterations in place, so the budget compounded over
-      # every attempt of every pass and never went back down -- a structure
-      # that kept failing could end up being given thousands of iterations per
-      # attempt, and the configured value no longer meant anything.
+      # later attempts get a longer run, recomputed from the configured value
+      # on each pass so the budget does not compound across passes
       while i_attempt < self.max_attempts_to_get_phase_transition:
         i_attempt += 1
         solving_iterations = self.max_solving_iterations
+        # old: scaled the attribute in place, compounding over every pass
+        # if i_attempt > 2:
+        #   self.max_solving_iterations *= 1.5
         if i_attempt > 2:
           solving_iterations *= 1.5**(i_attempt - 2)
         self.skewness_evolution = observable_evolution()
@@ -711,6 +705,8 @@ class solving_iterator(object):
             yield self.solving
           self.skewness_evolution.append(flipping.rho_map.skewness())
           #if flipping.rho_map.skewness() < 3: continue
+          # old: accepted any skewness rise, including noise at low skewness
+          # if self.skewness_evolution.had_phase_transition():
           if (self.skewness_evolution.had_phase_transition()
               and flipping.rho_map.skewness()
                   >= self.min_skewness_at_phase_transition):
@@ -765,7 +761,9 @@ class solving_iterator(object):
                                       self.flipping_iterator.f_calc,
                                       self.min_cc_peak_height):
           if cc_peak_height < self.min_cc_peak_height: break
-          fo, fc = original_f_obs.common_sets(f_calc)
+          # old: kept in peak order, without R1
+          # self.f_calc_solutions.append((f_calc, shift, cc_peak_height))
+          fo, fc =original_f_obs.common_sets(f_calc)
           r1 = fo.r1_factor(fc, scale_factor=fo.scale_factor(fc))
           self.f_calc_solutions.append((f_calc, shift, cc_peak_height, r1))
         self.f_calc_solutions.sort(key=lambda s: s[3])

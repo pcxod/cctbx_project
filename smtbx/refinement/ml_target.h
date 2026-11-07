@@ -298,10 +298,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
             \exp\!\left(-\frac{I_t + (a F_c)^2}{2 \epsilon b}\right)
             \cosh\!\left(\frac{a \sqrt{I_t} F_c}{\epsilon b}\right) \f]
 
-      The acentric density used to be applied to centric reflections too -
-      which in a centrosymmetric space group is every reflection - giving a
-      gradient that did not tend to the amplitude target's as sigma -> 0
-      (measured: up to 80 times off, against 4e-6 for acentric ones).
+      Centric reflections need their own density: the acentric one gives a
+      gradient that does not tend to the amplitude target's as sigma -> 0.
 
       It departs from the amplitude target by an amount which depends on
       \f$ F_c \f$, grows with \f$ \sigma^2 \f$ and vanishes as
@@ -312,61 +310,61 @@ namespace smtbx { namespace refinement { namespace least_squares {
       Reference: Pannu & Read (1996) Acta Cryst. A52, 659-668.
    */
   /// How the integral over the true intensity is evaluated.
-  /** It used to be one 20-node Gauss-Hermite rule centred on the measurement,
-      \f$ I_t = I_o + \sqrt{2}\,\sigma x \f$. That rule assumes the integrand
-      is the measurement Gaussian times something smooth on the scale of
-      sigma, and two common cases break that:
+  /** A Gauss-Hermite rule centred on the measurement,
+      \f$ I_t = I_o + \sqrt{2}\,\sigma x \f$, assumes the integrand is the
+      measurement Gaussian times something smooth on the scale of sigma. That
+      fails for weak reflections (the centric density has an integrable
+      \f$ 1/\sqrt{I_t} \f$ singularity at zero) and for a model distribution
+      narrower than sigma (the nodes step over its peak). So the rule is chosen
+      per reflection.
 
-      - **Weak reflections.** The centric density has an integrable
-        \f$ 1/\sqrt{I_t} \f$ singularity at zero, and both densities are
-        steep there. When the measurement reaches zero, as it does for every
-        near-absent reflection, no rule in \f$ I_t \f$ resolves it.
-      - **A model distribution narrower than the measurement**
-        (sigma comparable to or larger than the spread of
-        \f$ P(I_t \mid F_c) \f$). Then the nodes, spaced on the scale of
-        sigma, step over the peak.
+      Away from zero (posterior mean more than six posterior standard
+      deviations above zero): Gauss-Hermite in \f$ I_t \f$, centred on the
+      product of the measurement Gaussian and a Gaussian with the model's mean
+      \f$ a^2F_c^2 + \epsilon b \f$ and variance, the ratio to that proposal
+      carried in the weights.
 
-      Measured against an adaptive Gauss-Kronrod reference on the reflections
-      of a refined synthetic structure: 9 to 19 percent of reflections had
-      dT/d|Fc| wrong by more than 1 percent of \f$ a^2|F_c|/\epsilon b \f$ (the
-      effective observation relative to \f$ |F_c| \f$), some by factors of
-      several and with the wrong sign.
+      Otherwise, or for an outlier (more than four combined standard
+      deviations from the model's mean and not much narrower than the model's
+      spread): Gauss-Legendre in \f$ u = \sqrt{I_t} \f$, where
+      \f$ P(I_t)\,dI_t = P_F(u)\,du \f$ is smooth. It spans the intersection
+      of the two factors' supports (each to \f$ e^{-40} \f$ of its own peak),
+      or their union where they do not overlap; an outlier sits in the tails
+      of both, so it takes the union in four panels.
 
-      Now there are two branches, chosen per reflection:
-
-      - **Away from zero** (the posterior mean is more than six posterior
-        standard deviations above zero): Gauss-Hermite in \f$ I_t \f$, centred
-        on the product of the measurement Gaussian and a Gaussian with the
-        model distribution's mean \f$ a^2F_c^2 + \epsilon b \f$ and variance,
-        with the ratio to that proposal carried in the weights. It follows
-        whichever factor is narrower.
-      - **Near zero, or a measurement more than four combined standard
-        deviations from the model's mean and not much narrower than the
-        model's spread:** Gauss-Legendre in
-        \f$ u = \sqrt{I_t} \f$, where
-        \f$ P(I_t)\,dI_t = P_F(u)\,du \f$ is smooth (Rice or Woolfson in
-        amplitude). The rule spans the intersection of the two factors'
-        supports (each taken to \f$ e^{-40} \f$ of its own peak), or their
-        union where they do not overlap. For such an outlier the posterior
-        sits in the tails of both, so it takes the union in four panels.
-
-      With 8 Hermite and 24 Legendre nodes, the worst error in dT/d|Fc| over
-      the effective-observation scale \f$ |d| + a^2|F_c|/\epsilon b \f$ was
-      1.6e-4 on three refined synthetic data sets (it had been 5.5) and 1e-3
-      over 2,000 random cases (sigma/Io from 0.003 to beyond 1, model spread
-      from a thousandth to half of Fc^2). On 3,000 cases with models far off
-      the data it was 8e-3, where the old rule failed outright. Per pass over
-      the refined data it is 20-37 percent faster than the old rule, because
-      most reflections take the 8-node branch. With 10 + 32 nodes the error
-      falls to the level of the Bessel approximations in scitbx/math/bessel.h
-      (3e-7) at about the old rule's cost.
-
-      The old warning against trimming nodes still applies to the rule it was
-      about: centred on the measurement, fewer nodes are worse. Here the
-      Hermite rule is centred on the posterior and the weak cases go to the
-      Legendre rule, so it does not.
+      8 Hermite and 24 Legendre nodes hold the error in dT/d|Fc| to about 1e-3
+      of the effective-observation scale \f$ |d| + a^2|F_c|/\epsilon b \f$;
+      10 + 32 reach the precision of scitbx/math/bessel.h.
    */
   namespace mli_quadrature {
+    /* old: one 20-node Hermite rule centred on the measurement, replaced
+       because it misses weak reflections and narrow model distributions
+    inline int n_nodes() { return 20; }
+
+    inline double const* nodes() {
+      static const double x[20] = {
+        -5.387480890011233, -4.603682449550744, -3.944764040115625,
+        -3.347854567383216, -2.788806058428131, -2.254974002089276,
+        -1.738537712116586, -1.234076215395323, -0.737473728545394,
+        -0.245340708300901,  0.245340708300901,  0.737473728545394,
+         1.234076215395323,  1.738537712116586,  2.254974002089276,
+         2.788806058428131,  3.347854567383216,  3.944764040115625,
+         4.603682449550744,  5.387480890011233 };
+      return x;
+    }
+
+    inline double const* weights() {
+      static const double w[20] = {
+        2.229393645534151e-13, 4.399340992273181e-10, 1.086069370769282e-07,
+        7.802556478532064e-06, 2.283386360163540e-04, 3.243773342237863e-03,
+        2.481052088746362e-02, 1.090172060200233e-01, 2.866755053628341e-01,
+        4.622436696006101e-01, 4.622436696006101e-01, 2.866755053628341e-01,
+        1.090172060200233e-01, 2.481052088746362e-02, 3.243773342237863e-03,
+        2.283386360163540e-04, 7.802556478532064e-06, 1.086069370769282e-07,
+        4.399340992273181e-10, 2.229393645534151e-13 };
+      return w;
+    }
+    */
     inline int n_hermite() { return 8; }
 
     inline double const* hermite_nodes() {
@@ -476,6 +474,55 @@ namespace smtbx { namespace refinement { namespace least_squares {
     FloatType const b = beta*scale_factor*scale_factor;
     FloatType const eb = epsilon*b;
     FloatType const modulus_fc = std::sqrt(observable);
+    /* old: 20-node Hermite rule centred on I_o with the acentric density for
+       every reflection, replaced by the two branches below (see
+       mli_quadrature); it returned only the gradient
+    FloatType const root_two_sigma =
+      std::sqrt(FloatType(2))*sigma_fo_sq;
+
+    int const n = mli_quadrature::n_nodes();
+    double const *x = mli_quadrature::nodes();
+    double const *w = mli_quadrature::weights();
+
+    FloatType ln_max = -std::numeric_limits<FloatType>::max();
+    std::vector<FloatType> ln_p(n), dln_p(n);
+    std::vector<bool> usable(n, false);
+    for (int i = 0; i < n; i++) {
+      FloatType const it = fo_sq + root_two_sigma*static_cast<FloatType>(x[i]);
+      if (it <= 0) {
+        continue;             // no density below zero true intensity
+      }
+      FloatType const root_it = std::sqrt(it);
+      FloatType const arg = 2*a*root_it*modulus_fc/eb;
+      ln_p[i] = -std::log(eb) - (it + a*a*observable)/eb
+                + scitbx::math::bessel::ln_of_i0(arg);
+      // d ln P_Rice / d|Fc|
+      dln_p[i] = -2*a*a*modulus_fc/eb
+                 + (2*a*root_it/eb)*scitbx::math::bessel::i1_over_i0(arg);
+      usable[i] = true;
+      if (ln_p[i] > ln_max) {
+        ln_max = ln_p[i];
+      }
+    }
+    if (ln_max == -std::numeric_limits<FloatType>::max()) {
+      return false;
+    }
+    FloatType sum = 0, sum_d = 0;
+    for (int i = 0; i < n; i++) {
+      if (!usable[i]) {
+        continue;
+      }
+      FloatType const p = static_cast<FloatType>(w[i])*std::exp(ln_p[i] - ln_max);
+      sum += p;
+      sum_d += p*dln_p[i];
+    }
+    if (sum <= 0) {
+      return false;
+    }
+    // T = -ln sum, so dT/d|Fc| = -(sum of P dlnP)/(sum of P)
+    d_target = -sum_d/sum;
+    return true;
+    */
     FloatType const s = sigma_fo_sq;
     FloatType const two_s_sq = 2*s*s;
 
@@ -496,11 +543,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
     FloatType ln_prefactor;
     int n, n_w;             // nodes used, and the length of the rule repeated
     double const *w;
-    /* A measurement many combined standard deviations from what the model
-       expects puts the posterior in the far tails of both factors, where
-       neither Gaussian picture holds; that case takes the u branch too, over
-       the union of the supports and in four panels.
-     */
+    // far from the model's mean the posterior sits in both factors' tails
     bool const outlier =
       std::abs(fo_sq - mean_p) >= 4*std::sqrt(s*s + var_p)
       && s*s >= 0.09*var_p;  // a narrow measurement is still the posterior
@@ -651,10 +694,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
   }
 
   /// -ln L for one reflection, under whichever target is in force.
-  /** The quantity the refinement is minimising, per reflection. Reporting goes
-      through here rather than through a second implementation so that a
-      log-likelihood shown to the user cannot drift away from the target being
-      optimised.
+  /** Reporting goes through here so that a log-likelihood shown to the user
+      cannot drift away from the target being optimised.
 
       \return false for a reflection the target cannot use, whose contribution
               is then zero rather than undefined.
@@ -679,9 +720,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
         fo_sq, sigma_fo_sq, observable, alpha, beta, scale_factor, epsilon,
         centric, value, d_not_wanted);
     }
-    /* mlf::target_one_h returns 0 for a reflection it refuses, which is
-       indistinguishable from a genuine zero, so the guards are repeated here
-       to say which happened. They are the same ones, deliberately.
+    /* mlf::target_one_h returns 0 for a reflection it refuses, which looks
+       like a genuine zero, so its guards are repeated here
      */
     if (alpha <= 0 || beta <= 1e-3 || fo_sq <= 0 || observable <= 0
         || epsilon <= 0) {
@@ -694,13 +734,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
   }
 
   /// Summed -ln L over the working and the free reflections, and their counts.
-  /** The free sum is the log free likelihood, LL_free, which Tickle (2007)
-      argues should replace R_free as the statistic against which weighting
-      parameters are chosen: it is the same functional the refinement optimises,
-      evaluated on data the refinement never saw.
-
-      Counts accompany the sums because the two sets differ in size by an order
-      of magnitude and only the mean per reflection is comparable between them.
+  /** The free sum is LL_free, which Tickle (2007) proposes in place of R_free
+      for choosing weighting parameters: the optimised functional on data the
+      refinement never saw. Counts come along because only the mean per
+      reflection is comparable between the two sets.
 
       Reference: Tickle (2007) Acta Cryst. D63, 1274-1281.
    */
@@ -722,12 +759,9 @@ namespace smtbx { namespace refinement { namespace least_squares {
   };
 
   /** \param free_only evaluate the free reflections alone, leaving the working
-        sums zero. The free set is a tenth of the data, and for the intensity
-        target each reflection costs a twenty-node quadrature, so a caller that
-        only wants LL_free should say so: measured across eight structures,
-        computing both sums cost 12-21% of an MLI cycle and the free half of it
-        about a tenth of that. Ignored when no free set was given, since then
-        there is nothing to restrict to.
+        sums zero; for the intensity target each reflection costs a
+        quadrature, so a caller wanting only LL_free should say so. Ignored
+        when no free set was given.
    */
   template <typename FloatType>
   ml_log_likelihood_result<FloatType> ml_log_likelihood(

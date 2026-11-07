@@ -1,26 +1,14 @@
 """Model bias correction for the solvent map, with nothing outside cctbx.
 
-The difference map that fills the void is made with phases from a model that
-is missing the very atoms the void contains. The bias that produces is not
-small: on the synthetic cases it drives the integrated density in the void
-negative, so the whole void is discarded and the solvent is lost entirely.
+The void's difference map has phases from a model missing the void's content,
+which can drive the void integral negative and discard it. sigma_A weighting
+(Read, Acta Cryst. A42 (1986) 140) gives m*Fo - D*Fc in place of Fo - Fc.
 
-The standard cure is to weight the coefficients by how much the model can be
-trusted at each resolution - sigma_A, from Read, Acta Cryst. A42 (1986) 140 -
-giving m*Fo - D*Fc in place of Fo - Fc.
-
-smtbx.refinement.sigma_a does this already but reaches into mmtbx's compiled
-alpha_beta_est, which Olex2 does not ship. Everything needed is in cctbx: the
-binner, centric flags and epsilons off the miller array, and i1/i0 from
-scitbx.math. Nothing here imports mmtbx.
-
-alpha and beta come from the moments of each shell rather than from a
-likelihood maximisation, which is the cheap estimator and is what a difference
-map needs; the free-set caveat below is the price.
+smtbx.refinement.sigma_a needs mmtbx's compiled alpha_beta_est, which Olex2
+does not ship; nothing here imports mmtbx. alpha and beta come from shell
+moments, not a likelihood fit.
 """
 from __future__ import absolute_import, division, print_function
-
-import math
 
 from cctbx.array_family import flex
 import scitbx.math
@@ -33,15 +21,10 @@ def n_bins_for(n_reflections, per_bin=500, lo=5, hi=25):
 def alpha_beta(f_obs, f_calc, n_bins=None):
   """Per-reflection alpha and beta, by moments within resolution shells.
 
-  In a shell <Fo^2> = alpha^2 <Fc^2> + beta, and alpha is the scale that best
-  maps |Fc| onto Fo, so both follow from sums over the shell. beta is floored
-  at a small positive number: it is a variance, and a shell where the model
-  explains everything would otherwise divide by zero downstream.
-
-  **Estimated on the data being corrected**, there being no free set here. That
-  biases alpha up and beta down - the model looks better than it is - so this
-  under-corrects rather than over-corrects, which is the safe direction for a
-  map whose job is to reveal something the model does not have.
+  In a shell <Fo^2> = alpha^2 <Fc^2> + beta, alpha the least-squares scale of
+  |Fc| onto Fo. beta is a variance, floored above zero so a perfectly
+  explained shell does not divide by zero downstream. Estimated on the data
+  being corrected (no free set), so it under-corrects, the safe direction.
   """
   assert f_obs.indices().all_eq(f_calc.indices())
   if n_bins is None:
@@ -70,8 +53,7 @@ def alpha_beta(f_obs, f_calc, n_bins=None):
 def figure_of_merit(f_obs, f_calc, alpha, beta):
   """m, the expected cosine of the phase error, per reflection.
 
-  Rice for the acentric reflections and the hyperbolic tangent for the
-  centric ones, which is the same distinction mlf.h makes.
+  I1/I0 for acentric, tanh(x/2) for centric reflections, as in mlf.h.
   """
   fo = f_obs.data()
   fc = flex.abs(f_calc.data())
@@ -88,13 +70,9 @@ def figure_of_merit(f_obs, f_calc, alpha, beta):
 def difference_coefficients(f_obs, f_calc, n_bins=None):
   """m*Fo - D*Fc, as a complex miller array.
 
-  Drop-in for f_obs.f_obs_minus_f_calc(1/scale, f_calc): same set, same
-  phases, coefficients that know how far the model can be trusted.
-
-  f_obs may be real amplitudes or the complex array phase_transfer returns -
-  the mask calls it both ways, once before its loop and once inside. When it
-  is complex those are the combined phases and they are the ones to keep, so
-  the modulus becomes Fo and the phase is taken from it rather than from Fc.
+  Drop-in for f_obs.f_obs_minus_f_calc(1/scale, f_calc). f_obs may be real
+  amplitudes or the complex array phase_transfer returns; when complex, its
+  modulus is Fo and its (combined) phases are kept instead of Fc's.
   """
   phase_source = f_calc
   if isinstance(f_obs.data(), flex.complex_double):
@@ -115,53 +93,3 @@ def difference_coefficients(f_obs, f_calc, n_bins=None):
                               flex.double(sel.size(), 0))
   out.set_selected(sel, fc.select(sel)*scale)
   return f_calc.customized_copy(data=out)
-
-
-def solvent_electrons_from_f_mask(f_mask, n_shells=6, d_min_fit=None):
-  """Electrons in the solvent region, by extrapolating f_mask to (000).
-
-  The electron count of the solvent is its forward scattering, f_mask(000),
-  and that reflection is never measured. Integrating the map instead makes the
-  answer hostage to the map's mean level, which is exactly the quantity the
-  missing F(000) leaves undetermined - on a void filling 41% of the cell the
-  pedestal outweighs the solvent twentyfold.
-
-  A solvent region is a compact, smooth, positive blob, so |f_mask| falls off
-  smoothly from its value at the origin. Fitting ln|f_mask| against
-  d*^2 over the lowest shells and extrapolating to d*^2 = 0 estimates that
-  value directly, using the reflections where the solvent actually scatters
-  and nothing else.
-
-  Returns None when there are too few low-angle reflections to fit, rather
-  than a number nobody should trust.
-  """
-  fm = f_mask
-  if d_min_fit is not None:
-    fm = fm.resolution_filter(d_min=d_min_fit)
-  if fm.size() < 3*n_shells:
-    return None
-  work = fm.customized_copy(data=flex.abs(fm.data()), sigmas=None)
-  work.setup_binner(n_bins=max(n_shells, 3))
-  xs, ys = flex.double(), flex.double()
-  for i_bin in list(work.binner().range_used())[:n_shells]:
-    sel = work.binner().selection(i_bin)
-    if sel.count(True) < 3:
-      continue
-    mean = flex.mean(work.data().select(sel))
-    if mean <= 0:
-      continue
-    d_star_sq = flex.mean(work.d_star_sq().data().select(sel))
-    xs.append(d_star_sq)
-    ys.append(math.log(mean))
-  if xs.size() < 2:
-    return None
-  # straight line through ln|f_mask| against d*^2; the intercept is ln f(000)
-  n = xs.size()
-  sx, sy = flex.sum(xs), flex.sum(ys)
-  sxx, sxy = flex.sum(xs*xs), flex.sum(xs*ys)
-  denom = n*sxx - sx*sx
-  if abs(denom) < 1e-30:
-    return None
-  slope = (n*sxy - sx*sy)/denom
-  intercept = (sy - slope*sx)/n
-  return math.exp(intercept)

@@ -1,37 +1,14 @@
 """ Charge flipping run several times from different random starts, ranked.
 
-`charge_flipping.solving_iterator` already restarts itself when an attempt
-fails to reach a phase transition or a sharp correlation map -- by default up
-to 5x5 times -- but every restart is thrown away, and only
-`f_calc_solutions[0]` of the one attempt that finally worked is ever used.
-Which seed a run happens to start from therefore decides the outcome, and
-nothing compares the outcomes.
+`charge_flipping.solving_iterator` restarts itself when an attempt fails, but
+throws every restart away and uses only the attempt that finally worked. Here
+each attempt gets its own seed, exactly one try, and is kept as a scored
+candidate; the best is returned.
 
-This module does the same total amount of work differently: each attempt gets
-its own seed, is allowed exactly one try, and is *kept*. What was an invisible
-retry becomes a scored candidate, and the best of them is returned.
-
-Measured over 377 Crystallography Open Database entries with real measured
-data, scoring peak positions against the deposited model with
-`cctbx.euclidean_model_matching`, the solution rate roughly doubles.
-
-**Candidates are ranked by R1; the correlation peak height decides only when
-a trial counts as a solution and when the run may stop early** (see `solve`:
-"R separates right from wrong where the correlation peak does not"). What
-follows is why chemistry is not used either, and it still holds.
-
-On the peak height as a ranker, the history is worth stating plainly, because
-it is not what one would guess and not what this started as.
-Chemical plausibility of the peak list -- the fraction of peaks with a
-neighbour at a bonding distance -- looks like the better signal on a single
-structure, and is actively harmful at corpus scale: it correlates -0.08 with
-correctness among candidates worth ranking, against +0.38 for the correlation
-peak height, and choosing by it costs about half the solutions. A ranker is
-easy to make worse while making it look more principled, so anything added
-here should be measured with `notes/bench_cf.py` first.
-
-References: the algorithm itself is in `charge_flipping.py`; see the papers
-cited there.
+Candidates are ranked by R1; the correlation peak height decides only whether
+a trial counts as a solution and when the run may stop early. Chemical
+plausibility of the peak list (the fraction of peaks with a bonded neighbour)
+is not used: across many structures it does not correlate with correctness.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -47,11 +24,9 @@ from smtbx.ab_initio import charge_flipping
 def phases_from_seed(seed):
   """ A reproducible random starting phase set for one trial.
 
-  Deliberately a private generator rather than `flex.set_random_seed`, which
-  seeds two process-global generators and so would reach into whatever else the
-  process is doing -- and, in a GUI, make the result depend on what the user
-  did beforehand. Seeds are what makes a trial differ from its neighbours, so
-  they have to be under this module's control.
+  A private generator rather than `flex.set_random_seed`, which seeds two
+  process-global generators and would make the result depend on whatever else
+  the process (a GUI) did beforehand.
   """
   import scitbx_array_family_flex_ext as flex_ext
   generator = flex_ext.mersenne_twister(seed=seed)
@@ -80,14 +55,7 @@ class _abortable(object):
 
 def solve(f_obs,
           n_trials=8,
-          # 0.20 measured over a uniform sample of the Crystallography Open
-          # Database: success is a clean interior maximum there (0.812, against
-          # 0.802 at 0.25 and 0.788 at 0.30), and switching the treatment off
-          # entirely costs 8.9 points -- so the Oszlanyi-Suto weak-reflection
-          # step earns its place and only its tuning was ever in question.
-          # An earlier 0.3 here was fitted on an unrepresentative corpus and
-          # was 2.4 points worse than this, which is also the value Olex2 has
-          # always used.
+          # the measured optimum, and the value Olex2 has always used
           weak_reflection_fraction=0.2,
           normalisations_for=charge_flipping.amplitude_quasi_normalisations,
           max_solving_iterations=500,
@@ -97,11 +65,8 @@ def solve(f_obs,
           # keeps, and a structure whose trials transition one time in ten
           # wants more of them, longer; every round starts from fresh seeds.
           fallbacks=(# first: a map that flipped but whose symmetrisation peak
-                     # stays just under 0.9 (0.82-0.87 measured on the whole-COD
-                     # no-solution set, 24 Sep 2026) needs no new physics, only
-                     # a lower bar; the R ranking and the caller judge the model,
-                     # no solution at all is worse - and as the last round it
-                     # was the one the 120 s budget cut most often
+                     # stays just under 0.9 needs only a lower bar; the R
+                     # ranking and the caller judge the model
                      dict(min_cc_peak_height=0.75),
                      dict(weak_reflection_fraction=0.3),
                      dict(normalisations_for=None),
@@ -123,10 +88,8 @@ def solve(f_obs,
           keep_solutions=False,
           loop=None,
           callback=None,
-          # Trials on threads. 1 keeps the shipped serial path exactly;
-          # the default is read from SMTBX_SOLVE_THREADS so the two can be
-          # A/B'd without touching a caller. Only useful because the cctbx
-          # 3D FFT wrappers now release the GIL.
+          # trials on threads (the cctbx 3D FFTs release the GIL); 1 is the
+          # serial path, None reads SMTBX_SOLVE_THREADS
           n_threads=None,
           # Polled by the main thread while trials run on threads; True
           # cuts the running trials short and abandons the rest.
@@ -134,35 +97,30 @@ def solve(f_obs,
           verbose=False,
           out=None,
           # data cut to this resolution before solving: a fallback for a
-          # structure whose full data set will not flip (24 Sep 2026)
+          # structure whose full data set will not flip
           d_min=None,
           # the solving iterator's threshold for a symmetrisation peak to be
           # a solution; None keeps its own (0.9)
           min_cc_peak_height=None,
-          # how far the seeds of a fallback round move on from this round's;
-          # None moves them past the trials just run. parallel_trials passes
-          # its total trial count, so that each worker's fallback seeds are the
-          # serial run's again and never another worker's.
+          # how far a fallback round's seeds move on from this round's; None
+          # moves them past the trials just run. parallel_trials passes its
+          # total trial count, so no worker reuses another worker's seeds
           fallback_seed_stride=None,
-          # the first call's settings, so that every fallback round overrides
-          # those and not the previous round's (24 Sep 2026)
+          # the first call's settings, so every fallback round overrides those
+          # and not the previous round's
           _base=None):
   """ n_trials seeded charge-flipping runs; the best solution found.
 
   Returns a group_args with `f_calc`, `shift`, `cc_peak_height` and `r1` of the
-  winner -- the same tuple `solving_iterator.f_calc_solutions` holds, so a
-  caller that used to take `f_calc_solutions[0]` can use this unchanged -- plus
-  `trials`, a record of every run, and `n_trials_run`, which is less than
-  `n_trials` when the search stopped early. `f_calc` is None if nothing solved.
+  winner (the tuple `solving_iterator.f_calc_solutions` holds), `trials`, a
+  record of every run, and `n_trials_run`. `f_calc` is None if nothing solved.
 
-  loop, when given, replaces `charge_flipping.loop` for driving one trial. Olex2
-  passes its own so that the progress plot and the stop button keep working;
-  it must accept (solving_iterator, verbose=, out=) and, if it returns a false
-  value, is taken to mean the user asked to stop.
+  loop, when given, replaces `charge_flipping.loop` for one trial (Olex2 passes
+  its own for the progress plot and stop button); it takes (solving_iterator,
+  verbose=, out=), and returning False means the user asked to stop.
 
-  callback(i_trial, n_trials, result) after each trial, for progress reporting.
-  Returning False from it stops the search, so the same hook serves as a second
-  route for cancellation.
+  callback(i_trial, n_trials, result) runs after each trial; returning False
+  stops the search.
   """
   import sys
   import time
@@ -185,26 +143,11 @@ def solve(f_obs,
   t_start = time.time()
   stopped_because = None
 
-  # Non-random starting points, if any were supplied, are used first and the
-  # remaining trials fall back to random seeds. Ordering them first matters:
-  # the search stops early once a trial is good enough, so a better starting
-  # point only pays if it is tried before the random ones.
+  # supplied starts are added to the random ones, not substituted, and go
+  # first so that a good one ends the run early
   supplied = list(initial_phases_list or [])
 
-  # Supplied starts are **added to** the random ones, not substituted for them.
-  # Substituting was measured and cost 6 of 288 control structures that had
-  # solved before: with 8 trials and 4 supplied starts only 4 random trials
-  # remained, and four of the six losses still found *a* solution (cc 0.95-0.98)
-  # -- they lost the particular random trial that had happened to work, not the
-  # ability to solve. Adding keeps every random chance and layers the better
-  # starting points on top.
-  #
-  # The extra trials are cheaper than they look: the search stops as soon as a
-  # trial is good enough, and supplied starts go first precisely so that a good
-  # one ends the run early.
-  # **The per-trial computation, lifted out of the loop unchanged.**
-  # Both the serial and the threaded path call this, so the two cannot drift:
-  # what differs between them is only WHEN a trial runs, never what it does.
+  # one trial; shared by the serial and the threaded path so they cannot drift
   def _compute_trial(i_trial, trial_out, abort=None):
     seed = first_seed + max(0, i_trial - len(supplied))
     t0 = time.time()
@@ -218,9 +161,7 @@ def solve(f_obs,
                           else phases_from_seed(seed)),
       yield_solving_interval=yield_solving_interval,
       max_solving_iterations=max_solving_iterations,
-      # One try per trial. The retries the solving iterator would do on its own
-      # are exactly what this loop is taking over, and leaving them switched on
-      # would mean each trial silently doing up to 25 runs and reporting one.
+      # one try per trial: this loop takes over the iterator's own retries
       max_attempts_to_get_phase_transition=1,
       max_attempts_to_get_sharp_correlation_map=1,
       **({} if min_cc_peak_height is None
@@ -233,24 +174,14 @@ def solve(f_obs,
       if loop(target, verbose=verbose, out=trial_out) is False:
         user_stopped = True
     except Exception as e:
-      # One trial failing is not the run failing: seven others may yet solve
-      # the structure, and a solution path that dies on the first awkward map
-      # is worse than one that reports what went wrong at the end.
+      # one trial failing is not the run failing; reported at the end
       error = "%s: %s" % (type(e).__name__, str(e)[:200])
 
-    # Every solution the trial found, not just the first. The list is ordered
-    # by correlation peak height, which is also the ranking key, so the head of
-    # each list is what competes -- but the whole list is recorded, because
-    # `charge_flipping` only appends solutions above `min_cc_peak_height` and
-    # a trial that found several says something about its quality.
+    # every solution the trial found, not just the first
     solutions = list(getattr(solving, "f_calc_solutions", None) or [])
-    # The unsymmetrised P1 structure factors this trial ended on. Every
-    # solution in the list above has had the assumed space group imposed on it
-    # by `f_calc_symmetrisations`, so this is the only form that still carries
-    # what the data alone said -- which is what a symmetry search has to be
-    # given if its answer is to mean anything. `clean_up` deletes the state
-    # machine's generators but leaves the flipping iterator, so reading it here
-    # is safe.
+    # the unsymmetrised P1 structure factors, the only form without the
+    # assumed space group imposed, which a symmetry search needs; `clean_up`
+    # leaves the flipping iterator, so reading it here is safe
     f_calc_in_p1 = getattr(solving.flipping_iterator, "f_calc", None)
     result = trial_result(
       seed=seed,
@@ -261,29 +192,17 @@ def solve(f_obs,
       r1=(solutions[0][3] if solutions else None),
       seconds=time.time() - t0,
       error=error,
-      # Off by default: a caller only wants the winner, and holding every
-      # trial's f_calc keeps n_trials miller arrays alive for no purpose. The
-      # benchmark turns it on, so that it can ask what the best *available*
-      # answer was and measure how much the ranking gave away.
+      # off by default, to not keep n_trials miller arrays alive; a benchmark
+      # turns it on to judge the ranking
       solutions=(solutions if keep_solutions else None),
       f_calc_in_p1=f_calc_in_p1)
-    # `user_stopped` travels with the result: the bookkeeping below reads
-    # it, and it is set inside this function.
     return result, solutions, user_stopped
 
-  # Charge flipping is ~100% cctbx FFT (measured 30 Aug 2026: 177 cycles x
-  # 1.49 ms accounts for a whole 0.264 s trial), and those transforms now
-  # release the GIL, so trials genuinely run in parallel on threads -- 2.84x
-  # on four. Before that change threading scored 0.97x and this would have
-  # been pointless.
-  #
-  # **The answer must not change.** Serial stops as soon as a trial is good
-  # enough, so simply keeping the best of all n would sometimes return a
-  # BETTER solution than the shipped code -- a different answer, which is not
-  # what a speed-up may do. So the trials are computed concurrently and then
-  # the untouched bookkeeping below walks them in seed order and stops
-  # exactly where it would have stopped. Trials past that point are computed
-  # and discarded; that waste is the price of the parallelism.
+  # Charge flipping is almost all cctbx FFT, which releases the GIL, so trials
+  # run in parallel on threads. The answer must equal the serial one: trials
+  # are computed concurrently, then the bookkeeping below walks them in seed
+  # order and stops exactly where serial would; trials past that point are
+  # discarded.
   #
   # `max_seconds`, `stop` and a good-enough trial raise `halt` = (reason,
   # index): trials not yet started stay None, running ones past the index are
@@ -309,8 +228,7 @@ def solve(f_obs,
         try:
           slots[i] = _compute_trial(i, bufs[i], abort=lambda: i > halt[1])
         except Exception as e:
-          # Mirrors the per-trial error handling inside _compute_trial: one
-          # thread dying must not take the run down.
+          # one thread dying must not take the run down
           slots[i] = (trial_result(
             seed=first_seed + max(0, i - len(supplied)), n_solutions=0,
             had_phase_transition=False, cc_peak_height=None, r1=None, seconds=0.0,
@@ -337,8 +255,7 @@ def solve(f_obs,
         elif (max_seconds is not None
               and time.time() - t_start >= max_seconds):
           halt[0] = "out_of_time"
-    # Per-trial buffers, replayed in order: threads writing to one `out`
-    # would interleave their lines into nonsense.
+    # per-trial buffers replayed in order, so thread output never interleaves
     for b in bufs:
       out.write(b.getvalue())
     precomputed = slots
@@ -363,18 +280,14 @@ def solve(f_obs,
       stopped_because = "cancelled"
     if user_stopped:
       stopped_because = "cancelled"
-    # A trial this good is right about 95 times in 100 (measured), so spending
-    # the remaining trials to confirm it is not worth the wait. Below that the
-    # correlation peak height barely separates right from wrong at all, which
-    # is why there is no lower bar: it would stop early on the wrong answer.
+    # a trial this good is almost always right; below it the peak height
+    # barely separates right from wrong, so there is no lower bar
     if (best is not None and good_enough_cc_peak_height is not None
         and best[2] >= good_enough_cc_peak_height and best[3] <= good_r1):
       stopped_because = "good_enough"
     if (max_seconds is not None and precomputed is None
         and time.time() - t_start >= max_seconds and stopped_because is None):
-      # A bound for the interactive case, where a structure that will not solve
-      # must not hold the GUI for minutes. Deliberately checked after a whole
-      # trial: interrupting one leaves nothing usable behind.
+      # checked after a whole trial: interrupting one leaves nothing usable
       stopped_because = "out_of_time"
     if stopped_because is not None:
       break
@@ -387,8 +300,7 @@ def solve(f_obs,
     shift=(best[1] if best else None),
     cc_peak_height=(best[2] if best else None),
     r1=(best[3] if best else None),
-    # The winning trial's P1 structure factors, for a symmetry search that must
-    # not be handed a map the assumed space group has already been imposed on.
+    # unsymmetrised, for the symmetry search
     f_calc_in_p1=(best_trial.f_calc_in_p1 if best_trial else None),
     best_seed=(best_trial.seed if best_trial else None),
     trials=trials,

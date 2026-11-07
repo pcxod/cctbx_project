@@ -126,14 +126,9 @@ def exercise_restraints():
 def exercise_restraint_weight_scale():
   """ restraints_weight_scale shall reach both solvers, and reach them alike.
 
-  The restraints are applied twice over in this codebase: build_up puts them
-  into the normal equations, and cgls._add_restraints puts them into the
-  linearised problem separately. A multiplier added to one and not the other
-  would leave the direct solver and the conjugate gradients refining different
-  problems, which no existing test would catch because each is self-consistent.
-
-  So this checks both that the knob does something and that it does the same
-  thing on both routes.
+  build_up and cgls._add_restraints apply the restraints separately, so a
+  multiplier missing from one would have the two solvers refine different,
+  each self-consistent, problems.
   """
   from cctbx import geometry_restraints
   from smtbx.refinement import restraints

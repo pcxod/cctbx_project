@@ -2,11 +2,9 @@
 
     <python> _trial_worker.py <job.pickle> <out.pickle> <first_seed> <n_trials>
 
-The parent hands over its own `sys.path`, rather than the worker working out
-where cctbx lives. Inside Olex2 the interpreter is embedded and libtbx's
-environment is already configured; a worker that tried to rediscover it goes
-looking for paths like `C:\\Python38\\Library\\share\\cctbx` that do not exist.
-Whatever the parent is successfully importing from is by definition right.
+The parent hands over its own `sys.path`: inside Olex2 the interpreter is
+embedded, and a worker rediscovering the libtbx environment looks for paths
+that do not exist.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -34,19 +32,14 @@ def main(argv):
     weak_reflection_fraction=job["weak_reflection_fraction"],
     normalisations_for=charge_flipping.amplitude_quasi_normalisations,
     max_solving_iterations=job["max_solving_iterations"],
-    # Each worker holds only its own best, so the early exit still applies
-    # within a worker but cannot stop the others. That is deliberate: a worker
-    # that finds a good solution should stop, and the rest are already running.
+    # the early exit stops this worker only
     good_enough_cc_peak_height=job["good_enough_cc_peak_height"],
-    # Fallback rounds would otherwise start at first_seed + n_trials, which is
-    # the next worker's block: same settings, same starting phases, the same
-    # trials run twice. Moving by the total keeps every worker on seeds of its
-    # own, the very ones the serial run would use for that round.
+    # fallback rounds step by the total, not by n_trials, which would land on
+    # the next worker's seeds; this gives the seeds the serial run would use
     fallback_seed_stride=job.get("n_trials_total"),
     out=open(out_path + ".log", "w"))
 
-  # Only what the parent needs. Whole trial records would drag every trial's
-  # miller arrays through the pickle for no purpose.
+  # only what the parent needs, not every trial's miller arrays
   payload = dict(
     cc_peak_height=result.cc_peak_height,
     # multi_trial ranks by R1, and so must the parent across workers

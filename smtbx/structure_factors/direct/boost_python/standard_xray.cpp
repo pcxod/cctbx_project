@@ -178,13 +178,9 @@ namespace smtbx { namespace structure_factors { namespace direct {
     struct scatterer_contribution_wrapper {
       typedef one_scatterer_one_h::scatterer_contribution<FloatType> wt;
 
-      // the form factor of every symmetry equivalent, h R_i, for an aspherical
-      // contribution
-      /* From Python an index is checked before it reaches the lookups, which
-         the refinement loops run unchecked: past the end is an IndexError,
-         not a read of whatever lies there. A contribution that does not
-         implement one of the two (get for the aspherical ones, get_full for
-         the spherical ones) raises from inside it.
+      /* the lookups are unchecked for the refinement loops, so Python gets an
+         IndexError here instead of a read past the end. A contribution that
+         does not implement get or get_full raises from inside it
        */
       static void check_index(wt const &self, std::size_t scatterer_index) {
         std::size_t const n = self.n_scatterers();
@@ -202,6 +198,7 @@ namespace smtbx { namespace structure_factors { namespace direct {
         return self.get(scatterer_index, h);
       }
 
+      // the form factor of every symmetry equivalent h R_i
       static af::shared<std::complex<FloatType> > get_full(wt const &self,
         std::size_t scatterer_index, miller::index<> const &h)
       {
@@ -282,11 +279,10 @@ namespace smtbx { namespace structure_factors { namespace direct {
               arg("space_group"),
               arg("anomalous_flag"),
               arg("scattering_type_registry"),
-              // the Miller indices this table will ever be asked for; empty keeps
-              // every row, which is what it did before
+              // the Miller indices that will be asked for; empty keeps every row
               arg("wanted") = af::shared<cctbx::miller::index<> >(),
               // a .tshb that misses atoms is an error unless this is set;
-              // tables fall back on spherical form factors as before
+              // tables always fall back on spherical form factors
               arg("allow_spherical_fallback") = false),
             return_value_policy<manage_new_object>())
           .staticmethod("build_with_fallback")

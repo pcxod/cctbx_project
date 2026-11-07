@@ -15,22 +15,12 @@
 
 namespace scitbx { namespace fftpack { namespace {
 
-  // Release the GIL around a transform that works on a whole map.
-  //
-  // These are pure C++ over buffers owned by the call: cctbx constructs a
-  // fresh real_to_complex_3d / complex_to_complex_3d for every fft_map (see
-  // cctbx/miller/__init__.py), and `map` refers to the caller's own array, so
-  // two threads are never inside the same state here.
-  //
-  // Holding the GIL through them made charge flipping unparallelisable.
-  // Measured 30 August 2026: ~100% of a charge-flipping trial IS these two
-  // transforms -- 177 cycles x 1.49 ms accounts for the whole 0.264 s trial --
-  // and four threads running fft_map scored 0.97x. All the work is in C++ and
-  // only one thread could be inside it at a time. Nothing else in
-  // scitbx/fftpack or cctbx/maptbx releases the GIL.
-  //
-  // Only the map-based overloads are wrapped; the 1-D ones take `a.begin()`
-  // and are short enough that the save/restore pair would not pay for itself.
+  /* releases the GIL around a whole-map transform, which charge flipping
+  otherwise serialises across threads. Pure C++ on buffers owned by the call:
+  cctbx builds a fresh transform object for every fft_map and `map` is the
+  caller's array, so no two threads share state. The 1-D overloads are too
+  short to pay for the save/restore
+  */
   struct gil_release
   {
     gil_release() : state_(PyEval_SaveThread()) {}

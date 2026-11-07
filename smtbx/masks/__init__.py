@@ -13,20 +13,15 @@ from six.moves import range
 def hydrogens_at_common_length(xray_structure, x_h_length, max_bond=1.3):
   """ A copy with every H moved along its bond to x_h_length from its parent.
 
-  x_h_length is one length for all, or a dict by parent element symbol (any
-  case), e.g. neutron distances; an H whose parent element is not in the dict
-  stays where it is and is listed with those without parent.
+  For drawing a solvent region only: the region is filled from the difference
+  map, so where a model puts its H decides its volume, and an aspherical model
+  (longer X-H) would otherwise get less region than IAM.
 
-  For drawing a solvent region only. The region is filled from the observed
-  difference map, so the volume it covers is volume whose residual it cancels,
-  and where a model puts its H atoms decides that volume. An aspherical model
-  puts them 0.1 A further out than IAM and so is left with ~220 A^3 less
-  region on 1EJG, and a worse R1 and e_gross for it. With one length for every
-  model the region no longer depends on that.
-
-  The parent is the nearest non-H atom within max_bond under any symmetry
-  operation, and of the same PART as the H or of PART 0 (an H in PART 0 takes
-  any). An H with no parent is left where it is; their labels are returned.
+  x_h_length is one length, or a dict by parent element symbol (any case).
+  The parent is the nearest non-H within max_bond under any symmetry
+  operation, of the H's PART or PART 0 (an H in PART 0 takes any). An H with
+  no parent, or whose parent element is not in the dict, stays put; their
+  labels are returned.
   """
   xs = xray_structure.deep_copy_scatterers()
   scatterers = xs.scatterers()
@@ -71,12 +66,9 @@ def hydrogens_at_common_length(xray_structure, x_h_length, max_bond=1.3):
 def _void_iselections(mask_data, n_voids):
   """ The grid points of each void (label j+2), one selection per void.
 
-  One pass over the grid. Comparing the whole grid against each label in turn
-  is a pass per void, and a van der Waals-only region of a protein falls apart
-  into thousands of voids: on a 39.8M point grid with 1569 voids (30OR's van
-  der Waals-only region) 40 s against 0.8 s here, same selections. Within a void
-  the indices ascend, as iselection() gives them, so a sum over a selection is
-  the same bit for bit.
+  One pass over the grid, not one per void (a protein region can have
+  thousands). Indices ascend within a void, as iselection() gives them, so
+  sums over a selection are bit-identical.
   """
   import numpy as np
   labels = mask_data.as_numpy_array().ravel()
@@ -118,11 +110,10 @@ class solvent_accessible_volume(object):
           use_space_group_symmetry=use_space_group_symmetry))
     else:
       self.crystal_gridding = crystal_gridding
-    # ignore_hydrogen_atoms was accepted and silently ignored before. With H
-    # in, an aspherical model's longer X-H bonds take ~220 A^3 out of the
-    # solvent of 1EJG against IAM, and that alone is why its mask holds fewer
-    # electrons. Leaving H out (as mmtbx does) still measured worse on held-out
-    # reflections there (R1_free +1.3 %), so it stays off by default.
+    # ignore_hydrogen_atoms is now honoured; off by default, as leaving H out
+    # (as mmtbx does) measured worse on held-out reflections
+    # old: drew around xray_structure itself, H always in:
+    # region = xray_structure
     region = self.region_structure
     if ignore_hydrogen_atoms:
       region = xray_structure.select(~xray_structure.hd_selection())
@@ -167,20 +158,17 @@ class solvent_accessible_volume(object):
   def void_iselection(self, i):
     """ The grid points of void i, as indices into the mask's grid.
 
-    Built once, on first use: the mask does not change after it is computed.
-    structure_factors used to compare the whole grid against each label, and
-    then copy and zero a whole map to sum one void, every iteration: four to
-    five passes over the grid per void per iteration, 39 ms an iteration for
-    four voids on a 1.7M point grid. Summing the selected points instead costs
-    a pass over the void alone.
+    Built once on first use (the mask is fixed), so summing a void costs a
+    pass over the void, not over the grid.
     """
     if self._void_isel is None:
       self._void_isel = _void_iselections(self.mask.data, self.n_voids())
     return self._void_isel[i]
 
   def n_solvent_grid_points(self):
-    # the flood fill has counted them already; counting label by label is a
-    # pass over the grid per void
+    # old: a pass over the grid per void; the flood fill has counted them
+    # return sum([self.mask.data.count(i+2) for i in range(self.n_voids())
+    #             if not self.exclude_void_flags[i]])
     per_void = self.flood_fill.grid_points_per_void()
     return sum([per_void[i] for i in range(self.n_voids())
                 if not self.exclude_void_flags[i]])
@@ -215,81 +203,42 @@ class mask(object):
       self.complete_set = None
     self.mask = None
     self.solvent_radius = None
-    # width of the boundary smearing, as a multiple of the solvent radius.
-    # Zero reproduces the hard-edged mask exactly. See solvent_weight_map.
+    # boundary smearing width in units of solvent_radius; 0 is the hard-edged
+    # mask exactly. See solvent_weight_map
     self.boundary_smearing = 0
-    # Fold the outward half of the taper away, so that it runs from zero at
-    # the boundary inwards. A symmetric kernel already puts the half weight
-    # point on the boundary, and folding there keeps the mask off the atoms
-    # the boundary was drawn around. It costs about a fifth of the region
-    # volume and the electrons in it, and it cannot be exact where the
-    # boundary is concave, so it measured worse than the default on two
-    # proteins once solvent_d_min was set. Off unless that trade is
-    # wanted.
+    # fold the outer half of the taper away so it runs from 0 at the boundary
+    # inwards: keeps the mask off the atoms, costs region volume, and is not
+    # exact where the boundary is concave
     self.boundary_smearing_inward = False
-    # Hold the density inside the void at or above zero. The difference map is
-    # made with phases from a model that is missing the very atoms the void
-    # contains, and that bias routinely drives the integral negative; the code
-    # below then throws the whole void away. Electrons are not negative, so
-    # this is a statement about the map and not about the structure.
+    # hold the void density >= 0: phases from a model missing the void's
+    # content drive the integral negative, and a negative void is dropped
     self.void_positivity = False
-    # Floor for the positivity constraint, in sigma of the difference map.
-    # Clamping at zero rectifies noise: over the empty part of the void the
-    # map is zero mean, and max(rho, 0) turns every negative fluctuation
-    # positive, adding about V*sigma/sqrt(2 pi) of electrons that are not
-    # there. Subtracting a floor of order the noise first removes that
-    # pedestal and keeps the density that rises above it, which is the same
-    # device as the threshold in charge flipping.
+    # floor for void_positivity in sigma of the difference map: clamping at 0
+    # rectifies zero-mean noise into ~V*sigma/sqrt(2 pi) of false electrons,
+    # subtracting a noise-sized floor first removes that (as in charge flipping)
     self.void_positivity_threshold = 0.
-    # Resolution limit, in Angstrom, of the data used to find the solvent.
-    # Disordered solvent scatters only at low angle, so the high angle
-    # reflections carry no information about it - what they do carry is the
-    # model's own error, and cutting a region out of a map built from them
-    # launders that error into f_mask. This is not damping f_mask: the
-    # measured solvent density is all at low angle and stays, and f_mask is
-    # still evaluated for every reflection. None uses all the data, which is
-    # what the method did before.
+    # d_min (A) of the coefficients the solvent map is built from. Disordered
+    # solvent scatters only at low angle; the high-angle terms carry only model
+    # error into f_mask. f_mask itself is still evaluated for every reflection.
+    # None uses all data
     self.solvent_d_min = None
-    # Weight the difference coefficients by how far the model can be trusted,
-    # m*Fo - D*Fc instead of Fo - Fc. The bias this corrects is one reason the
-    # void integrates negative; see smtbx.masks.bias, which needs no mmtbx.
-    # Never yet judged on a refinement, only on the electron counts it gives,
-    # which this module's history says is not enough to conclude from.
+    # m*Fo - D*Fc instead of Fo - Fc (smtbx.masks.bias), against the model
+    # bias that drives voids negative
     self.bias_correction = False
-    # Give back the solvent that partially occupied atoms wrongly exclude.
-    # around_atoms knows sites and radii and no occupancies, so a quarter
-    # occupancy side chain reaching into what would be solvent excludes bulk
-    # solvent from all of that volume rather than a quarter of it. See
-    # occupancy_weight_map. On by default: judged on held-out reflections over
-    # five structures, best where the correction is large (R_free 0.1922 to
-    # 0.1855) and never worse. A structure with no partial atoms takes the
-    # early return below and is untouched.
-    # Since then measured worse on two proteins, the mask built from the
-    # working set and judged on held-out reflections with the models fixed:
-    # switching it off changed R1_free by -1.3/-0.8 % on 1EJG (IAM/GARLIC, a
-    # random 5 %) and -2.8/-2.2 % on 30OR (the depositors' free set; 64 % of
-    # its atoms partial). The volume it gives back lies against the atoms,
-    # where the difference map holds the model's residual and not solvent.
+    # give back the solvent partial atoms wrongly exclude: around_atoms has no
+    # occupancies, so a quarter-occupied side chain excludes all of its volume.
+    # See occupancy_weight_map; no effect without partial atoms
     self.occupancy_weighting = True
-    # How far below one an occupancy has to be before the atom counts as
-    # partial. Refined free variables land a little off exact values, and a
-    # structure where every atom is at 0.999 should behave as though it were
-    # fully occupied.
+    # an atom counts as partial below 1 - this, so refined occupancies of
+    # 0.999 behave as full
     self.occupancy_full_tolerance = 0.01
-    # How Fc for the difference map is computed: "direct" (as always) or
-    # "fft". The direct sum goes as reflections x atoms and is the largest
-    # single cost of the mask stage once a structure has a few hundred atoms:
-    # measured at 0.66 s for 300 atoms in the asymmetric unit, 27,000
-    # reflections, against 41 ms for a transform pair at the mask's grid. The
-    # map it feeds is only cut into solvent regions, so the FFT's accuracy is
-    # ample - but it is a change of numbers, hence not the default.
+    # Fc for the difference map: "direct" or "fft". FFT is much cheaper for
+    # large structures and accurate enough for a map that is only cut into
+    # regions, but it changes the numbers, hence not the default
     self.f_calc_algorithm = "direct"
-    # What counts as one disorder group in occupancy_weight_map: 'value' takes
-    # every atom of one occupancy as one group, 'part' every atom of one PART
-    # and occupancy. With 'value', two alternates at 0.5/0.5 are one group
-    # counted once, so their overlap gets 0.5 back instead of nothing. 'part'
-    # is the correct bookkeeping but measured no better on 30OR (R1_free
-    # +0.02/+0.03 %, IAM/GARLIC), so 'value' stays the default.
+    # disorder group in occupancy_weight_map: 'value' groups atoms by
+    # occupancy, 'part' by (PART, occupancy). With 'value' two 0.5/0.5
+    # alternates are one group, so their overlap gets 0.5 back instead of 0
     self.occupancy_groups = 'value'
     self._f_mask = None
     self._masked_diff_map = None
@@ -309,10 +258,8 @@ class mask(object):
               use_space_group_symmetry=False,
               x_h_length=None):
     """x_h_length: draw the region with every H at this distance from its
-    parent (see hydrogens_at_common_length), so that models placing their H
-    differently - IAM and aspherical - get the same region. None uses the
-    model's own H positions, as before. On 1EJG with 1.09 the aspherical
-    model's R1 penalty against IAM turned into a gain; untested elsewhere.
+    parent (see hydrogens_at_common_length), so that IAM and aspherical models
+    get the same region. None uses the model's own H positions.
     """
     if grid_step is not None: d_min = None
     else: d_min = self.fo2.d_min()
@@ -346,42 +293,19 @@ class mask(object):
   def solvent_weight_map(self):
     """ Where the solvent region is, as a weight in [0, 1] rather than a step.
 
-    The region is cut out of the difference map with a hard edge, and a step
-    that sharp has a transform which does not decay.
-
-    On its own that turns out to matter little. On a high-resolution
-    protein |f_mask| holds about 30% of |Fc| in every shell out to 0.54 A, which no disordered
-    solvent can do, and it is tempting to read that as the edge - but smearing
-    the edge does not remove it. At a width of 1.0 the electron count moves by
-    23% and the shell profile by 0.3%. Most of that content comes from the
-    difference map itself, which carries the model's own error at atomic
-    resolution straight through the region cut; solvent_d_min is what removes
-    it, and this only becomes worth setting once that is done.
-
-    What must not be done is to damp f_mask itself. This is not a protein bulk
-    solvent model: the density inside the region comes from the observed
-    difference map, so a Gaussian on f_mask would attenuate measured solvent
-    density, and hardest exactly where the data are weakest. Only the edge is
-    touched here - the weight is 1 throughout the interior, so the observed
-    density there passes through untouched, and tapers to 0 across the
-    boundary.
-
-    The edge is not knowable more sharply than the probe that traced it, which
-    is what sets the width: boundary_smearing * solvent_radius.
-
-    maptbx.smooth_map builds a full box of structure factors from the map, so
-    the work goes as the grid and not as the boundary being smoothed. Measured
-    on a protein at a 0.12 A step, 8.3M points, that is 1.4 s for the weight and
-    1.3x the mask stage overall - not free, not a problem.
+    A hard edge has a transform that does not decay. Only the edge is
+    tapered, over boundary_smearing * solvent_radius (the edge is not known
+    more sharply than the probe that traced it); the interior keeps weight 1.
+    f_mask itself must never be damped: the region holds observed density,
+    and damping would attenuate measured solvent where the data are weakest.
+    Most high-angle content of f_mask is model error from the difference map,
+    which solvent_d_min removes, not this.
     """
     # built by assignment rather than as_double() of a comparison, which
     # would drop the 3D accessor the map needs
     hard = self.mask.data.as_double()
     hard.set_selected(hard > 0, 1.)
-    # computed once and added on whichever path returns. Putting it only after
-    # the smearing branch left it unreachable at the default of no smearing,
-    # and the whole correction silently did nothing - four structures came back
-    # bit-identical with it on and off, which is what exposed it.
+    # added on both return paths; the unsmeared one must not skip it
     correction = (self.occupancy_weight_map() if self.occupancy_weighting
                   else None)
     if not self.boundary_smearing:
@@ -399,11 +323,8 @@ class mask(object):
       rad_smooth=self.boundary_smearing*self.solvent_radius,
       method="exp")
     if self.boundary_smearing_inward:
-      # a smoothed step is 1/2 on the surface it came from, so 2w - 1 clipped
-      # to [0, 1] is the same taper with its outer half folded away: zero on
-      # the boundary, one where the kernel no longer reaches out of the
-      # region. Costs region volume, which is the price of not reaching into
-      # the model's density.
+      # a smoothed step is 1/2 on its surface, so 2w - 1 clipped to [0, 1] is
+      # the same taper with its outer half folded away
       w = w*2. - 1.
       w.set_selected(w < 0, 0.)
       w.set_selected(w > 1., 1.)
@@ -415,23 +336,15 @@ class mask(object):
   def occupancy_weight_map(self):
     """ Solvent the region cut wrongly threw away, because atoms are partial.
 
-    cctbx::masks::around_atoms takes sites and radii and **no occupancies**, so
-    a side chain at quarter occupancy excludes bulk solvent from all of the
-    volume it touches instead of a quarter of it. Three quarters of that volume
-    still holds solvent and currently holds none. Afonine et al. (2024) name
-    this as one of the three failings of the flat model, and note that the
-    error does not stay in the solvent: it surfaces as residual density over
-    each conformer, or gets absorbed into wrongly refined occupancies and ADPs.
+    around_atoms has no occupancies, so a quarter-occupied side chain excludes
+    solvent from all of its volume instead of a quarter (Afonine et al. 2024).
+    A grid point covered only by groups of total occupancy q gets solvent
+    weight 1 - q. Groups are the distinct occupancies, or (PART, occupancy)
+    with occupancy_groups 'part'.
 
-    The correction is a weight rather than a second region. For a grid point
-    covered only by a disorder group of occupancy q, the solvent weight should
-    be 1 - q, not 0. Groups are the distinct occupancy values present, or with
-    occupancy_groups 'part' the distinct (PART, occupancy) pairs, and their
-    occupancies add over groups (see below), clamped at one.
-
-    Returns the amount to be **added** to the hard region, so it is zero
-    wherever a full-occupancy atom sits and wherever the region already counts
-    as solvent. Nothing here can make the weight exceed one; the caller clamps.
+    Returns the amount to be added to the hard region: zero wherever a full
+    atom reaches and wherever the region already counts as solvent. The
+    caller clamps the sum at one.
     """
     # the sites the main region was drawn around, H moved if it was asked for;
     # same scatterers in the same order as xray_structure
@@ -452,9 +365,8 @@ class mask(object):
     import numpy as np
     # the region as it stands: >0 where solvent is already counted
     labels = self.mask.data.as_numpy_array().ravel()
-    # one key per atom: its occupancy, rounded so that a free variable refined
-    # to 0.2499998 and 0.25 are one group rather than two, and with
-    # occupancy_groups 'part' its PART as well
+    # one key per atom, occupancy rounded so refined 0.2499998 and 0.25 are
+    # one group
     by_part = getattr(self, 'occupancy_groups', 'value') == 'part'
     keys = [(sc.get_part() if by_part else 0, round(sc.occupancy, 3))
             for sc in xs.scatterers()]
@@ -463,19 +375,12 @@ class mask(object):
     def outside(selection):
       """ Non-zero where no atom of this selection reaches, 0 where one does.
 
-      Expanded to P1 and given its own radii, exactly as the main mask is
-      built, so that the two regions are drawn on the same footing and can be
-      combined pointwise.
-
-      Returned as the raw grid rather than clamped to 0/1: every caller below
-      only asks whether a point is zero, and clamping cost a full-grid pass
-      and a 159 MB temporary per group.
+      Drawn on the main mask's grid, expanded to P1, so the two combine
+      pointwise. Raw grid, not clamped to 0/1: callers only test for zero.
       """
       group = xs.select(selection).expand_to_p1()
-      # cctbx default radii (C 1.775) even when the main region was drawn with
-      # a caller's table (Olex2: C 1.70). Handing the caller's table on here
-      # was tried and judged on held-out reflections of 1EJG: R1_free 0.4 %
-      # worse for both IAM and GARLIC models, so the larger radii stay.
+      # cctbx default radii even when the main region used a caller's table:
+      # the caller's (smaller) radii measured worse on held-out reflections
       radii = cctbx.masks.vdw_radii(group).atom_radii
       return cctbx.masks.around_atoms(
         unit_cell=group.unit_cell(),
@@ -487,19 +392,10 @@ class mask(object):
         shrink_truncation_radius=self.mask.shrink_truncation_radius
         ).data.as_numpy_array().ravel()
 
-    # A full-occupancy atom leaves no solvent behind whatever else overlaps it,
-    # so the correction has to be switched off wherever one reaches. Without
-    # this term every point of the model region untouched by a partial group -
-    # which is most of the protein - would come back as full solvent.
-    #
-    # That term, together with the region itself, is also what makes the
-    # correction cheap: it is zero wherever the region already counts as
-    # solvent and zero wherever a full atom reaches, which between them is
-    # almost the whole cell. Only the points that survive both can carry a
-    # weight, so the groups are gathered there and nowhere else. Measured on
-    # 30OR (73 groups, 39.8M grid points), evaluating them over the whole
-    # grid instead took 77.0 s against 63.0 s here for a bit-identical map.
-    # What is left is around_atoms' own full-grid work, one call per group.
+    # a full atom leaves no solvent whatever overlaps it, else all of the model
+    # region untouched by a partial group would come back as solvent. Only
+    # points outside both the region and every full atom can carry a weight,
+    # so the groups are evaluated there only
     inside_region = labels <= 0
     full = ~partial & considered
     if full.count(True) == 0:
@@ -507,14 +403,9 @@ class mask(object):
     else:
       support = np.flatnonzero(inside_region & (outside(full) != 0))
 
-    # Occupancies **add**, they do not multiply. Two alternate conformers of
-    # one side chain at 0.6 and 0.4 are mutually exclusive: their shared volume
-    # is occupied all of the time and must get no solvent back. A product of
-    # (1-q) would hand back 0.4*0.6 = 0.24 of it, and on a structure with half
-    # its atoms in alternates that error compounds - measured at 387% of the
-    # region on one, which is what exposed it. Summing the occupancies and
-    # clamping gives 1 - (0.6+0.4) = 0 there, and still gives 1-q where a lone
-    # partial group sits, which is the case this exists for.
+    # occupancies add, they do not multiply: alternates at 0.6 and 0.4 are
+    # mutually exclusive, so their shared volume is always occupied and gets
+    # 1 - (0.6+0.4) = 0 back, where a product of (1-q) would give 0.24
     covered = np.zeros(support.size)
     for group in groups:
       q = group[1]
@@ -535,29 +426,18 @@ class mask(object):
   def _level_and_clamp(self, m, weight, sigma, mean_w=None):
     """Put the F(000) level back into the region, and solve for it.
 
-    F(000) is not measured, so the difference map has zero mean over the cell.
-    A solvent lump of Q electrons therefore forces -Q/V everywhere, the region
-    integrates to Q(1 - <w>) rather than Q, with <w> the mean of the region
-    weight over the cell, and dividing that factor out is van der Sluis and
-    Spek's electron count - which is what this returns when nothing is
-    clamped.
-
-    Holding the density non-negative does not remove that balance, it only
-    makes the equation implicit, because the level decides which points are
-    clamped and the clamped points change the level:
+    The difference map has zero mean over the cell, so a solvent lump of Q
+    electrons integrates to Q(1 - <w>) over the region (<w> the cell mean of
+    the weight); dividing that out is van der Sluis and Spek's count, and is
+    what this returns when nothing is clamped. With the clamp the level
+    decides what is clamped, so Q solves
 
         Q = integral over the cell of max(w*(rho + Q/V), 0)
 
-    The right hand side grows with Q at a rate below one, so there is a
-    single fixed point. Clamping first and dividing by (1 - <w>) afterwards,
-    as the two used to be written, corrects the same pedestal twice and
-    overcounts by that factor.
-
-    Solved by Newton rather than by repeated substitution: the rate is the
-    weight fraction that is not clamped, which approaches one when the region
-    is most of the cell, and substitution then needs thousands of passes. The
-    equation is piecewise linear and that rate is its slope, so Newton has it
-    in a handful.
+    whose right side grows with Q at a rate below one: a single fixed point.
+    Clamping first and then dividing by (1 - <w>) would correct the pedestal
+    twice. Newton, not substitution: the rate (the unclamped weight fraction)
+    nears one for a large region, and the equation is piecewise linear.
     """
     dv = self.fft_scale
     v_cell = self.xray_structure.unit_cell().volume()
@@ -570,8 +450,7 @@ class mask(object):
     q = integral/(1 - mean_w) if mean_w < 1 else integral
     cut = 0.
     if self.void_positivity:
-      # charge flipping's device: subtracted before the clamp, so that noise
-      # is rectified into electrons as little as possible
+      # subtracted before the clamp, so noise is not rectified into electrons
       cut = self.void_positivity_threshold*sigma
       for _ in range(50):
         trial = flat + w_flat*(q/v_cell - cut)
@@ -581,15 +460,13 @@ class mask(object):
         if abs(residual) <= 1e-9*max(1., abs(q)): break
         slope = flex.sum(w_flat.select(active))*dv/v_cell
         if slope >= 1 - 1e-9:
-          # the unclamped region is the whole cell, so the level cancels out
-          # of its own equation and F(000) is simply not determined by it
+          # unclamped region is the whole cell: Q drops out, undetermined
           break
         q += residual/(1 - slope)
     m = m + weight*(q/v_cell - cut)
     if self.void_positivity:
       m.set_selected(m < 0, 0)
-    # read the count back off the map that was built, so that what is reported
-    # and what f_mask is computed from can never be two different things
+    # count read off the built map, so it is what f_mask is made of
     return m, flex.sum(m.as_1d())*dv
 
   def _difference_coefficients(self, f_obs, f_calc):
@@ -604,11 +481,10 @@ class mask(object):
                         convergence=0.0001):
     """P. van der Sluis and A. L. Spek, Acta Cryst. (1990). A46, 194-201.
 
-    f_calc: the model's structure factors, covering the set the mask works on
-    (complete_set with use_set_completion, fo2 otherwise). Left out, they are
-    computed here from spherical atoms - which is wrong for a model refined
-    with aspherical form factors, since the void then soaks up whatever the
-    IAM misses and the refinement gets that back on top of its own model.
+    f_calc: the model's structure factors on the mask's set (complete_set
+    with use_set_completion, fo2 otherwise). Left out, they are computed from
+    spherical atoms, which is wrong for an aspherical model: the void then
+    soaks up what IAM misses.
     scale_factor: a starting scale; by default sum(Fo)/sum(|Fc|).
     """
     assert self.mask is not None
@@ -635,40 +511,66 @@ class mask(object):
     self.fft_scale = self.xray_structure.unit_cell().volume()\
         / self.crystal_gridding.n_grid_points()
     epsilon_for_min_residual = 2
-    # once: the mask does not change through the iteration, and smoothing it
-    # costs a transform pair
+    # once: the mask is fixed through the iteration
     solvent_weight = self.solvent_weight_map()
     mean_w = flex.sum(solvent_weight.as_1d())/solvent_weight.size()
     for i in range(max_cycles):
+      # old: tested each void's sign before the F(000) level was restored, so
+      # a void was dropped for holding less than its share of the missing
+      # F(000); replaced by the weighted, levelled map of _level_and_clamp
+      # self.diff_map = miller.fft_map(self.crystal_gridding, f_obs_minus_f_calc)
+      # self.diff_map.apply_volume_scaling()
+      # stats = self.diff_map.statistics()
+      # masked_diff_map = self.diff_map.real_map_unpadded().set_selected(
+      #   self.mask.data.as_double() == 0, 0)
+      # n_solvent_grid_points = self.n_solvent_grid_points()
+      # for j in range(self.n_voids()):
+      #   # exclude voids with negative electron counts from the masked map
+      #   # set the electron density in those areas to be zero
+      #   selection = self.mask.data == j+2
+      #   if self.exclude_void_flags[j]:
+      #     masked_diff_map.set_selected(selection, 0)
+      #     continue
+      #   diff_map_ = masked_diff_map.deep_copy().set_selected(~selection, 0)
+      #   f_000 = flex.sum(diff_map_) * self.fft_scale
+      #   f_000_s = f_000 * (
+      #     self.crystal_gridding.n_grid_points() /
+      #     (self.crystal_gridding.n_grid_points() - n_solvent_grid_points))
+      #   if f_000_s < 0:
+      #     masked_diff_map.set_selected(selection, 0)
+      #     f_000_s = 0
+      #     self.exclude_void_flags[j] = True
+      # self.f_000 = flex.sum(masked_diff_map) * self.fft_scale
+      # f_000_s = self.f_000 * (masked_diff_map.size() /
+      #   (masked_diff_map.size() - self.n_solvent_grid_points()))
+      # if (self.f_000_s is not None and
+      #     approx_equal_relatively(self.f_000_s, f_000_s, 0.0001)):
+      #   break # we have reached convergence
+      # else:
+      #   self.f_000_s = f_000_s
+      # masked_diff_map.add_selected(
+      #   self.mask.data.as_double() > 0,
+      #   self.f_000_s/self.xray_structure.unit_cell().volume())
       coefficients = f_obs_minus_f_calc
       if self.solvent_d_min is not None:
         coefficients = coefficients.resolution_filter(d_min=self.solvent_d_min)
       self.diff_map = miller.fft_map(self.crystal_gridding, coefficients)
       self.diff_map.apply_volume_scaling()
-      # a full pass over the grid whose only consumer is the void_positivity
-      # cut, so it is not paid at the default of no cut
+      # a full-grid pass needed only by the void_positivity cut
       sigma = self.diff_map.statistics().sigma() if self.void_positivity else 0.
-      # multiplied by the weight rather than cut by a selection, so that with
-      # boundary_smearing set the edge tapers instead of stepping. At the
-      # default of zero the weight is exactly the old 0/1 indicator and this
-      # reproduces set_selected(mask == 0, 0) value for value.
+      # multiplied, not cut, so a smeared edge tapers; at boundary_smearing 0
+      # the weight is the 0/1 indicator and this equals set_selected(mask == 0, 0)
       masked_diff_map = self.diff_map.real_map_unpadded()*solvent_weight
       self.f_000 = flex.sum(masked_diff_map) * self.fft_scale
       masked_diff_map, f_000_s = self._level_and_clamp(
         masked_diff_map, solvent_weight, sigma, mean_w)
       for j in range(self.n_voids()):
-        # a void whose own electron count is negative is not solvent, so it
-        # goes. The count is read off the levelled map: before the level is
-        # restored every void still carries its share of the missing F(000),
-        # and the test would then discard a void merely for holding less than
-        # that share rather than for holding nothing.
+        # a void with a negative count on the levelled map is not solvent
         selection = self.void_iselection(j)
         electrons = flex.sum(masked_diff_map.select(selection)) * self.fft_scale
-        # flex takes an index selection only on a 1-d array; as_1d() is a
-        # view of the same data, so zeroing through it zeroes the map. The
-        # level above counted every void, so one that goes - excluded in an
-        # earlier cycle or by the caller, or negative now - takes its
-        # electrons out of f_000_s, which stays the count f_mask is made of.
+        # index selections need a 1-d array; as_1d() is a view, so zeroing
+        # through it zeroes the map. A dropped void takes its electrons out of
+        # f_000_s, which the level above counted
         if self.exclude_void_flags[j]:
           masked_diff_map.as_1d().set_selected(selection, 0)
           f_000_s -= electrons
@@ -758,20 +660,17 @@ class mask(object):
   def void_iselection(self, i):
     """ The grid points of void i, as indices into the mask's grid.
 
-    Built once, on first use: the mask does not change after it is computed.
-    structure_factors used to compare the whole grid against each label, and
-    then copy and zero a whole map to sum one void, every iteration: four to
-    five passes over the grid per void per iteration, 39 ms an iteration for
-    four voids on a 1.7M point grid. Summing the selected points instead costs
-    a pass over the void alone.
+    Built once on first use (the mask is fixed), so summing a void costs a
+    pass over the void, not over the grid.
     """
     if self._void_isel is None:
       self._void_isel = _void_iselections(self.mask.data, self.n_voids())
     return self._void_isel[i]
 
   def n_solvent_grid_points(self):
-    # the flood fill has counted them already; counting label by label is a
-    # pass over the grid per void
+    # old: a pass over the grid per void; the flood fill has counted them
+    # return sum([self.mask.data.count(i+2) for i in range(self.n_voids())
+    #             if not self.exclude_void_flags[i]])
     per_void = self.flood_fill.grid_points_per_void()
     return sum([per_void[i] for i in range(self.n_voids())
                 if not self.exclude_void_flags[i]])
@@ -780,9 +679,21 @@ class mask(object):
     if self._electron_counts_per_void is not None:
       return self._electron_counts_per_void
     self._electron_counts_per_void = []
-    # the map structure_factors actually built, not a third reconstruction of
-    # it: this used to cut the region out with a hard edge and no level
-    # whatever the other two copies were set to
+    # old: rebuilt the map with a hard edge and no level, whatever
+    # structure_factors had used; now counts on the map it built
+    # masked_diff_map = self.diff_map.real_map_unpadded().set_selected(
+    #   self.mask.data.as_double() == 0, 0)
+    # for i in range(self.n_voids()):
+    #   if self.exclude_void_flags[i]:
+    #     f_000_s = 0
+    #   else:
+    #     diff_map = masked_diff_map.deep_copy().set_selected(
+    #       self.mask.data != i+2, 0)
+    #     f_000 = flex.sum(diff_map) * self.fft_scale
+    #     f_000_s = f_000 * (
+    #       self.crystal_gridding.n_grid_points() /
+    #       (self.crystal_gridding.n_grid_points() - self.n_solvent_grid_points()))
+    #   self._electron_counts_per_void.append(f_000_s)
     masked_diff_map = self._masked_diff_map
     if masked_diff_map is None: return self._electron_counts_per_void
     for i in range(self.n_voids()):
@@ -792,8 +703,8 @@ class mask(object):
         electrons = flex.sum(
           masked_diff_map.select(self.void_iselection(i))) * self.fft_scale
       self._electron_counts_per_void.append(electrons)
-    # a smeared boundary puts density outside the flood filled void that the
-    # labels above cannot attribute, so the parts are made to sum to the whole
+    # a smeared edge puts density outside the labelled voids; rescale so the
+    # parts sum to the whole
     total = flex.sum(masked_diff_map) * self.fft_scale
     parts = sum(self._electron_counts_per_void)
     if parts > 0 and abs(total - parts) > 1e-6*abs(total):

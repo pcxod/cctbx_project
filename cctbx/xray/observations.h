@@ -167,14 +167,22 @@ namespace cctbx { namespace xray {
     scitbx::sym_mat3<double> gstar_;
 
     /* The twin mate of h, rounded to the nearest node; false when a
-       non-integral law puts it more than 0.01 1/A off that node in reciprocal
-       space. SHELXL does the same (read from its Fc^2 with and without TWIN on
-       COD 2242694: mates kept up to 0.0085 1/A, dropped from 0.0113): the twin
-       spot misses the node, is not in the integrated intensity, and the
-       reflection keeps only its other terms. Rounding it instead pairs h with
-       an unrelated reflection (4086474, TWIN 1 0 0 -0.47 -1 0 -0.16 0 -1).
-       ponytail: fixed 0.01 1/A, the real overlap depends on spot size; partial
-       overlaps need HKLF 5 */
+       non-integral law puts it more than 0.01 1/A off that node, as SHELXL
+       does: the twin spot misses the node and is not in the integrated
+       intensity, while rounding would pair h with an unrelated reflection.
+       The 0.01 1/A is fixed though the real overlap depends on spot size;
+       partial overlaps need HKLF 5 */
+    /* old: always rounded, replaced because a non-integral law then paired h
+       with an unrelated reflection
+    miller::index<> generate(scitbx::mat3<FloatType> const& tl,
+      miller::index<> const& h) const
+    {
+      return miller::index<>(
+        scitbx::math::iround(tl[0]*h[0]+tl[3]*h[1]+tl[6]*h[2]),
+        scitbx::math::iround(tl[1]*h[0]+tl[4]*h[1]+tl[7]*h[2]),
+        scitbx::math::iround(tl[2]*h[0]+tl[5]*h[1]+tl[8]*h[2]));
+    }
+    */
     bool generate(scitbx::mat3<FloatType> const& tl,
       miller::index<> const& h, miller::index<>& mi) const
     {
@@ -250,6 +258,8 @@ namespace cctbx { namespace xray {
           scitbx::af::shared<local_twin_component>());
 
         for (int mci = 0; mci < merohedral_laws_.size(); mci++) {
+          // old: miller::index<> mi = generate(merohedral_laws_[mci], indices_[i]);
+          //      if (!space_group.is_sys_absent(mi)) {
           miller::index<> mi;
           if (generate(merohedral_laws_[mci], indices_[i], mi) &&
               !space_group.is_sys_absent(mi)) {

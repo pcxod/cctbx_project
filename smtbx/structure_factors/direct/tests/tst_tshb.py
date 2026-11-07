@@ -1,16 +1,6 @@
-""" .tshb densities (Gaussians times real spherical harmonics) as form factors.
-
-What is checked:
-- the analytic transform against a numerical Fourier integral of the density,
-  with the harmonics evaluated independently (scipy's complex harmonics);
-- symmetry equivalents, and the whole structure factor against a sum written
-  out by hand;
-- that spherical atoms written as .tshb give the spherical structure factors
-  and gradients, with and without atoms missing from the file;
-- that a least-squares build with them is the spherical one;
-- version 4 ids, merging and errors; atoms moved onto a symmetry image
-  (rotated shells), non-integer Slater powers, disorder gradients, and that
-  damaged files are refused rather than crash.
+""" .tshb densities (Gaussians times real spherical harmonics) as form factors,
+checked against independent numerical transforms, hand-summed structure
+factors and the spherical model.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -194,16 +184,9 @@ def symmetrised(atom, qs):
 
 
 def exercise_cache():
-  """ The form factors of every equivalent and Friedel mate of a reflection come
-  from one cached orbit: per atom either its n_smx values or its folded
-  coefficients, whichever is smaller. Checked against P1, where nothing is
-  shared, for both kinds, X-ray and ED, filled and hit, and with no cache; and
-  the cached values bit for bit against the uncached ones.
-
-  Two atoms sit on the most special position of each group (Wyckoff a): X3
-  with its density averaged over the site's stabiliser, so that operators
-  differing by the stabiliser share one value (and one evaluation), X4 with a
-  density the stabiliser does not leave alone, so that nothing is shared. """
+  """ Cached orbits (values or folded coefficients) against P1, X-ray and ED,
+  filled and hit, and bit for bit against no cache. On Wyckoff a, X3 is
+  stabiliser-invariant (shared values) and X4 is not (nothing shared). """
   rng = random.Random(4)
   d = tempfile.mkdtemp()
   worst = 0
@@ -722,7 +705,6 @@ def exercise_disorder_gradients():
   """ PART 1/2 sharing one occupancy variable, with positions and ADPs, all
   off one id-keyed .tshb: analytic gradients against finite differences, and
   the normal matrix against the same densities written as a table. """
-  from cctbx import adptbx
   from smtbx.refinement import least_squares, constraints
   from smtbx.refinement.constraints import occupancy
   import smtbx.utils
@@ -884,7 +866,7 @@ def exercise_corrupt_files():
 
 def exercise_uncovered_atom_before_d_star_sq():
   """ get/get_full from Python on an atom the file misses, before
-  at_d_star_sq: an error, not a read of an empty array (it segfaulted). """
+  at_d_star_sq: an error, not a read of an empty array. """
   rng = random.Random(15)
   xs = disordered_setup()
   p = os.path.join(tempfile.mkdtemp(), "part.tshb")
@@ -907,12 +889,9 @@ def exercise_uncovered_atom_before_d_star_sq():
 
 
 def exercise_python_entry_points():
-  """ Every way into a contribution from Python either answers through
-  get_full or raises a Python exception - never a crash. For a .tshb that
-  covers the model, for one that misses an atom, and for the same densities
-  as an expanded text table and as a .tscb: get (which the expanded ones do
-  not implement), get_full, an index past the end, a reflection the table
-  does not hold, absurd indices, and the f_calc functor. """
+  """ Every Python entry (get, get_full, bad indices and reflections, the
+  f_calc functor) answers or raises, never crashes: for a full and a partial
+  .tshb and the same densities as an expanded .tsc and a .tscb. """
   import struct
   rng = random.Random(16)
   xs = disordered_setup()

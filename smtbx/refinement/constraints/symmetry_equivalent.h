@@ -25,6 +25,11 @@ namespace smtbx { namespace refinement { namespace constraints {
                            sparse_matrix_type *jacobian_transpose);
   private:
     sgtbx::rt_mx op;
+    /* old: state of the fixed local Jacobian, see symmetry_equivalent.cpp
+    class special_position_site_parameter *special_position;
+    // Transpose of the Jacobian of the transform x -> op*x
+    af::ref<double, af::mat_grid> local_jt;
+    */
   };
 
 

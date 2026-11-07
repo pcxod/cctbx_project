@@ -10,18 +10,11 @@ namespace cctbx { namespace maptbx { namespace structure_factors {
 
 namespace {
 
-  // Release the GIL while a transform runs.
-  //
-  // These constructors do the real work of a charge-flipping cycle and touch
-  // no Python API: they read const_refs into arrays the caller owns and fill
-  // their own members. Measured 30 August 2026, one cycle is 0.78 ms of which
-  // compute_electron_density_map is 0.274 and compute_structure_factors 0.214;
-  // with only scitbx/fftpack released those two scaled 1.54x and 1.36x on four
-  // threads instead of the ~2.8x fftpack alone reaches, because the maptbx half
-  // of each still serialised here.
-  //
-  // The arrays stay alive for the call (the caller holds them) and each thread
-  // in smtbx.ab_initio.multi_trial works on its own, so nothing is shared.
+  /* releases the GIL while a transform runs: these constructors do most of a
+  charge-flipping cycle and touch no Python API. They read const_refs into
+  arrays the caller holds for the call, and each smtbx.ab_initio.multi_trial
+  thread works on its own, so nothing is shared
+  */
   struct gil_release
   {
     gil_release() : state_(PyEval_SaveThread()) {}
@@ -36,9 +29,7 @@ namespace {
   {
     typedef to_map<> w_t;
 
-    // Same signature as the init<> below, with the GIL dropped for the
-    // duration. This is the overload cctbx/miller/__init__.py uses from
-    // fft_map, i.e. the one on the charge-flipping hot path.
+    // the init<> below without the GIL; miller's fft_map uses this overload
     static boost::shared_ptr<w_t>
     make(
       sgtbx::space_group const& space_group,
@@ -78,11 +69,8 @@ namespace {
             arg("map_grid"),
             arg("conjugate_flag"),
             arg("treat_restricted")=true)))
-        // Registered AFTER the init<> overloads on purpose: Boost.Python tries
-        // the most recently registered first, so declaring this before them
-        // left init<> winning every call and the factory never ran -- the
-        // rebuild measured byte-for-byte the same scaling, which is how it
-        // was caught.
+        // after the init<> overloads: Boost.Python tries the most recently
+        // registered first, so placed before them init<> wins every call
         .def("__init__", make_constructor(
           make, default_call_policies(),
           (arg("space_group"),
@@ -102,9 +90,8 @@ namespace {
   {
     typedef from_map<> w_t;
 
-    // The overload `structure_factors_from_map` reaches by default (use_sg
-    // False); the space-group form below is left on init<> because the hot
-    // path does not use it.
+    // the overload structure_factors_from_map reaches by default (use_sg
+    // False); the space-group form stays on init<>, the hot path skips it
     static boost::shared_ptr<w_t>
     make(
       bool anomalous_flag,
@@ -165,11 +152,8 @@ namespace {
             arg("miller_indices"),
             arg("complex_map"),
             arg("conjugate_flag"))))
-        // Registered AFTER the init<> overloads on purpose: Boost.Python tries
-        // the most recently registered first, so declaring this before them
-        // left init<> winning every call and the factory never ran -- the
-        // rebuild measured byte-for-byte the same scaling, which is how it
-        // was caught.
+        // after the init<> overloads: Boost.Python tries the most recently
+        // registered first, so placed before them init<> wins every call
         .def("__init__", make_constructor(
           make, default_call_policies(),
           (arg("anomalous_flag"),

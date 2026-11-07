@@ -345,12 +345,12 @@ class linearised_problem(object):
         for j, i in enumerate(indices):
           block[j, j] += self.damping*diagonal[int(i)]
       try:
-        # scipy rather than numpy.linalg.inv: these blocks are at most
-        # max_block_size square, and numpy pays an OpenBLAS thread-pool
-        # entry per call. Measured over the 289 blocks of one cycle on a
-        # 717-atom protein, 2.62 s against 0.024 s. The two agree to 4e-11,
-        # which is a preconditioner, so bounded by cg_tolerance and unable
-        # to move the converged answer.
+        # scipy rather than numpy.linalg.inv: numpy pays an OpenBLAS
+        # thread-pool entry per call, which dominates on blocks this small;
+        # the rounding difference only touches the preconditioner
+        # old: replaced for that per-call cost
+        # inverse = numpy.linalg.inv(block)
+        # except numpy.linalg.LinAlgError:
         inverse = scipy.linalg.inv(block, check_finite=False)
       except Exception:
         # a block the data does not determine; fall back on its diagonal.

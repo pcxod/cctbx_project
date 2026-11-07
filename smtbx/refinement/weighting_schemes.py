@@ -55,6 +55,16 @@ class _():
     assert fc_sq.is_xray_intensity_array()
     weighting = ext.mainstream_shelx_weighting(a=self.a, b=self.b)
 
+    # old: one C++ weighting call per bin and grid point, replaced by the numpy
+    # grid below (same a and b bit for bit) because the calls dominated the time
+    # def mainstream_shelx_weighting_compute_chi_sq(fo_sq, fc_sq, a,b):
+    #   weighting.a = a
+    #   weighting.b = b
+    #   weights = weighting(
+    #     fo_sq.data(), fo_sq.sigmas(), fc_sq.data(), fo_sq.indices(), scale_factor)
+    #   return (flex.sum(
+    #     weights * flex.pow2(fo_sq.data() - scale_factor * fc_sq.data())))
+
     fo_sq = fo_sq.deep_copy()
     fo_sq.data().set_selected(fo_sq.data() < 0, 0)
 
@@ -76,6 +86,22 @@ class _():
     b_step = 0.4 * start_b
 
     # sort data and setup binning by fc/fc_max
+    # old: sorted flex arrays binned by selection, replaced by numpy blocks
+    # fc_sq_over_fc_sq_max = fc_sq.data()/flex.max(fc_sq.data())
+    # permutation = flex.sort_permutation(fc_sq_over_fc_sq_max)
+    # fc_sq_over_fc_sq_max = fc_sq.customized_copy(
+    #   data=fc_sq_over_fc_sq_max).select(permutation)
+    # fc_sq = fc_sq.select(permutation)
+    # fo_sq = fo_sq.select(permutation)
+    # n_bins = 10
+    # bin_max = 0
+    # bin_limits = flex.size_t(1, 0)
+    # bin_count = flex.size_t()
+    # for i in range(n_bins):
+    #   bin_limits.append(int(math.ceil((i+1) * fc_sq.size()/n_bins)))
+    #   bin_count.append(bin_limits[i+1] - bin_limits[i])
+    #
+    # n = fo_sq.size()//(fo_sq.size()-n_independent_params)
     permutation = flex.sort_permutation(fc_sq.data()/flex.max(fc_sq.data()))
     k = scale_factor
     fo = fo_sq.data().select(permutation).as_numpy_array()
@@ -97,9 +123,25 @@ class _():
     # numpy block with the operations of weighting_schemes.h compute() in the
     # same order and a sequential sum (cumsum, as flex.sum, not numpy's
     # pairwise sum), so the same a and b bit for bit as one C++ call per point
+    # old: per-point C++ calls, see mainstream_shelx_weighting_compute_chi_sq
+    # gridding = flex.grid(9,9)
     while (a_step > 1e-4 and b_step > 5e-3):
+      # old: tmp = flex.double(gridding, 0)
+      # binned_chi_sq = [tmp.deep_copy() for i in range(n_bins)]
       start_a = max(start_a, 4*a_step) - 4*a_step
       start_b = max(start_b, 4*b_step) - 4*b_step
+      # old:
+      # for i_bin in range(n_bins):
+      #   sel = flex.size_t_range(bin_limits[i_bin], bin_limits[i_bin+1])
+      #   fc2 = fc_sq.select(sel)
+      #   fo2 = fo_sq.select(sel)
+      #   b = start_b
+      #   for j in range(9):
+      #     a = start_a
+      #     b += b_step
+      #     for k in range(9):
+      #       a += a_step
+      #       binned_chi_sq[i_bin][j,k] += mainstream_shelx_weighting_compute_chi_sq(fo2, fc2, a, b)
       av, bv, a, b = [], [], start_a, start_b
       for j in range(9):
         a += a_step
@@ -113,11 +155,9 @@ class _():
         if bin_count[i_bin] == 0:
           binned_chi_sq.append(np.zeros((9, 9)))
           continue
-        # a bin at a time, 256 reflections at a time: a whole large bin's
-        # 9 x 9 x n blocks fall out of cache, and at ~21k reflections that
-        # made this slower than the per-point C++ calls it replaced. Each
-        # chunk's first term takes the running sum, so the summation stays
-        # sequential and the result is the same bit for bit.
+        # 256 reflections at a time, since a large bin's 9 x 9 x n block falls
+        # out of cache; each chunk's first term takes the running sum, so the
+        # summation stays sequential
         acc = None
         for lo in range(0, pb.size, 256):
           c_pb = pb[lo:lo+256]

@@ -637,16 +637,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
     }
 
     /// What a threaded build charges one more per-thread copy against its budget
-    /** n^2 elements whichever accumulator, which is what
-        smtbx::refinement::least_squares::build_design_matrix_and_normal_equations
-        has always charged a normal matrix and what its share of the budget
-        was set against. It is not what a copy holds: the accumulator (packed
-        n(n+1)/2 or full n^2) and also reduced_ls, a packed n(n+1)/2 which the
-        constructor zero-fills and finalise() replaces without reading -- n(n+1)
-        elements for the packed accumulator, about 1.5 n^2 for the buffered one,
-        whose row buffer the builder budgets separately. Charging that would
-        move the thread count of Gauss-Newton builds wherever the budget binds,
-        a change to be measured on its own.
+    /** n^2 elements whichever accumulator, the figure the smtbx builder's
+        budget was set against. A copy really holds the accumulator (packed
+        n(n+1)/2 or full n^2) plus the packed reduced_ls; charging that would
+        move the Gauss-Newton thread count wherever the budget binds.
      */
     static std::size_t per_thread_bytes(int n_parameters) {
       return std::size_t(n_parameters)*n_parameters*sizeof(scalar_t);

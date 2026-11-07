@@ -37,21 +37,11 @@ namespace smtbx { namespace ab_initio { namespace boost_python {
 
   }
 
-  /* The Oszlanyi-Suto phase transfer, in one call.
-
-     This was six flex operations driven from Python -- flex.arg, two slices,
-     flex.abs, extend, then phase_transfer -- and Python holds the GIL between
-     them, so the step could not run on more than one thread. Measured 30
-     August 2026 it is 0.150 ms of a 0.78 ms charge-flipping cycle and scaled
-     0.97x on four threads while the two FFT steps reached 2.56x and 3.32x,
-     making it the largest remaining serial part of the cycle.
-
-     The arithmetic is copied from `charge_flipping._array_extension`, not
-     re-derived: the weak head takes its modulus from the SOURCE and its phase
-     shifted by delta_varphi, the strong tail takes its modulus from f_obs and
-     the source phase unchanged. Centric restrictions are not reimplemented
-     here -- cctbx::miller::phase_transfer applies them, which is why it is
-     called rather than inlined.
+  /* the Oszlanyi-Suto phase transfer of charge_flipping._array_extension in
+     one GIL-free call: the weak head takes modulus from the source and its
+     phase shifted by delta_varphi, the strong tail takes modulus from f_obs
+     and the source phase; cctbx::miller::phase_transfer applies the centric
+     restrictions
    */
   af::shared<std::complex<double> >
   oszlanyi_suto_phase_transfer(

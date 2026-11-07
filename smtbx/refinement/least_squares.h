@@ -82,7 +82,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
   Only an accumulator that buffers rows can: matrix::rank_n_update, through
   matrix::rank_n_update_shared_fold. For every other normal equations type --
   the packed accumulator, the summaries the conjugate gradients use -- this is
-  the null version and the workers keep matrices of their own, as before.
+  the null version and the workers keep matrices of their own.
    */
   //@{
   template <class Accumulator>
@@ -243,23 +243,12 @@ namespace smtbx { namespace refinement { namespace least_squares {
 
     /** @brief The most rows one worker buffers before folding them in.
 
-    A ceiling on what the memory budget would otherwise give each worker. The
-    rows of a chunk are written by the structure factor pass and read back by
-    the syrk that folds them in, and that read is only cheap while the chunk is
-    still in cache: with several workers filling chunks at once, what they
-    share is the last level cache, so a chunk well beyond a share of it makes
-    the syrk read every row back from memory instead. Measured on a 4-core
-    machine, 3 workers, 1950 parameters: up to ~40 MB a worker the build time is
-    flat, while the 80-330 MB a generous budget hands out made it 50-65%
-    slower -- a larger budget gave a slower build. 32 MB leaves the default
-    budget's share (~25 MB) untouched and stops the large ones; with it a 2000 MB
-    budget measured 1.19 s against 1.51 s.
-
-    The floor in rows is the other side of the trade. Each chunk costs a pass
-    over the n^2 result, so for a wide row a byte cap alone would mean many
-    thin chunks and many passes: at 5200 parameters 8 MB chunks (190 rows)
-    measured 7% slower than the default. 512 rows keeps that pass rare however
-    large the structure.
+    A ceiling on what the memory budget would otherwise give each worker: the
+    syrk that folds a chunk in is only cheap while the chunk is still in the
+    last level cache the workers share, so a larger budget would make a slower
+    build. 32 MB leaves the default budget's share untouched. The floor of 512
+    rows bounds the number of chunks, each of which costs a pass over the n^2
+    result.
      */
     static std::size_t max_worker_buffer_bytes(std::size_t row_bytes) {
       return std::max<std::size_t>(32u << 20, 512*row_bytes);
@@ -308,19 +297,22 @@ namespace smtbx { namespace refinement { namespace least_squares {
     Two constants because the accumulators differ greatly in m. The packed one
     keeps half a matrix and folds each row in as it arrives, so it merges less
     and wants more workers for the same work; the buffered one carries a full
-    matrix, a row buffer and a syrk besides. They are told apart by whether
-    the rank update buffers rows, which only rank_n_update does: it alone has a
-    default_buffer_bytes(). Not by whether the normal equations take a buffer
-    size, as new_chunk_equations above asks -- both wrappers take one, the
-    packed accumulator ignoring it so that the two stay interchangeable, and
-    that test handed the packed one the buffered one's constant as well. The
-    matrix-free summaries have no rank update and take the packed figure.
+    matrix, a row buffer and a syrk besides. They are told apart by
+    default_buffer_bytes(), which only rank_n_update has; not by a buffer-size
+    constructor as in new_chunk_equations, since the packed wrapper takes one
+    too and ignores it. The matrix-free summaries take the packed figure.
 
     Both values are deliberately conservative. Overshooting T* costs more than
     undershooting it, every extra worker being another copy of the matrix, and
     the optimum is flat around its minimum, so erring low gives up very little.
      */
     //@{
+    /* old: picked by the buffer-size constructor, replaced because the packed
+       wrapper has one too and so got the buffered constant
+    template <typename NE>
+    static double accumulator_work_constant(
+      int, decltype(NE(0, true, std::size_t(0)))* = 0) { return 195.; }
+    */
     template <typename NE>
     static double accumulator_work_constant(
       int, decltype(NE::sum_of_rank_1_updates_t::default_buffer_bytes())* = 0)
@@ -497,13 +489,11 @@ namespace smtbx { namespace refinement { namespace least_squares {
     Each of these would otherwise produce numbers rather than an error, which is
     the worse outcome. OpenMP is refused separately, in build().
 
-    An Fc correction (EXTI, SWAT) is not on the list. It multiplies the
-    observable before the likelihood sees it, so the model amplitude in the
-    distribution is the corrected one, sqrt(y)|Fc|; alpha and beta are
-    estimated against that same corrected Fc, and the correction's own
-    parameters reach the likelihood through d(observable)/dx, which is exact.
-    beta is not rescaled by y: the model error is that of the corrected
-    amplitude, the convention least squares uses for its residual too.
+    An Fc correction (EXTI, SWAT) is allowed: it multiplies the observable
+    before the likelihood sees it, so the model amplitude is sqrt(y)|Fc|,
+    alpha and beta are estimated against that same corrected Fc, and the
+    correction's parameters enter exactly through d(observable)/dx. beta is
+    not rescaled by y, as least squares does not rescale its residual.
     */
     void check_maximum_likelihood() const {
       if (!ml.active()) {
@@ -511,6 +501,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
       }
       SMTBX_ASSERT(ml.is_consistent_with(reflections_.size()));
       SMTBX_ASSERT(!reflections_.is_twinned());
+      // old: Fc corrections were refused; allowed now, see above
+      // SMTBX_ASSERT(fc_cr.is_trivial());
     }
 
     template<class NormalEquations>
@@ -666,22 +658,18 @@ namespace smtbx { namespace refinement { namespace least_squares {
             reflections_.size()));
         }
         typedef shared_fold_of<NormalEquations> shared_fold_t;
-        /* With a shared fold the workers keep no matrices of their own, only
-           row buffers (capped below), so there are no private copies for the
-           budget to bound and the cap that follows does not apply.
-         */
+        // a shared fold leaves the workers no private matrices to bound
+        /* old: every accumulator charged n^2 and bounded even with a shared
+           fold, replaced because the conjugate gradient summaries hold O(n)
+           and were held to the thread floor
+        if (max_memory > 0 && normal_equations.n_parameters() > 0) {
+          std::size_t const n = normal_equations.n_parameters();
+          std::size_t const result_bytes = n*n*sizeof(FloatType);
+        */
         if (!shared_fold_t::available
             && max_memory > 0 && normal_equations.n_parameters() > 0) {
-          /* Asked of the accumulator rather than assumed to be n x n. The
-             summary the stored-matrix conjugate gradients accumulate holds
-             O(n) -- two vectors, a lent row and the preconditioner blocks --
-             and charging it for a normal matrix it never allocates held a
-             protein's design matrix build to the floor of three workers; the
-             matrix-free mode's summary and product passes were held there
-             too. The normal equations accumulators are still charged n^2,
-             exactly as before; see their per_thread_bytes for why that is not
-             exact.
-           */
+          // asked of the accumulator: n^2 for a normal matrix, O(n) for the
+          // conjugate gradient summaries
           std::size_t const per_thread_bytes =
             NormalEquations::per_thread_bytes(normal_equations.n_parameters());
           /* A quarter of the budget, not all of it. The private matrices are
@@ -694,10 +682,14 @@ namespace smtbx { namespace refinement { namespace least_squares {
              the cap: once one matrix is itself larger than the share, the
              division alone would say a single worker and give up threading
              altogether, costing far more than the memory it saves. Capped
-             before the narrowing to int, which an O(n) charge against a large
-             budget could otherwise overflow.
+             before the narrowing to int, which an O(n) charge could overflow.
            */
           std::size_t const budget = (std::size_t(max_memory) << 20)/4;
+          /* old: unbounded above before the narrowing to int
+          int const by_memory = static_cast<int>(
+            std::max<std::size_t>(parent_t::min_accumulator_threads(),
+              budget/std::max<std::size_t>(1, result_bytes)));
+          */
           int const by_memory = static_cast<int>(std::min<std::size_t>(
             parent_t::max_accumulator_threads(),
             std::max<std::size_t>(parent_t::min_accumulator_threads(),
@@ -722,25 +714,28 @@ namespace smtbx { namespace refinement { namespace least_squares {
            the floor keeps that from becoming silly on a machine with many
            threads and a small budget.
          */
-        /* Capped as well, so that a generous budget does not buy chunks too
-           large to still be in cache when they are folded in -- see
-           max_worker_buffer_bytes. With no budget the cap is the size: the
-           accumulator's own default is far past it.
+        /* capped by max_worker_buffer_bytes so chunks stay in cache; with no
+           budget the cap is the size
          */
         std::size_t const worker_cap = parent_t::max_worker_buffer_bytes(
           std::size_t(normal_equations.n_parameters())*sizeof(FloatType));
+        /* old: no cache cap, and the accumulator's large default with no
+           budget; replaced because oversized chunks made the build slower
+        std::size_t const thread_buffer_bytes = max_memory > 0
+          ? std::max<std::size_t>(4u << 20,
+              ((std::size_t(max_memory) << 20)/4)/thread_count)
+          : 0;
+        */
         std::size_t const thread_buffer_bytes = max_memory > 0
           ? std::min(worker_cap, std::max<std::size_t>(4u << 20,
               ((std::size_t(max_memory) << 20)/4)/thread_count))
           : worker_cap;
-        /* One matrix for all the workers, where the accumulator allows it;
-           see matrix::rank_n_update_shared_fold. The workers fold into it
-           themselves, tile by tile, so the BLAS must not thread underneath
-           them; its own setting comes back after the build.
+        /* one matrix for all the workers where the accumulator allows it (see
+           matrix::rank_n_update_shared_fold); each worker folds its own tiles,
+           so one BLAS thread apiece for the duration of the build
          */
         boost::scoped_ptr<typename shared_fold_t::fold_t> shared_fold(
           shared_fold_t::make(normal_equations, thread_count));
-        // each worker folds its own tiles: one BLAS thread apiece
         blas_threads_scope blas_threads(shared_fold_t::available ? 1 : 0);
         for(int thread_idx=0; thread_idx<thread_count; thread_idx++) {
           normal_equations_ptr_t chunk_normal_equations(
@@ -985,10 +980,9 @@ namespace smtbx { namespace refinement { namespace least_squares {
        */
       ml_data<FloatType> const& ml;
       bool running;
-      /* Set when the worker deposits into a shared fold: called on every way
-         out of operator(), the early return on interruption and the error
-         paths included. A worker leaving without it would have the others wait
-         for its next buffer forever.
+      /* set for a shared fold and called on every way out of operator(),
+         errors and interruption included: without it the other workers wait
+         for this one's next buffer forever
        */
       void (*finish_shared)(NormalEquations &);
       struct finish_on_exit {
@@ -996,11 +990,9 @@ namespace smtbx { namespace refinement { namespace least_squares {
         NormalEquations &ne;
         ~finish_on_exit() { if (f) f(ne); }
       };
-      /* Chunks first, first + stride, ... of the scheduler's partition, or
-         whatever next() hands out while first is negative. The workers are
-         given a fixed share: taken first come first served, which rows a
-         worker sums into its private matrix, and so the rounding of the
-         merged normal equations, changed from one run to the next.
+      /* chunks first, first + stride, ... of the scheduler's partition, or
+         next() while first is negative; a fixed share keeps the rounding of
+         the merged normal equations the same from run to run
        */
       int first, stride;
       accumulate_reflection_chunk(
@@ -1089,6 +1081,11 @@ namespace smtbx { namespace refinement { namespace least_squares {
            */
           f_calc_function.set_defer_grad_observable(
             fast && f_calc_function.raw_gradients());
+          /* old: first come first served, replaced so the rounding of the
+             merged normal equations does not change between runs
+          while (true) {
+            chunk ch = scheduler.next();
+          */
           for (int k = first; ; k += stride) {
             chunk ch = first < 0 ? scheduler.next() : scheduler.at(k);
             if (ch.size == 0) {
@@ -1441,15 +1438,11 @@ namespace smtbx { namespace refinement { namespace least_squares {
         u  = (t k + yc g) * w            (g = grad k* . x)
         result = R^T (u * isw),   and the scalar yc . u
 
-    as two products, each a pass over the whole matrix -- which at the sizes
-    where the matrix is stored at all is bandwidth bound, so the second pass
-    costs as much as the first. Here the matrix is taken a tile of rows at a
-    time, small enough to stay in cache: the tile's part of R x, then its u,
-    then its part of R^T u while the rows are still there. Every element of t
-    and u is formed by the same operations in the same order as the vector
-    expressions; only the sums inside the products are associated differently,
-    which is rounding. Measured on 40000 x 2000: 124 ms for the two passes,
-    89 ms for this, single threaded, and the same ratio on four threads.
+    as two bandwidth-bound passes over the matrix. Here it is taken a
+    cache-sized tile of rows at a time: the tile's part of R x, then its u,
+    then its part of R^T u while the rows are still in cache. t and u are
+    formed by the same operations in the same order as the vector
+    expressions; only the sums inside the products associate differently.
 
     The threads take fixed slabs of tiles and add their partial results in
     slab order, so the result is the same from one run to the next.
@@ -1472,10 +1465,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
       af::shared<FloatType> result(n + 1, FloatType(0));
       int const n_threads = parent_t::get_available_threads();
       if (is_mixed_precision() && n_threads == 1) {
-        /* The one case the tiles lose: a narrow store on one thread, where
-           the plain loops of a tile run behind the matrix_*_mixed kernels
-           (measured 0.9x). The two passes then, with the same elementwise
-           arithmetic in between.
+        /* a narrow store on one thread: the matrix_*_mixed kernels beat the
+           plain tile loops, so two passes with the same elementwise arithmetic
          */
         af::shared<FloatType> t(m, af::init_functor_null<FloatType>());
         times_(m, n, a.begin(), x.begin(), t.begin());

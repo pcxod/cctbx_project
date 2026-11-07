@@ -130,12 +130,9 @@ def exercise_inward_taper():
   outside = (hard < 0.5).iselection()
   leak_in = flex.sum(inward.select(outside))
   leak_sym = flex.sum(symmetric.select(outside))
-  # Not asserted: that the inward taper is strictly contained. A smoothed
-  # indicator is above 1/2 just outside a concave boundary, because most of
-  # the neighbourhood there is inside the region, and folding at 1/2 cannot
-  # remove that. The region here wraps a small blob and is about as concave
-  # as a region gets, so this is the worst case rather than the typical one;
-  # what has to hold is that the fold removes most of the outward half.
+  # not asserted: strict containment. A smoothed indicator exceeds 1/2 just
+  # outside a concave boundary, which folding at 1/2 cannot remove; this
+  # small blob is the worst case, so only most of the outward half must go
   assert leak_in < 0.25*leak_sym, (leak_in, leak_sym)
   assert leak_sym > 1e-3, "the symmetric taper should straddle the boundary"
   # a symmetric kernel is normalised, so it moves weight about rather than

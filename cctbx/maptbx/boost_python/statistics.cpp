@@ -11,17 +11,9 @@ namespace cctbx { namespace maptbx { namespace boost_python {
 
 namespace {
 
-  // Release the GIL for a whole-map statistics pass.
-  //
-  // `charge_flipping.solving_iterator` asks the map for its skewness once per
-  // solving iteration, and that is a full pass over every grid point --
-  // ~700k of them. Measured 30 August 2026 it was 0.296 s of a 1.59 s
-  // eight-trial run (about 19%) and it runs OUTSIDE the flipping cycle, so it
-  // was invisible in the per-cycle split and is most of what remained serial
-  // after the FFT and phase-transfer work.
-  //
-  // The constructors read a const_ref the caller owns and fill their own
-  // members; no Python API is touched.
+  // releases the GIL for a whole-map pass: charge_flipping.solving_iterator
+  // asks for the skewness every iteration, outside the flipping cycle. The
+  // constructors read a const_ref the caller owns and touch no Python API
   struct gil_release
   {
     gil_release() : state_(PyEval_SaveThread()) {}
@@ -36,7 +28,7 @@ namespace {
   {
     typedef statistics<> w_t;
 
-    // The double overload is the one the map path uses.
+    // the double overload, the one the map path uses
     static boost::shared_ptr<w_t>
     make(af::const_ref<double, af::flex_grid<> > const& map)
     {
@@ -56,9 +48,8 @@ namespace {
         .def("mean", &w_t::mean)
         .def("mean_sq", &w_t::mean_sq)
         .def("sigma", &w_t::sigma)
-        // After the init<> overloads: Boost.Python tries the most recently
-        // registered first, and registering this before them leaves init<>
-        // winning every call.
+        // after the init<> overloads: Boost.Python tries the most recently
+        // registered first, so placed before them init<> wins every call
         .def("__init__", make_constructor(make, default_call_policies(),
                                           (arg("map"))))
       ;

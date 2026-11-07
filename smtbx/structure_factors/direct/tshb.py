@@ -1,27 +1,14 @@
 """ .tshb: atomic densities as Gaussians times real spherical harmonics.
 
-The file format, and the form factors read from it, are described in
-smtbx/structure_factors/direct/harmonic_expansion.h. This module writes and
-reads it, so that a density from any source - NoSpherA2's RI fit, a SALTED
-prediction, a multipole model - can be handed to olex2.refine in place of a
-.tsc/.tscb table:
+The format is specified in harmonic_expansion.h; this module writes and reads
+it, so any density (RI fit, SALTED, multipoles) can replace a .tsc/.tscb.
 
-  from smtbx.structure_factors.direct import tshb
-  tshb.write("x.tshb", [tshb.atom("C1", [tshb.shell(l, alpha, c), ...]), ...])
+tshb_block merges files as NoSpherA2 merges tables: records are keyed by
+scatterer id, else by label, and the first record of a key wins, so PART 0
+atoms come from the first per-part file.
 
-Files are merged the way NoSpherA2 merges tables: a tshb_block collects
-records keyed like the columns of a .tscb - by scatterer id, or by label when
-a record has none - and append and += keep the first record of a key and drop
-later ones (the "first wins" of NoSpherA2's tsc_block). So the PART 0 atoms
-every per-part density holds come from the first part, as in the merged table:
-
-  joint = tshb.tshb_block.read("part1.tshb")
-  joint += tshb.tshb_block.read("part2.tshb")
-  joint.write("joint.tshb")
-
-Units are Angstrom and electrons per cubic Angstrom, and the frame is the
-Cartesian frame of the unit cell (cctbx's orthogonalisation). from_bohr()
-converts shells written in atomic units, which is how NoSpherA2 holds them.
+Units are Angstrom and e/A^3 in the unit cell's Cartesian frame; from_bohr()
+converts atomic units.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -32,9 +19,8 @@ shell = namedtuple("shell", "l alpha c")      # c: 2l+1 values, m = -l..l
 # spherical extras (version 2): Gaussians c exp(-a r^2) as (c, a); Slater terms
 # c r^n exp(-zeta r) as (c, n, zeta), n real, -2 < n <= 60; form factor terms
 # a exp(-b s) as (a, b)
-# z (version 3): the nuclear charge, which Mott-Bethe needs with header {"ED": "true"}
-# key (version 4): None, keyed by label; or the 16 bytes of the scatterer id,
-# cctbx.xray scatterer.get_id_big(part).to_bytes() - see scatterer_id()
+# z (version 3): nuclear charge, needed by Mott-Bethe with header {"ED": "true"}
+# key (version 4): None to key by label, else the 16-byte scatterer_id()
 # part (version 4): the PART number
 atom = namedtuple("atom", "label shells gaussians slaters exponentials z key part")
 atom.__new__.__defaults__ = ((), (), (), 0, None, 0)
@@ -43,14 +29,14 @@ KEY_LABEL, KEY_ID = 0, 1
 
 
 def scatterer_id(scatterer):
-  """ The id a .tscb and a version 4 .tshb key this scatterer by: element,
-  PART and coordinate, as the 16 bytes of cctbx's scatterer_id_big. """
+  """ The 16-byte scatterer_id_big (element, PART, coordinate) that keys a
+  .tscb column and a version 4 .tshb record. """
   return bytes(scatterer.get_id_big(scatterer.get_part()).to_bytes())
 
 
 def record_key(record):
-  """ What a record is matched and merged by: its id, or failing that its
-  label, case-insensitively, as the readers match labels. """
+  """ Merge key: the id, else the label case-insensitively as the readers
+  match it. """
   if record.key is not None:
     return ("id", bytes(record.key))
   return ("label", record.label.upper())
@@ -166,13 +152,9 @@ def read(file_name):
 
 
 class tshb_block(object):
-  """ The records of a .tshb, merged as NoSpherA2 merges tables.
-
-  One record per key (record_key: the scatterer id, else the label). append
-  keeps the first record of a key and refuses later ones, so += of per-part
-  files takes the PART 0 atoms from the first part, as tsc_block does. The
-  header of the first block is kept; += adds keys it lacks. write() writes
-  version 4.
+  """ The records of a .tshb, one per record_key; the first record of a key
+  wins, as in NoSpherA2's tsc_block. += keeps this header and adds the keys it
+  lacks. write() writes version 4.
   """
 
   def __init__(self, records=(), header=None):
@@ -236,13 +218,10 @@ class tshb_block(object):
 
 
 def spherical_atom(label, gaussian):
-  """ The density of a spherical form factor given as a cctbx gaussian
-  sum a_k exp(-b_k stol^2) + c, as l = 0 shells.
+  """ A cctbx gaussian sum a_k exp(-b_k stol^2) + c as l = 0 shells.
 
   a exp(-b s^2/4) is the transform of an l = 0 shell of exponent 4 pi^2/b; the
-  constant c, a point charge, becomes a very narrow one. Used to check the
-  format against the spherical form factors, and as the fallback a writer can
-  put in for an atom it has no density for.
+  constant c, a point charge, becomes a very narrow one.
   """
   import math
   y00 = 1/math.sqrt(4*math.pi)
