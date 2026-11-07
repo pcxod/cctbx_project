@@ -173,8 +173,8 @@ namespace cctbx { namespace xray {
        spot misses the node, is not in the integrated intensity, and the
        reflection keeps only its other terms. Rounding it instead pairs h with
        an unrelated reflection (4086474, TWIN 1 0 0 -0.47 -1 0 -0.16 0 -1).
-       ponytail: fixed 0.01 1/A, the real overlap depends on spot size; partial
-       overlaps need HKLF 5 */
+       NOTE: This uses a fixed 0.01 1/A cutoff; real overlap depends on spot
+       size, and partial overlaps need HKLF 5 */
     bool generate(scitbx::mat3<FloatType> const& tl,
       miller::index<> const& h, miller::index<>& mi) const
     {
