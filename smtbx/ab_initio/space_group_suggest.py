@@ -63,6 +63,10 @@ ALPHA_0_DECIDES_WITHIN = 0.0
 # screw predicts only a few dozen axial reflections, P222 none.
 MIN_ABSENCES_TO_JUDGE = 10
 
+# The same minimum for a class two candidates dispute, which is small: 0k0 has
+# nine reflections
+MIN_DISPUTED_ABSENCES = 5
+
 # Below that minimum a class can still refute: axial reflections stronger than
 # half the mean are not absent, else frequency alone ranks P2(1) over P2.
 STRONG_ABSENCE_MIN = 3
@@ -369,14 +373,14 @@ def pairwise_absence_winner(f_obs_p1, group_a, group_b, max_ratio=None):
   b = flex.bool(group_b.is_sys_absent(indices))
   a_only, b_only = a & ~b, b & ~a
   n_a, n_b = a_only.count(True), b_only.count(True)
-  MIN_ABSENCES_TO_JUDGE = 5   # a disputed class is small: 0k0 has nine reflections
-  if n_a < MIN_ABSENCES_TO_JUDGE and n_b < MIN_ABSENCES_TO_JUDGE:
+  # old: a local MIN_ABSENCES_TO_JUDGE = 5 shadowed the module constant (10)
+  if n_a < MIN_DISPUTED_ABSENCES and n_b < MIN_DISPUTED_ABSENCES:
     return 0
 
   intensities = flex.pow2(f_obs_p1.data())
   def weakness(mask, n, other):
     """ Mean intensity of the disputed class against the undisputed rest. """
-    if n < MIN_ABSENCES_TO_JUDGE:
+    if n < MIN_DISPUTED_ABSENCES:
       return None
     rest = intensities.select(~(a | b))
     if rest.size() == 0:
@@ -983,7 +987,8 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   top = scored[:PAIRWISE_RUNOFF_SIZE]
   top += [first[g] for g in sigs if not any(first[g] is e for e in top)]
   measured = (any(e.judged_by == "intensity" for e in top)
-              and not any(e.judged_by == "coverage" and e.n_predicted_absent < 5 for e in top))
+              and not any(e.judged_by == "coverage" and e.n_predicted_absent < MIN_DISPUTED_ABSENCES
+                              for e in top))
   if (discriminating or measured) and len(scored) > 1:
     reps = [first[g] for g in sigs]
     wins = dict(zip(sigs, copeland_scores(f_obs_p1, reps, max_ratio=max_absence_ratio)))

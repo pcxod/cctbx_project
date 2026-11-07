@@ -19,70 +19,7 @@
 
 namespace smtbx { namespace structure_factors { namespace table_based {
 
-#if defined(_WIN32)
-  /* UTF-8 path to UTF-16 for the wide Win32 open, false if not valid UTF-8.
-     Boost.Python passes str as UTF-8 but narrow fopen/ifstream read the ANSI
-     code page, so a path outside it cannot be opened narrow at all. Decoded by
-     hand to keep <windows.h> (and its min/max macros) out of this header;
-     non-UTF-8 bytes fall back to the narrow open
-   */
-  inline bool utf8_to_wide(const std::string &utf8, std::wstring &wide) {
-    wide.clear();
-    wide.reserve(utf8.size());
-    for (std::size_t i = 0; i < utf8.size();) {
-      const unsigned char c = static_cast<unsigned char>(utf8[i]);
-      unsigned int cp;
-      std::size_t n;
-      if (c < 0x80) { cp = c; n = 1; }
-      else if ((c & 0xE0) == 0xC0) { cp = c & 0x1F; n = 2; }
-      else if ((c & 0xF0) == 0xE0) { cp = c & 0x0F; n = 3; }
-      else if ((c & 0xF8) == 0xF0) { cp = c & 0x07; n = 4; }
-      else return false;
-      if (i + n > utf8.size()) return false;
-      for (std::size_t k = 1; k < n; k++) {
-        const unsigned char cc = static_cast<unsigned char>(utf8[i + k]);
-        if ((cc & 0xC0) != 0x80) return false;
-        cp = (cp << 6) | (cc & 0x3F);
-      }
-      if (cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) return false;
-      if (cp >= 0x10000) {
-        cp -= 0x10000;
-        wide.push_back(static_cast<wchar_t>(0xD800 + (cp >> 10)));
-        wide.push_back(static_cast<wchar_t>(0xDC00 + (cp & 0x3FF)));
-      }
-      else {
-        wide.push_back(static_cast<wchar_t>(cp));
-      }
-      i += n;
-    }
-    return true;
-  }
-#endif
-
-  /// fopen that can reach a path outside the ANSI code page on Windows
-  inline std::FILE *open_for_reading(const std::string &name) {
-#if defined(_WIN32)
-    std::wstring wide;
-    if (utf8_to_wide(name, wide)) {
-      return _wfopen(wide.c_str(), L"rb");
-    }
-#endif
-    return std::fopen(name.c_str(), "rb");
-  }
-
-  /// ifstream::open that can reach a path outside the ANSI code page on Windows
-  inline void open_stream(std::ifstream &stream, const std::string &name,
-    std::ios::openmode mode)
-  {
-#if defined(_WIN32)
-    std::wstring wide;
-    if (utf8_to_wide(name, wide)) {
-      stream.open(wide.c_str(), mode);
-      return;
-    }
-#endif
-    stream.open(name.c_str(), mode);
-  }
+  // utf8_to_wide, open_for_reading, open_stream: in harmonic_expansion.h
 
   /* read-only C stdio handle: fread moves a multi-GB .tscb about twice as fast
      as std::ifstream, chunked or not. Only the seek is platform code, since

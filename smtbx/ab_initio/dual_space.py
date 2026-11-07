@@ -382,7 +382,5 @@ def recycle(f_obs, start_phases, n_atoms, cycles=DEFAULT_CYCLES,
 
 def improve(f_obs, f_calc_start, n_atoms, cycles=DEFAULT_CYCLES, seed=0):
   """ One call: `recycle` from a starting solution. """
-  result = recycle(f_obs, f_calc_start, n_atoms, cycles=cycles, seed=seed)
-  if result is None:
-    return None
-  return result
+  # old: stored the result and returned None for None, i.e. the result itself
+  return recycle(f_obs, f_calc_start, n_atoms, cycles=cycles, seed=seed)

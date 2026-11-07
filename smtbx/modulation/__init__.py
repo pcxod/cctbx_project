@@ -2560,9 +2560,12 @@ class change_of_basis(object):
     os_, oc = self._rotate(at.occ_sin, at.occ_cos)
     us, uc = self._rotate(at.u_sin, at.u_cos)
     saw = None if at.sawtooth is None else (self.p_inv.dot(at.sawtooth[0]), at.sawtooth[1] - self.d4, at.sawtooth[2])
+    # old: ended at saw, so xharm and u_xharm were silently dropped
+    # x-harmonics use the crenel-local x4, which d4 leaves unchanged: only P^-1 applies
     return modulated_atom(at.label, at.scattering_type, self.p_inv.dot(at.site - self.shift), at.u_iso,
                           at.occupancy, at.n_harmonics, [self.p_inv.dot(v) for v in a], [self.p_inv.dot(v) for v in b],
                           None if at.u_star is None else self._u_star(at.u_star), os_, oc,
                           [self._u_star(v) for v in us], [self._u_star(v) for v in uc], at.site_weight,
                           None if at.crenel is None else (at.crenel[0] - self.d4, at.crenel[1]),
-                          [self.p_inv.dot(v) for v in at.legendre], saw)
+                          [self.p_inv.dot(v) for v in at.legendre], saw,
+                          [self.p_inv.dot(v) for v in at.xharm], [self._u_star(v) for v in at.u_xharm])

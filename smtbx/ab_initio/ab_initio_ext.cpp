@@ -87,9 +87,9 @@ namespace smtbx { namespace ab_initio { namespace boost_python {
           static_cast<f_t>(flip_charges_in_place));
       def("low_density_elimination_in_place_tanaka_et_al_2001",
           static_cast<f_t>(low_density_elimination_in_place_tanaka_et_al_2001));
-      def("oszlanyi_suto_phase_transfer", oszlanyi_suto_phase_transfer,
-          (arg("space_group"), arg("miller_indices"), arg("f_obs_data"),
-           arg("source_data"), arg("cut"), arg("delta_varphi")));
+      /* old: oszlanyi_suto_phase_transfer was def'd here, once per grid
+         instantiation; it does not depend on the grid, so init_module does it
+       */
     }
   };
 
@@ -102,6 +102,9 @@ namespace smtbx { namespace ab_initio { namespace boost_python {
     density_modification_wrapper<double, af::c_grid_padded<3> >::wrap();
     density_modification_wrapper<double, af::flex_grid<> >::wrap();
     using namespace boost::python;
+    def("oszlanyi_suto_phase_transfer", oszlanyi_suto_phase_transfer,
+        (arg("space_group"), arg("miller_indices"), arg("f_obs_data"),
+         arg("source_data"), arg("cut"), arg("delta_varphi")));
     typedef charge_flipping_cycle wt;
     class_<wt>("charge_flipping_cycle", no_init)
       .def(init<af::tiny<int, 3> const&,

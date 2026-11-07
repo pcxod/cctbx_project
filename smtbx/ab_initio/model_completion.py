@@ -394,10 +394,10 @@ def prune_added(f_obs, placed, sites, calls, n_original,
     dst = dists[k] if dists and k < len(dists) else -1.0
     LAST_EVIDENCE.append((i, u/ref_u if ref_u > 0 else 0.0, shift, occ, sig,
                           dst))
-    drop = (u > U_RATIO*ref_u or u <= 0.0 or shift > MAX_SHIFT
-            or occ < MIN_OCC)
-    if BUDGET_MODE:
-      drop = False        # decided below, by the contest rather than per atom
+    # old: drop computed from the thresholds, then reset to False if BUDGET_MODE
+    # with BUDGET_MODE the contest below decides, not the per-atom thresholds
+    drop = not BUDGET_MODE and (u > U_RATIO*ref_u or u <= 0.0
+                                or shift > MAX_SHIFT or occ < MIN_OCC)
     # `mark` keeps everything and only records the evidence
     if drop and mode != "mark":
       dropped += 1
@@ -553,8 +553,7 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
       # carbon; the geometry aid retypes everything afterwards
       calls.append("C")
       added += 1
-    if len(found) <= 0:
-      break
+    # old: if len(found) <= 0: break  (unreachable, `if not found` above)
 
   # refine once more and drop the additions the refinement will not support,
   # before anything is typed; with swap even when nothing was added
