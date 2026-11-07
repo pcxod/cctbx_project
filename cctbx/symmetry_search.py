@@ -55,7 +55,9 @@ class shift_refinement(object):
     # depending on the shift (the P1 f_calc map, F^2, multiplicities) is built
     # once here, not on every L-BFGS evaluation; the same arithmetic
     assert f_obs.unit_cell().is_similar_to(fc_in_p1.unit_cell())
-    assert f_obs.is_xray_amplitude_array() or f_obs.is_xray_intensity_array()
+    if not (f_obs.is_xray_amplitude_array() or f_obs.is_xray_intensity_array()):
+      raise ValueError(
+        "f_obs must be an xray amplitude array or an xray intensity array")
     self._f_c_map = miller.f_calc_map(fc_in_p1.indices(), fc_in_p1.data(),
                                       f_obs.anomalous_flag())
     self._f_o_sq = (f_obs.f_as_f_sq() if f_obs.is_xray_amplitude_array()
