@@ -53,9 +53,16 @@ namespace smtbx { namespace modulation { namespace {
   void sincos_array(const double *x, double *s, double *c, std::size_t n)
   {
     const double two_over_pi = 0.63661977236758134308, p1 = 1.57079632673412561417e+00,
-                 p2 = 6.07710050650619224932e-11, p3 = 2.02226624879595063154e-21, magic = 6755399441055744.0;
+                 p2 = 6.07710050650619224932e-11, p3 = 2.02226624879595063154e-21;
     for (std::size_t i = 0; i < n; i++) {
-      double q = (x[i] * two_over_pi + magic) - magic;     // round to nearest, no libm call (|x| < 2^50)
+      // round to nearest by an int conversion, not (y + 1.5*2^52) - 1.5*2^52: /fp:fast and -ffast-math fold that
+      // to y (sin off by 1 under the cctbx --enable_fast_math build). GCC vectorises the conversion (cvttpd2dq);
+      // MSVC vectorised neither form of this loop.
+      // shortcut: |x| < 3.3e9 (int32 quadrant), far above any phase here; widen to int64 if that ever changes
+      // old: double q = (x[i] * two_over_pi + magic) - magic;     // round to nearest, no libm call (|x| < 2^50)
+      double y = x[i] * two_over_pi;
+      int qi = (int)(y >= 0.0 ? y + 0.5 : y - 0.5);
+      double q = (double)qi;
       double r = ((x[i] - q * p1) - q * p2) - q * p3;
       double z = r * r;
       double sr = r + r * z * (-1.66666666666666324348e-01 + z * (8.33333333332248946124e-03
@@ -64,11 +71,12 @@ namespace smtbx { namespace modulation { namespace {
       double cr = 1.0 - 0.5 * z + z * z * (4.16666666666666019037e-02 + z * (-1.38888888888741095749e-03
                   + z * (2.48015872894767294178e-05 + z * (-2.75573143513906633035e-07
                   + z * (2.08757232129817482790e-09 + z * -1.13596475577881948265e-11)))));
-      double qm = q - 4.0 * (((q - 1.5) * 0.25 + magic) - magic);     // the quadrant, 0..3
-      bool odd = qm == 1.0 || qm == 3.0;
+      // old: double qm = q - 4.0 * (((q - 1.5) * 0.25 + magic) - magic);     // the quadrant, 0..3
+      int qm = qi & 3;     // the quadrant, 0..3 (two's complement, so also for negative qi)
+      bool odd = (qm & 1) != 0;
       double sv = odd ? cr : sr, cv = odd ? sr : cr;
-      s[i] = qm >= 2.0 ? -sv : sv;
-      c[i] = (qm == 1.0 || qm == 2.0) ? -cv : cv;
+      s[i] = qm >= 2 ? -sv : sv;
+      c[i] = (qm == 1 || qm == 2) ? -cv : cv;
     }
   }
 
@@ -76,21 +84,22 @@ namespace smtbx { namespace modulation { namespace {
   void exp_array(double *x, std::size_t n)
   {
     const double log2e = 1.44269504088896338700, ln2hi = 6.93147180369123816490e-01,
-                 ln2lo = 1.90821492927058770002e-10, magic = 6755399441055744.0;
+                 ln2lo = 1.90821492927058770002e-10;
     for (std::size_t i = 0; i < n; i++) {
       double xv = x[i];
       double v = xv < -708.0 ? -708.0 : xv;
       v = v > 709.0 ? 709.0 : v;
-      double k = (v * log2e + magic) - magic;
+      // old: double k = (v * log2e + magic) - magic;     (folded to v * log2e under fast math, as in sincos_array)
+      double y = v * log2e;
+      int ki = (int)(y >= 0.0 ? y + 0.5 : y - 0.5);     // -1021..1023 after the clamp
+      double k = (double)ki;
       double r = (v - k * ln2hi) - k * ln2lo;
       double p = 1.0 + r * (1.0 + r * (1.0 / 2 + r * (1.0 / 6 + r * (1.0 / 24 + r * (1.0 / 120 + r * (1.0 / 720
                  + r * (1.0 / 5040 + r * (1.0 / 40320 + r * (1.0 / 362880 + r * (1.0 / 3628800
                  + r * (1.0 / 39916800 + r * (1.0 / 479001600 + r / 6227020800.0))))))))))));
-      // 2^k from the bits of k + 1023 placed in the exponent field: k + 1023 + 2^52 holds it in its low bits
-      double t = k + (1023.0 + 4503599627370496.0);
-      std::uint64_t b;
-      std::memcpy(&b, &t, 8);
-      b <<= 52;
+      // 2^k: k + 1023 placed in the exponent field
+      // old: double t = k + (1023.0 + 4503599627370496.0); std::memcpy(&b, &t, 8); b <<= 52;
+      std::uint64_t b = (std::uint64_t)(ki + 1023) << 52;
       double scale;
       std::memcpy(&scale, &b, 8);
       x[i] = p * scale;
