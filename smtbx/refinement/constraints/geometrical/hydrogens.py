@@ -21,7 +21,10 @@ class hydrogens(geometrical.any):
       constrained_site_conformer = conformer_indices[
         self.constrained_site_indices[0]]
       for i in self.constrained_site_indices:
-        assert conformer_indices[i] == constrained_site_conformer
+        assert conformer_indices[i] == constrained_site_conformer, (
+          "H group on %s: %s is in conformer %d, the group's first H in %d"
+          % (scatterers[i_pivot].label, scatterers[i].label,
+             conformer_indices[i], constrained_site_conformer))
     else: constrained_site_conformer = 0
     pivot_site = scatterers[i_pivot].site
     pivot_site_param = reparametrisation.add_new_site_parameter(i_pivot)
