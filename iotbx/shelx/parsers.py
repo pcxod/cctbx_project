@@ -424,6 +424,9 @@ class atom_parser(parser, variable_decoder):
         # are correctly set. Hence our fetching the scatterer from the builder
         # instead of using the pre-existing local variable.
         scatterer = builder.structure.scatterers()[-1]
+        # the PART goes on the scatterer too: tables keyed by scatterer id (.tshb)
+        # include it, and without it every PART atom failed to match its record
+        scatterer.set_part(part_number)
         self.process_possible_constrained_occupancy(scatterer_index,
                                                     scatterer,
                                                     behaviour_of_variable[3])
@@ -621,6 +624,8 @@ class restraint_parser(parser):
   def filtered_commands(self):
     self.cached_restraints = {}
     self.symmetry_operations = {}
+    # (command, line, atom names) of restraints naming an atom the model lacks
+    self.unresolved_restraints = []
     for command, line in self.command_stream:
       cmd, args = command[0], command[-1]
       if len(command) == 3:
@@ -659,11 +664,13 @@ class restraint_parser(parser):
           atom_resnum = residue_number - 1
       if atom_resnum is None:
         atom_resnum = residue_number
+      key = (atom_resnum, atom.name.lower())
       try:
-        i_seq = self.builder.index_of_scatterer_named[(atom_resnum,
-                                                       atom.name.lower())]
+        i_seq = self.builder.index_of_scatterer_named[key]
       except KeyError:
         return None
+      if key in getattr(self.builder, 'ambiguous_names', ()):
+        self.__dict__.setdefault('ambiguous_restraint_atoms', set()).add(key)
       i_seqs.append(i_seq)
     return i_seqs
 
@@ -700,7 +707,13 @@ class restraint_parser(parser):
         for residue_number in residues:
           try:
             i_seqs = self.i_seqs_from_atoms(atoms, residue_number)
-            if i_seqs is None: continue
+            if i_seqs is None:
+              # a residue-class restraint (SADI_ALA) legitimately skips residues
+              # lacking an atom; an explicit one names a missing atom
+              if cmd_residue is None or cmd_residue[0] == tokens.residue_number_tok:
+                self.unresolved_restraints.append(
+                  (cmd, line, residue_number, [a.name for a in atoms]))
+              continue
             restraint_type = self.restraint_types.get(cmd)
             if cmd in ('DFIX','DANG'):
               assert len(floats) in (1, 2)
@@ -789,3 +802,15 @@ class restraint_parser(parser):
               pass
           except (TypeError, AssertionError):
             raise shelx_error("Invalid %s instruction" %cmd, line)
+    if self.unresolved_restraints:
+      # these used to vanish without a word (30or: a whole class of residue references)
+      ex = "; ".join("%s at line %d: %s" % (c, l + 1, " ".join(a))
+                     for c, l, r, a in self.unresolved_restraints[:3])
+      print("WARNING: %d restraint(s) name atoms that are not in the model and were"
+            " dropped, e.g. %s" % (len(self.unresolved_restraints), ex))
+    amb = sorted(getattr(self, 'ambiguous_restraint_atoms', ()), key=str)
+    if amb:
+      print("WARNING: restraints name %d atom(s) whose name occurs in more than one PART"
+            " or chain of the same residue number; each binds to the LAST such atom only,"
+            " e.g. %s" % (len(amb), ", ".join(n.upper() + ("_%s" % r if r is not None else "")
+                                              for r, n in amb[:5])))

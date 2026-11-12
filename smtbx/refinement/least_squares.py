@@ -602,6 +602,10 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       that shows in a reported figure.
       """
       fo_sq = self.observations.fo_sq
+      work = self._work_selection()
+      if work is not None:
+        # the scale of the structure, fitted where the structure was refined
+        fo_sq, fc_sq = fo_sq.select(work), fc_sq.select(work)
       yo = fo_sq.data()
       k = self.ml_crystallographic_scale or 1.0
       for _ in range(2):
@@ -682,8 +686,11 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       choosing between targets compares like with like. The likelihood is still
       what is being minimised; this only describes the model it reaches.
       """
-      fo_sq = self.observations.fo_sq
-      yo, yc = fo_sq.data(), self.fc_sq.data()
+      fo_sq, fc_sq = self.observations.fo_sq, self.fc_sq
+      work = self._work_selection()
+      if work is not None:
+        fo_sq, fc_sq = fo_sq.select(work), fc_sq.select(work)
+      yo, yc = fo_sq.data(), fc_sq.data()
       k = self.scale_factor()
       w = self.weighting_scheme(yo, fo_sq.sigmas(), yc, fo_sq.indices(), k)
       r = yo - k*yc
@@ -729,25 +736,45 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
         if self.ml_target is not None:
           return self.least_squares_statistics()[0]
         return math.sqrt(2*self.objective_data_only)
-      fo_sq = self.observations.fo_sq
+      fo_sq, fc_sq, wght = self.observations.fo_sq, self.fc_sq, self.weights
+      work = self._work_selection()
+      if work is not None:
+        fo_sq, fc_sq, wght = fo_sq.select(work), fc_sq.select(work), wght.select(work)
       strong = fo_sq.data() >= cutoff_factor*fo_sq.sigmas()
       fo_sq = fo_sq.select(strong)
-      fc_sq = self.fc_sq.select(strong)
-      wght = self.weights.select(strong)
+      fc_sq = fc_sq.select(strong)
+      wght = wght.select(strong)
       fc_sq = fc_sq.data()
       fo_sq = fo_sq.data()
       fc_sq *= self.scale_factor()
       wR2 = flex.sum(wght*flex.pow2((fo_sq-fc_sq)))/flex.sum(wght*flex.pow2(fo_sq))
       return math.sqrt(wR2)
 
+    def _work_selection(self):
+      """ ~free under a likelihood target with free flags, else None.
+
+      The free reflections are in the observations (alpha and beta are
+      estimated on them) but not in the target; R1, wR2, the goodness of fit and
+      the scale describe the fit to the reflections refined against, so they
+      leave them out, and r_free() reports them.
+      """
+      free = self.ml_free_flags if self.ml_target is not None else None
+      if free is None or free.count(True) == 0:
+        return None
+      return ~free
+
     def r1_factor(self, cutoff_factor=None):
-      fo_sq = self.observations.fo_sq
+      """ (R1, number of reflections), at the least-squares Fo^2 scale (not the
+      amplitude scale f_obs.r1_factor would fit); under a likelihood target over
+      the working reflections only. """
+      fo_sq, fc_sq = self.observations.fo_sq, self.fc_sq
+      work = self._work_selection()
+      if work is not None:
+        fo_sq, fc_sq = fo_sq.select(work), fc_sq.select(work)
       if cutoff_factor is not None:
         strong = fo_sq.data() >= cutoff_factor*fo_sq.sigmas()
         fo_sq = fo_sq.select(strong)
-        fc_sq = self.fc_sq.select(strong)
-      else:
-        fc_sq = self.fc_sq
+        fc_sq = fc_sq.select(strong)
       f_obs = fo_sq.f_sq_as_f()
       f_calc = fc_sq.f_sq_as_f()
       R1 = f_obs.r1_factor(f_calc,

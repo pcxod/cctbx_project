@@ -46,6 +46,8 @@ tst_list = [
     # the unstable ones, which run() does not run at all
     "$D/refinement/tests/tst_scipy_minimisers.py",
     "$D/refinement/tests/tst_cgls.py",
+    # seeds its own random numbers
+    "$D/refinement/tests/tst_ml_work_statistics.py",
     "$D/modulation/tests/tst_modulation.py",
 ]
 

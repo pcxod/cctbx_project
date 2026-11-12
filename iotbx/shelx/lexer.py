@@ -145,6 +145,12 @@ class command_stream(object):
           (cmd, cmd_residue_class, cmd_residue_number) = m.group(3,4,5)
           cmd = cmd.upper()
           if cmd_residue_class:
+            if ':' in cmd_residue_class:
+              # e.g. DANG_A:45: taken as residue class 'A:45', which then failed
+              # with a bare KeyError far from the line
+              raise shelx_error("chain-qualified residue '%s' after a command is not"
+                                " supported (use the residue number alone)",
+                                i, cmd_residue_class)
             cmd_residue = (tokens.residue_class_tok, cmd_residue_class.upper())
           elif cmd_residue_number:
             cmd_residue = (tokens.residue_number_tok, int(cmd_residue_number))
@@ -221,6 +227,13 @@ class command_stream(object):
           m = self._atom_name_pat.match(arg)
           if m is None:
             raise shelx_error("illegal argument '%s'", i, arg)
+          rest = arg[m.end():]
+          if rest and rest != '_*':
+            # match() stops at what it understands: 'C_A:26' was read as atom C of the
+            # current residue, 'N_-3' as N of the previous one, a 5-character name as
+            # its first 4 - each silently the wrong atom
+            raise shelx_error("cannot read atom reference '%s' (unparsed '%s'; residues"
+                              " are referred to as _<unsigned number>)", i, arg, rest)
           name, symmetry, resnum, plus_minus = m.group(
             'name', 'symmetry', 'resnum', 'plusminus')
           if name is not None:

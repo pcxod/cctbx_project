@@ -57,6 +57,7 @@ class crystal_structure_builder(crystal_symmetry_builder):
     self.sym_excl_indices = None
     self.electron_density_peaks = []
     self.index_of_scatterer_named = {}
+    self.ambiguous_names = set()
     self.residue_class_of_residue_number = {}
     self.residue_numbers_having_class = {}
 
@@ -111,8 +112,12 @@ class crystal_structure_builder(crystal_symmetry_builder):
     if sym_excl_index is not None:
       if self.sym_excl_indices is None: self.sym_excl_indices = flex.size_t()
       self.sym_excl_indices.append(sym_excl_index)
-    self.index_of_scatterer_named[
-      (residue_number, scatterer.label.lower())] = scatterer_index
+    key = (residue_number, scatterer.label.lower())
+    if key in self.index_of_scatterer_named:
+      # same name in another PART or chain: the later atom wins the name, so a
+      # restraint naming it binds to that one only (see ambiguous_names)
+      self.__dict__.setdefault('ambiguous_names', set()).add(key)
+    self.index_of_scatterer_named[key] = scatterer_index
 
 
   def add_electron_density_peak(self, site, height):
