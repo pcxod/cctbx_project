@@ -234,6 +234,7 @@ def exercise_instruction_parsing():
 
 def exercise_xray_structure_parsing():
   exercise_special_positions()
+  exercise_symmetry_implied_fixes()
   exercise_aspirin()
   exercise_disordered()
   exercise_invalid()
@@ -299,6 +300,27 @@ def exercise_special_positions():
   multiplicities = [ sc.multiplicity() for sc in structure.scatterers() ]
   assert multiplicities == [ 2, 2, 2, 2, 6 ]
   assert approx_equal(occupancies, [ 1, 0.9999, 1, 1, 1 ], eps=1e-15)
+
+def exercise_symmetry_implied_fixes():
+  # K1 sits on the 3-fold axis of P6(3): x, y, U13, U23 are fixed by symmetry
+  # (and U22, U12 follow from U11). A ShelXL fix on such a component used to
+  # freeze the whole site or U, since one grad flag covers all components.
+  def k1_flags(xyz, uij):
+    ins = ins_special_positions.replace(
+      "K1    4    0.000000    0.000000   -0.001950    10.33333    0.02427    0.02427 =\n"
+      "         0.02379    0.00000    0.00000    0.01214",
+      "K1    4    %s    10.33333    0.02427    0.02427 =\n         %s" % (xyz, uij))
+    assert ins != ins_special_positions
+    structure = xray.structure.from_shelx(file=StringIO(ins))
+    k1 = structure.scatterers()[0]
+    assert k1.label == 'K1'
+    return k1.flags.grad_site(), k1.flags.grad_u_aniso()
+  # symmetry-implied fixes only: everything still refined
+  assert k1_flags("10.000000   10.000000   -0.001950",
+                  "0.02379   10.00000   10.00000    0.01214") == (True, True)
+  # a real fix (z, U33) still fixes the whole site / U
+  assert k1_flags("10.000000   10.000000   9.998050",
+                  "10.02379   10.00000   10.00000    0.01214") == (False, False)
 
 def exercise_aspirin():
   for set_grad_flags in (False, True):

@@ -67,6 +67,17 @@ class crystal_structure_builder(crystal_symmetry_builder):
         crystal_symmetry=self.crystal_symmetry,
         min_distance_sym_equiv=self.min_distance_sym_equiv))
 
+  def _symmetry_implied_components(self, site):
+    """ Indices of the site (x y z) and u_star components that the site
+    symmetry of `site` determines from the others """
+    ss = self.structure.special_position_settings().site_symmetry(site)
+    if ss.is_point_group_1():
+      return (), ()
+    free_site = set(ss.site_constraints().independent_indices)
+    free_u = set(ss.adp_constraints().independent_indices)
+    return ({i for i in range(3) if i not in free_site},
+            {i for i in range(6) if i not in free_u})
+
   def add_residue(self, residue_number, residue_class):
     self.residue_class_of_residue_number[residue_number] = residue_class
     self.residue_numbers_having_class.setdefault(
@@ -86,16 +97,28 @@ class crystal_structure_builder(crystal_symmetry_builder):
     """
     if self.set_grad_flags:
       f = scatterer.flags
-      if all(is_refined[0:3]):
+      # one grad flag covers a whole site or U, so a single fixed component
+      # fixes all of them; a fix on a component the site symmetry already
+      # determines (ShelXL 10.0 on a symmetry-zero Uij, or a CIF Uij without
+      # an s.u.) is not a fix at all and must not freeze the atom - nor the
+      # anharmonic tensor, which is variable only with grad_u_aniso
+      implied_site, implied_u = (), ()
+      if not (all(is_refined[0:3]) and all(is_refined[-6:])):
+        implied_site, implied_u = self._symmetry_implied_components(
+          scatterer.site)
+      if all(r or i in implied_site for i, r in enumerate(is_refined[0:3])):
         f.set_grad_site(True)
+      # old: if all(is_refined[0:3]):
       if is_refined[3]:
         f.set_grad_occupancy(True)
       if f.use_u_iso():
         if is_refined[4]:
           f.set_grad_u_iso(True)
       else:
-        if all(is_refined[-6:]):
+        # is_refined[-6:] in u_star order: U11 U22 U33 U12 U13 U23
+        if all(r or i in implied_u for i, r in enumerate(is_refined[-6:])):
           f.set_grad_u_aniso(True)
+        # old: if all(is_refined[-6:]):
     self.structure.add_scatterer(scatterer)
     scatterer_index = len(self.structure.scatterers()) - 1
 
