@@ -775,8 +775,10 @@ namespace cctbx { namespace xray { namespace twin_targets {
           CCTBX_ASSERT( tmp_loc >= 0 );
           obs_to_calc_.push_back( tmp_loc );
 
+          // may be negative too: a twin law that is not integral (COD 1519406)
+          // leaves a completed set that is not closed under it. Every user of
+          // obs_to_twin_calc_ checks for that, as for obs_to_twin_obs_.
           tmp_loc = tmp_calc.find_hkl( twin_mate(hkl_obs[ii], twin_law) );
-          CCTBX_ASSERT( tmp_loc >= 0 );
           obs_to_twin_calc_.push_back( tmp_loc );
        }
        CCTBX_ASSERT(hkl_obs.size() != 0);
