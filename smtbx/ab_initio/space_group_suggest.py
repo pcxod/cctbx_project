@@ -79,6 +79,18 @@ COVERAGE_SURE_MARGIN = 0.9
 # the other centricity.
 CENTRIC_AMBIGUOUS = (0.78, 0.92)
 
+# Z' tie-break (see `zprime_loglik`). Fitted on the even-CRC half of a 10k COD
+# replay (16 Nov 2026): prior over the Z' crystallographers deposit, and the
+# log offset (median) and robust spread of V/(18 A^3 * non-H atoms) against the
+# deposited Z. The margin was chosen on that half too; on the other 5019
+# structures it moved top-1 from 0.861 to 0.872 (+100/-47, McNemar p 1.5e-5),
+# while switching on any gain lost as much as it won.
+ZPRIME_PRIOR = {0.125: 0.005, 0.25: 0.0151, 0.5: 0.1909, 1: 0.7011,
+                1.5: 0.0012, 2: 0.0788, 3: 0.0052, 4: 0.0021, 6: 0.0006}
+ZPRIME_MU = 0.01347
+ZPRIME_SIGMA = 0.12886
+ZPRIME_MARGIN = 1.5
+
 # Below this coverage margin a group's predicted absences are no more missing
 # than the file is incomplete anyway. Low, because absent-from-file is only
 # evidence if the file deletes absences, which is inferred.
@@ -630,6 +642,135 @@ def inversion_agreement(f_calc_in_p1):
   return None
 
 
+def zprime_loglik(n_formula, multiplicity):
+  """ log P(cell content | group): formula units per cell `n_formula` (from
+  the volume, offset by ZPRIME_MU) over the general multiplicity is Z',
+  lognormal around each Z' of ZPRIME_PRIOR. """
+  import math
+  z = math.log(n_formula/multiplicity)
+  s = sum(p*math.exp(-0.5*((z - math.log(k))/ZPRIME_SIGMA)**2)
+          for k, p in ZPRIME_PRIOR.items())
+  return math.log(s) if s > 0 else -1e9
+
+
+def laue_from_data(i_obs, max_delta=3.0, tau=0.15, min_pairs=10, n_bins=20):
+  """ The Laue class the unmerged intensities obey, whatever group was typed.
+
+  `i_obs`: unmerged intensities in the input cell, its space group holding
+  only the lattice translations to keep (P1 for none). Every proper rotation
+  of the lattice group (metric tolerance `max_delta` degrees) is tested by the
+  correlation of shell-normalised, P-1-merged intensities over pairs (h, hR);
+  each Laue subgroup is scored by the summed Fisher-z log-likelihood ratios of
+  its rotations, "true" sitting at the repeat-measurement CC, "false" at 0,
+  both widened by `tau`. A rotation without `min_pairs` pairs abstains: data
+  merged in a group cannot test that group's own rotations, so `determined`
+  is False then and the input class must stand. Equal scores go to the lower
+  order.
+
+  COD, 3000 deposits (16 Nov 2026): determined on 93.5 %, and then agrees
+  with the deposited Laue class on 98.5 %; the disagreements are mostly
+  upwards (pseudo-merohedral twins, pseudo-symmetry).
+
+  Returns group_args(laue_group_info, determined, cc_ref, n_unknown,
+  candidates): `laue_group_info` is the centring-free derived Laue group in
+  the input cell, comparable with `candidate_groups`; candidates are
+  (point group, score) best first.
+  """
+  import math
+  from cctbx import sgtbx
+  from cctbx.sgtbx import lattice_symmetry
+
+  def canon(h):  # P-1: Friedel mates and repeats share a key
+    m = (-h[0], -h[1], -h[2])
+    return h if h > m else m
+
+  def cc(pairs):
+    n = len(pairs)
+    if n < min_pairs:
+      return None
+    mx = sum(p[0] for p in pairs)/n
+    my = sum(p[1] for p in pairs)/n
+    sxy = sum((x - mx)*(y - my) for x, y in pairs)
+    sxx = sum((x - mx)**2 for x, _ in pairs)
+    syy = sum((y - my)**2 for _, y in pairs)
+    return sxy/math.sqrt(sxx*syy) if sxx > 0 and syy > 0 else None
+
+  fz = lambda c: math.atanh(max(-0.999, min(0.999, c)))
+
+  def proper(group):  # proper rotations, identity excluded
+    out = set()
+    for s in group:
+      r = s.r()
+      if r.den() == 1 and r.determinant() == 1:
+        t = tuple(r.num())
+        if t != (1, 0, 0, 0, 1, 0, 0, 0, 1):
+          out.add(t)
+    return out
+
+  ms = lattice_symmetry.metric_subgroups(
+    i_obs.crystal_symmetry(), max_delta=max_delta, bravais_types_only=False)
+  cb = i_obs.change_of_basis_op_to_minimum_cell()
+  a = i_obs.change_basis(cb)
+  uc = a.unit_cell()
+  obs = {}
+  for h, i in zip(a.indices(), a.data()):
+    obs.setdefault(canon(tuple(h)), []).append(i)
+  mean = dict((k, sum(v)/len(v)) for k, v in obs.items())
+  # I/<I> in equal-count resolution shells
+  by_d = sorted(obs, key=lambda k: uc.d(k))
+  norm = {}
+  step = max(1, len(by_d)//n_bins)
+  for b in range(0, len(by_d), step):
+    shell = by_d[b:b + step]
+    m = sum(mean[k] for k in shell)/len(shell)
+    for k in shell:
+      norm[k] = mean[k]/m if m > 0 else 0.0
+  # what a true rotation can reach: two measurements of one reflection
+  ref = []
+  for k, v in obs.items():
+    if len(v) >= 2 and norm[k]:
+      m = mean[k]/norm[k]
+      if m > 0:
+        ref.append((v[0]/m, v[1]/m))
+  cc_ref = cc(ref)
+  z_true = fz(min(cc_ref, 0.95)) if cc_ref is not None else fz(0.9)
+  # ponytail: pure-Python pair loop, ~0.3 s on a typical COD set; vectorise
+  # with flex if 10^5-reflection files make it noticeable
+  llr, n_unknown = {}, 0
+  for r in proper(ms.lattice_group_info().group()):
+    pairs = []
+    for k in norm:
+      k2 = canon((k[0]*r[0] + k[1]*r[3] + k[2]*r[6],
+                  k[0]*r[1] + k[1]*r[4] + k[2]*r[7],
+                  k[0]*r[2] + k[1]*r[5] + k[2]*r[8]))
+      if k2 != k and k2 in norm:
+        pairs.append((norm[k], norm[k2]))
+    c = cc(pairs)
+    if c is None:
+      llr[r] = 0.0
+      n_unknown += 1
+      continue
+    s = math.hypot(1.0/math.sqrt(len(pairs) - 3), tau)
+    llr[r] = 0.5*(fz(c)/s)**2 - 0.5*((fz(c) - z_true)/s)**2
+  cands = []
+  for g in ms.result_groups:
+    grp = g["subsym"].space_group()
+    score = sum(llr.get(r, 0.0) for r in proper(grp))
+    cands.append((-round(score, 3), grp.order_p(), grp))
+  cands.sort(key=lambda c: c[:2])
+  if not cands:
+    return None
+  # subsym lives in the minimum cell; back to the input cell for comparison
+  best = cands[0][2].change_basis(cb.inverse())
+  return group_args(
+    laue_group_info=sgtbx.space_group_info(
+      group=best.build_derived_laue_group()),
+    determined=n_unknown == 0,
+    cc_ref=cc_ref,
+    n_unknown=n_unknown,
+    candidates=[(str(g.point_group_type()), -s) for s, _, g in cands])
+
+
 def candidate_groups(unit_cell, laue_group_info=None, f_calc_in_p1=None,
                      phi_sym_acceptance_cutoff=0.50):
   """ Space groups worth considering, before any evidence is applied.
@@ -671,8 +812,12 @@ def candidate_groups(unit_cell, laue_group_info=None, f_calc_in_p1=None,
 
 
 def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
-            max_absence_ratio=DEFAULT_MAX_ABSENCE_RATIO, ensure_centric=False):
+            max_absence_ratio=DEFAULT_MAX_ABSENCE_RATIO, ensure_centric=False,
+            non_h_per_formula=None):
   """ A ranked shortlist of space groups for a P1 solution.
+
+  `non_h_per_formula`: non-H atoms per formula unit, if known; enables the
+  Z' tie-break (`zprime_loglik`, ZPRIME_MARGIN).
 
   The shortlist holds one setting per group: a second setting of the same
   group with the same absences (Cc and Cn in a C-centred cell) only wastes a
@@ -1020,9 +1165,38 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
     except Exception:
       pass
 
+  # Z' tie-break: among candidates the evidence cannot separate from the
+  # leader (same absences, same evidence; centricity too unless <|E^2-1|> is
+  # inside CENTRIC_AMBIGUOUS), take the one whose multiplicity gives the most
+  # usual Z' -- only when it beats the leader by ZPRIME_MARGIN in log
+  # likelihood. Outside the band the block is an exact tie, almost always an
+  # enantiomorph pair, where Z' is blind.
+  if non_h_per_formula and len(scored) > 1:
+    import math
+    n_formula = (f_obs.unit_cell().volume()/(18.0*non_h_per_formula)
+                 /math.exp(ZPRIME_MU))
+    drop_c = (stat is not None
+              and CENTRIC_AMBIGUOUS[0] <= stat <= CENTRIC_AMBIGUOUS[1])
+    def tie_key(e):
+      k = order(e)[:-1]
+      k = k[:-1] + (round(k[-1], 9),)
+      return k if drop_c else ((0 if e.centric_agrees is not False else 1),) + k
+    lead = scored[0]
+    block = [e for e in scored
+             if sig(e) == sig(lead) and tie_key(e) == tie_key(lead)]
+    ll = lambda e: zprime_loglik(n_formula,
+                                 e.space_group_info.group().order_z())
+    best = max(block, key=lambda e: (ll(e), -e.frequency_rank))
+    if ll(best) - ll(lead) > ZPRIME_MARGIN:
+      best.zprime_gain = ll(best) - ll(lead)
+      scored = [best] + [e for e in scored if e is not best]
+
   for entry in scored:
     if entry.reason is None:
       bits = []
+      if getattr(entry, "zprime_gain", None):
+        bits.append("cell volume fits its Z' better (log-likelihood +%.1f)"
+                    % entry.zprime_gain)
       # say which test spoke: measured weak, or merely not in the file
       if entry.judged_by == "intensity" and entry.n_predicted_absent:
         bits.append("%d predicted absences, at %.0f%% of the mean intensity"
@@ -1110,3 +1284,22 @@ def show(result, out=None):
           file=out)
   if not result.suggestions:
     print("No space group could be suggested.", file=out)
+
+
+if __name__ == "__main__":
+  # Z' prior peaks at 1: four formula units per cell want multiplicity 4.
+  assert max((1, 2, 4, 8, 16), key=lambda m: zprime_loglik(4.0, m)) == 4
+  assert zprime_loglik(4.0, 4) - zprime_loglik(4.0, 16) > ZPRIME_MARGIN
+  # Laue class from unmerged data: P2(1)/c in a metrically orthorhombic cell
+  # must come out 2/m (number 10), not mmm, and determined.
+  from cctbx import sgtbx, uctbx
+  from cctbx.development import random_structure
+  xs = random_structure.xray_structure(
+    sgtbx.space_group_info("P 1 21/c 1"), elements=["C"]*12,
+    unit_cell=uctbx.unit_cell((9, 11, 13, 90, 90, 90)))
+  i_p1 = xs.structure_factors(d_min=1.0).f_calc().as_intensity_array() \
+    .expand_to_p1()
+  res = laue_from_data(i_p1)
+  assert res.determined, res.n_unknown
+  assert res.laue_group_info.type().number() == 10, str(res.laue_group_info)
+  print("OK")
