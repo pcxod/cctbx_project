@@ -7,11 +7,53 @@
 #include <boost/shared_ptr.hpp>
 #include <smtbx/structure_factors/direct/standard_xray.h>
 #include <cctbx/miller/lookup_utils.h>
+#include <smtbx/structure_factors/direct/harmonic_expansion.h>
+#include <cstdlib>
+#include <cstring>
+#include <charconv>
 #include <cctbx/xray/scatterer_lookup.h>
 #include <fstream>
+#include <cstdio>
+#include <set>
 #include <stdint.h>
 
 namespace smtbx { namespace structure_factors { namespace table_based {
+
+  // utf8_to_wide, open_for_reading, open_stream: in harmonic_expansion.h
+
+  /* read-only C stdio handle: fread moves a multi-GB .tscb about twice as fast
+     as std::ifstream, chunked or not. Only the seek is platform code, since
+     fseek takes a long, which is 32 bits on Windows
+   */
+  class c_file {
+    std::FILE *f_;
+    c_file(const c_file &);
+    c_file &operator=(const c_file &);
+  public:
+    explicit c_file(const std::string &name) : f_(open_for_reading(name)) {}
+    ~c_file() { if (f_ != NULL) std::fclose(f_); }
+    bool ok() const { return f_ != NULL; }
+    bool seek(std::streamoff offset) {
+#if defined(_WIN32)
+      return _fseeki64(f_, static_cast<__int64>(offset), SEEK_SET) == 0;
+#else
+      return fseeko(f_, static_cast<off_t>(offset), SEEK_SET) == 0;
+#endif
+    }
+    /// false means a short read, which every caller treats as a malformed table
+    bool read(void *dst, std::size_t bytes) {
+      return std::fread(dst, 1, bytes, f_) == bytes;
+    }
+    /// step over bytes without moving them; used for rows nobody will ask for
+    bool skip(std::streamoff bytes) {
+#if defined(_WIN32)
+      return _fseeki64(f_, static_cast<__int64>(bytes), SEEK_CUR) == 0;
+#else
+      return fseeko(f_, static_cast<off_t>(bytes), SEEK_CUR) == 0;
+#endif
+    }
+  };
+
 
   template <typename FloatType>
   class table_data {
@@ -78,6 +120,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
   private:
     typedef table_data<FloatType> parent_t;
     const uctbx::unit_cell& u_cell;
+    // empty means keep everything; otherwise rows outside it are skipped
+    std::set<cctbx::miller::index<>, cctbx::miller::fast_less_than<> > wanted_;
 
     void read(af::shared<xray::scatterer<float_type> > const& scatterers,
       const std::string &file_name)
@@ -85,7 +129,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       using namespace std;
     //   typedef cctbx::xray::scatterer_id_5<float_type, fractional<float_type>, 16> scatterer_id_t;
     typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
-      ifstream in_file(file_name.c_str());
+      ifstream in_file;
+      open_stream(in_file, file_name, ios::in);
       string line;
       vector<std::string> toks;
       size_t lc = 0;
@@ -180,6 +225,9 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         }
         // data
         else {
+          /* old: replaced by the in-place parse below, which gives the same
+             numbers without three heap strings per value and without an OpenMP
+             region per row
           boost::split(toks, line, boost::is_any_of(" "));
           // as many columns as the table names, which need not be as many
           // atoms as the structure has
@@ -210,8 +258,140 @@ namespace smtbx { namespace structure_factors { namespace table_based {
             }
           }
           parent_t::data_.push_back(row);
+          */
+          const char *p = line.c_str();
+          char *end;
+          int hkl[3];
+          for (int k = 0; k < 3; k++) {
+            hkl[k] = static_cast<int>(std::strtol(p, &end, 10));
+            SMTBX_ASSERT(end != p)(lc);
+            p = end;
+          }
+          parent_t::miller_indices_.push_back(
+            cctbx::miller::index<>(hkl[0], hkl[1], hkl[2]));
+          // an atom the table misses keeps a zero and is served elsewhere
+          vector<complex_type> row(scatterers.size(), complex_type(0));
+          // as many columns as the table names, which need not be as many
+          // atoms as the structure has
+          const char *const line_end = p + std::strlen(p);
+          // from_chars: correctly rounded like strtod, faster, locale-independent
+          auto number = [&](float_type &v) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (*p == '+') p++;
+#if defined(__cpp_lib_to_chars)
+            std::from_chars_result r = std::from_chars(p, line_end, v);
+            if (r.ec != std::errc()) return false;
+            p = r.ptr;
+#else
+            // libc++ before LLVM 20 (Apple clang, the Android NDK) has no
+            // floating-point from_chars; strtod reads as the old atof did
+            char *e;
+            v = static_cast<float_type>(std::strtod(p, &e));
+            if (e == p) return false;
+            p = e;
+#endif
+            return true;
+          };
+          for (size_t col = 0; col < sc_indices.size(); col++) {
+            float_type re, im = 0;
+            SMTBX_ASSERT(number(re))(lc)(col);  // fewer columns than named
+            if (*p == ',') {
+              p++;
+              SMTBX_ASSERT(number(im))(lc)(col);
+            }
+            if (sc_indices[col] != static_cast<size_t>(~0)) {
+              row[sc_indices[col]] = complex_type(re, im);
+            }
+          }
+          while (*p == ' ' || *p == '\t') p++;
+          SMTBX_ASSERT(*p == 0)(lc);           // more columns than named
+          parent_t::data_.push_back(std::move(row));
         }
       }
+    }
+
+    /* SCATTERER_IDS records are 8 bytes in legacy files and 16 now, and the
+    header need not say which; read at the wrong width the ids are silently
+    misframed and match no atom. The id block is followed by the reflection
+    count and that many rows of 3 ints + n_columns complex<double>, so only the
+    true width makes the file size come out exact. Leaves the stream where it
+    found it
+    */
+    static void check_id_record_size(std::ifstream &tsc_file,
+      const std::string &file_name, const std::string &header_str, std::size_t n_columns)
+    {
+      typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
+      const std::size_t current = sizeof(scatterer_id_t), legacy = 8;
+      const std::streamoff id_block_start = tsc_file.tellg();
+      std::size_t width = declared_id_bytes(header_str);
+      if (width == 0) {
+        tsc_file.seekg(0, std::ios::end);
+        const std::streamoff total = tsc_file.tellg();
+        const std::streamoff row_bytes = static_cast<std::streamoff>(
+          3 * sizeof(int) + n_columns * sizeof(std::complex<double>));
+        const std::size_t candidates[2] = { current, legacy };
+        for (int i = 0; i < 2; i++) {
+          const std::streamoff end = id_block_start
+            + static_cast<std::streamoff>(n_columns * candidates[i]);
+          if (end + static_cast<std::streamoff>(sizeof(int)) > total) {
+            continue;
+          }
+          tsc_file.seekg(end);
+          int nr_hkl = 0;
+          tsc_file.read((char *)&nr_hkl, sizeof(int));
+          if (nr_hkl <= 0) {
+            continue;
+          }
+          if (total - end - static_cast<std::streamoff>(sizeof(int))
+              == static_cast<std::streamoff>(nr_hkl) * row_bytes)
+          {
+            width = candidates[i];
+            break;
+          }
+        }
+        tsc_file.clear();
+        tsc_file.seekg(id_block_start);
+      }
+      if (width == sizeof(scatterer_id_t)) {
+        return;
+      }
+      if (width == legacy) {
+        throw SMTBX_ERROR(("'" + file_name + "' holds 8-byte scatterer ids, the format"
+          " written between 12 and 29 July 2026; this build reads the 16-byte format."
+          " Recalculate the table.").c_str());
+      }
+      if (width == 0) {
+        throw SMTBX_ERROR(("cannot determine the scatterer id width of '" + file_name +
+          "': it declares none and its size fits neither known width, so it is"
+          " truncated, damaged or written by an unknown version").c_str());
+      }
+      throw SMTBX_ERROR(("'" + file_name + "' declares an id width this build cannot"
+        " read").c_str());
+    }
+
+    // the width the header declares, or 0 if it declares none
+    static std::size_t declared_id_bytes(const std::string &header_str)
+    {
+      std::vector<std::string> lines;
+      boost::split(lines, header_str, boost::is_any_of("\n"));
+      for (std::size_t i = 0; i < lines.size(); i++) {
+        std::size_t ci = lines[i].find(':');
+        if (ci == std::string::npos) {
+          continue;
+        }
+        std::string key = boost::trim_copy(lines[i].substr(0, ci));
+        if (!boost::iequals(key, "ID_BYTES")) {
+          continue;
+        }
+        try {
+          return boost::lexical_cast<std::size_t>(
+            boost::trim_copy(lines[i].substr(ci + 1)));
+        }
+        catch (const boost::bad_lexical_cast &) {
+          return 0;
+        }
+      }
+      return 0;
     }
 
     void read_binary(af::shared<xray::scatterer<float_type> > const &scatterers,
@@ -220,7 +400,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       using namespace std;
     //   typedef cctbx::xray::scatterer_id_5<float_type, fractional<float_type>, 16> scatterer_id_t;
       typedef cctbx::xray::scatterer_id_big<float_type, fractional<float_type> > scatterer_id_t;
-      ifstream tsc_file(file_name.c_str(), ios::binary);
+      ifstream tsc_file;
+      open_stream(tsc_file, file_name, ios::in | ios::binary);
       const size_t charsize = sizeof(char);
       const size_t intsize = sizeof(int);
       const size_t uint64size = sizeof(uint64_t);
@@ -255,6 +436,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       parent_t::covered_ = af::shared<bool>(nr_scat, false);
       if (boost::icontains(header_str, "SCATTERER_IDS")) {
         n_columns = sc_len;
+        check_id_record_size(tsc_file, file_name, header_str, n_columns);
         sc_indices.assign(n_columns, ~0);
         af::shared<int> data(nr_scat);
         for (size_t sci = 0; sci < nr_scat; sci++) {
@@ -297,6 +479,14 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       //read number of indices in tscb file
       int nr_hkl[1] = { 0 };
       tsc_file.read((char*)&nr_hkl, intsize);
+
+      /* the payload (up to gigabytes) is read through c_file, see there; the
+      header stays on the stream because scatterer_id_t is built from an istream
+      */
+      const std::streamoff payload_start = tsc_file.tellg();
+      c_file payload(file_name);
+      SMTBX_ASSERT(payload.ok());
+      SMTBX_ASSERT(payload.seek(payload_start));
       //read indices and scattering factors row by row
       int index[3] = { 0,0,0 };
       // a row of the file is as wide as the table, a row of the model as wide
@@ -317,21 +507,35 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           }
         }
       }
+      // a filter keeps fewer rows; data_ is trimmed to them at the end
+      const bool filtering = !wanted_.empty();
+      const std::streamoff row_bytes =
+        static_cast<std::streamoff>(n_columns * complex_doublesize);
+      std::size_t kept = 0;
       for (int run = 0; run < *nr_hkl; run++) {
-        tsc_file.read((char*)&index, 3*intsize);
+        // old (std::ifstream is slower, see c_file):
+        // tsc_file.read((char*)&index, 3*intsize);
+        SMTBX_ASSERT(payload.read(&index, 3*intsize));
         cctbx::miller::index<> mi(index[0], index[1], index[2]);
+        if (filtering && wanted_.find(mi) == wanted_.end()) {
+          // never asked for: step over the row instead of storing it
+          SMTBX_ASSERT(payload.skip(row_bytes));
+          continue;
+        }
         parent_t::miller_indices_.push_back(mi);
         // an atom the table misses keeps a zero here and is served elsewhere
-        vector<complex_type> &target = parent_t::data_[run];
+        vector<complex_type> &target = parent_t::data_[kept++];
         target.assign(nr_scat, complex_type(0));
         if (scatterers_are_in_file_order) {
-          tsc_file.read((char*)target.data(), nr_scat * complex_doublesize);
+          // old: tsc_file.read((char*)target.data(), nr_scat * complex_doublesize);
+          SMTBX_ASSERT(payload.read(target.data(), nr_scat * complex_doublesize));
         }
         else {
           // A read per scatterer spends more in stream bookkeeping than it
           // moves, and a table holds one row per reflection: take the row in one
           // read and put the scatterers in their places afterwards.
-          tsc_file.read((char*)&buffer[0], n_columns * complex_doublesize);
+          // old: tsc_file.read((char*)&buffer[0], n_columns * complex_doublesize);
+          SMTBX_ASSERT(payload.read(&buffer[0], n_columns * complex_doublesize));
           for (size_t i = 0; i < n_columns; i++) {
             if (sc_indices[i] != ~0) {
               target[sc_indices[i]] = buffer[i];
@@ -339,16 +543,39 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           }
         }
       }
+      if (filtering) {
+        parent_t::data_.resize(kept);
+      }
       tsc_file.close();
       SMTBX_ASSERT(!tsc_file.bad());
     }
 
   public:
+    /** wanted: the Miller indices this table will be asked for, or empty to
+        keep every row. A .tscb covers the whole index box of the reflection
+        file (so SHEL/OMIT cannot invalidate it), which can be many times the
+        measured data; filtering keeps only reachable rows in memory.
+     */
     table_reader(const uctbx::unit_cell& u_cell,
       af::shared<xray::scatterer<float_type> > const &scatterers,
-      const std::string &file_name)
+      const std::string &file_name,
+      sgtbx::space_group const &space_group,
+      af::shared<cctbx::miller::index<> > const &wanted =
+        af::shared<cctbx::miller::index<> >())
       : u_cell(u_cell)
     {
+      /* keep the full orbit of every wanted index plus Friedel mates, not just
+      +-h: lookup_based_anisotropic::resolve_rows() asserts h * R is present for
+      every rotation, and the expanded table may hold the other Friedel half.
+      Done here so callers need not know resolve_rows()
+      */
+      for (std::size_t i = 0; i < wanted.size(); i++) {
+        for (std::size_t j = 0; j < space_group.n_smx(); j++) {
+          cctbx::miller::index<> h = wanted[i] * space_group.smx(j).r();
+          wanted_.insert(h);
+          wanted_.insert(cctbx::miller::index<>(-h[0], -h[1], -h[2]));
+        }
+      }
       if(file_name.find(".tscb")!=std::string::npos){
         read_binary(scatterers, file_name);
       }
@@ -418,6 +645,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
 
     virtual bool is_spherical() const {
       return true;
+    }
+
+    virtual std::size_t n_scatterers() const {
+      return data.size() ? data[0].size() : 0;
     }
 
     virtual base_type *raw_fork() const {
@@ -518,6 +749,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
 
     virtual bool is_spherical() const {
       return false;
+    }
+
+    virtual std::size_t n_scatterers() const {
+      return data.size() && data[0].size() ? data[0][0].size() : 0;
     }
 
     virtual base_type *raw_fork() const {
@@ -719,6 +954,10 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       return false;
     }
 
+    virtual std::size_t n_scatterers() const {
+      return data.size() ? data[0].size() : 0;
+    }
+
     virtual base_type *raw_fork() const {
       return new lookup_based_anisotropic(*this);
     }
@@ -757,6 +996,14 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     af::shared<bool> covered_;
     std::size_t n_smx_;
     mutable std::vector<complex_type> tmp_;
+    // the spherical half is empty until at_d_star_sq(); the f_calc loops call
+    // it first, a Python caller of get/get_full may not and gets an error
+    bool d_star_sq_set_;
+    void check_d_star_sq() const {
+      SMTBX_ASSERT(d_star_sq_set_)
+        ("at_d_star_sq() must be called before the form factor of an atom"
+         " the table does not cover");
+    }
   public:
     partially_tabulated(const partially_tabulated &other)
       : scatterers_(other.scatterers_),
@@ -766,7 +1013,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           isotropic_scatterer_contribution<float_type>(scatterers_, registry_)),
         covered_(other.covered_),
         n_smx_(other.n_smx_),
-        tmp_(other.n_smx_)
+        tmp_(other.n_smx_),
+        d_star_sq_set_(false)
     {}
 
     partially_tabulated(base_type *tabulated,
@@ -780,14 +1028,16 @@ namespace smtbx { namespace structure_factors { namespace table_based {
           isotropic_scatterer_contribution<float_type>(scatterers_, registry_)),
         covered_(covered),
         n_smx_(n_smx),
-        tmp_(n_smx)
+        tmp_(n_smx),
+        d_star_sq_set_(false)
     {}
 
     virtual complex_type get(std::size_t scatterer_idx,
       miller::index<> const &h) const
     {
-      return covered_[scatterer_idx] ? tabulated_->get(scatterer_idx, h)
-                                     : spherical_->get(scatterer_idx, h);
+      if (covered_[scatterer_idx]) return tabulated_->get(scatterer_idx, h);
+      check_d_star_sq();
+      return spherical_->get(scatterer_idx, h);
     }
 
     /* A spherical form factor depends on the reflection only through its
@@ -800,6 +1050,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       if (covered_[scatterer_idx]) {
         return tabulated_->get_full(scatterer_idx, h);
       }
+      check_d_star_sq();
       tmp_.assign(n_smx_, spherical_->get(scatterer_idx, h));
       return tmp_;
     }
@@ -807,6 +1058,7 @@ namespace smtbx { namespace structure_factors { namespace table_based {
     virtual base_type &at_d_star_sq(float_type d_star_sq) {
       tabulated_->at_d_star_sq(d_star_sq);
       spherical_->at_d_star_sq(d_star_sq);
+      d_star_sq_set_ = true;
       return *this;
     }
 
@@ -825,6 +1077,16 @@ namespace smtbx { namespace structure_factors { namespace table_based {
       return result;
     }
 
+    virtual af::shared<std::string> records_not_in_structure() const {
+      return tabulated_->records_not_in_structure();
+    }
+
+    virtual af::shared<std::string> records_moved_by_symmetry() const {
+      return tabulated_->records_moved_by_symmetry();
+    }
+
+    virtual std::size_t n_scatterers() const { return covered_.size(); }
+
     virtual base_type *raw_fork() const {
       return new partially_tabulated(*this);
     }
@@ -841,10 +1103,12 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         af::shared< xray::scatterer<FloatType> > const &scatterers,
         std::string const &file_name,
         sgtbx::space_group const &space_group,
-        bool anomalous_flag)
+        bool anomalous_flag,
+        af::shared<cctbx::miller::index<> > const &wanted =
+          af::shared<cctbx::miller::index<> >())
     {
       return build_impl(u_cell, scatterers, file_name, space_group,
-        anomalous_flag, 0);
+        anomalous_flag, 0, wanted, false);
     }
 
     static direct::one_scatterer_one_h::scatterer_contribution<FloatType> *
@@ -854,10 +1118,14 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         std::string const &file_name,
         sgtbx::space_group const &space_group,
         bool anomalous_flag,
-        xray::scattering_type_registry const &scattering_type_registry)
+        xray::scattering_type_registry const &scattering_type_registry,
+        af::shared<cctbx::miller::index<> > const &wanted =
+          af::shared<cctbx::miller::index<> >(),
+        bool allow_spherical_fallback = false)
     {
       return build_impl(u_cell, scatterers, file_name, space_group,
-        anomalous_flag, &scattering_type_registry);
+        anomalous_flag, &scattering_type_registry, wanted,
+        allow_spherical_fallback);
     }
 
     static direct::one_scatterer_one_h::scatterer_contribution<FloatType> *
@@ -867,9 +1135,48 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         std::string const &file_name,
         sgtbx::space_group const &space_group,
         bool anomalous_flag,
-        xray::scattering_type_registry const *scattering_type_registry)
+        xray::scattering_type_registry const *scattering_type_registry,
+        af::shared<cctbx::miller::index<> > const &wanted =
+          af::shared<cctbx::miller::index<> >(),
+        bool allow_spherical_fallback = false)
     {
-      table_reader<FloatType> data(u_cell, scatterers, file_name);
+      if (boost::algorithm::iends_with(file_name, ".tshb")) {
+        // densities, not tabulated values: any reflection can be evaluated,
+        // so `wanted` has nothing to filter
+        boost::shared_ptr<harmonic_expansion_data<FloatType> > densities(
+          new harmonic_expansion_data<FloatType>(u_cell, scatterers, file_name,
+            space_group));
+        af::shared<bool> const &covered = densities->covered;
+        /* a density file must cover every atom (all PARTs, Thakkar-filled
+        ones too); missing atoms are named in an error rather than silently
+        refined as IAM, unless allow_spherical_fallback is set
+        */
+        std::string missing;
+        std::size_t n_missing = 0;
+        for (std::size_t i = 0; i < covered.size(); i++) {
+          if (covered[i]) continue;
+          n_missing++;
+          missing += " " + scatterers[i].label;
+          if (scatterers[i].get_part() != 0) {
+            missing += "(PART " + std::to_string(scatterers[i].get_part()) + ")";
+          }
+        }
+        if (n_missing != 0 &&
+            (scattering_type_registry == 0 || !allow_spherical_fallback))
+        {
+          throw SMTBX_ERROR(file_name + " has no density for "
+            + std::to_string(n_missing) + " of "
+            + std::to_string(covered.size()) + " atoms:" + missing);
+        }
+        direct::one_scatterer_one_h::scatterer_contribution<FloatType> *result =
+          new harmonic_expansion<FloatType>(densities, u_cell, space_group);
+        if (n_missing != 0) {
+          result = new partially_tabulated<FloatType>(result, scatterers,
+            *scattering_type_registry, covered, space_group.n_smx());
+        }
+        return result;
+      }
+      table_reader<FloatType> data(u_cell, scatterers, file_name, space_group, wanted);
       if(!data.use_AD()){
         anomalous_flag = false;
       }

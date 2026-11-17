@@ -124,7 +124,9 @@ def exercise_one_structure(target_structure,
   is_allowed= lambda x: f_target.space_group_info().is_allowed_origin_shift(
     x, tolerance=0.1)
   first_correct_correlation_peak = None
-  for i, (f_calc, shift, cc_peak_height) in enumerate(
+  # old: for i, (f_calc, shift, cc_peak_height) in enumerate(
+  # entries gained R1 and are sorted by it, not by peak height
+  for i, (f_calc, shift, cc_peak_height, r1) in enumerate(
                                                     solving.f_calc_solutions):
     if (   is_allowed(shift - reference_shift)
         or is_allowed(shift + reference_shift)):

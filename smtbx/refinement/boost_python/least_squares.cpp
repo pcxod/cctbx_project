@@ -244,6 +244,10 @@ namespace smtbx { namespace refinement { namespace least_squares {
         klass
           .def("times", &wt::times, (arg("x")))
           .def("transpose_times", &wt::transpose_times, (arg("x")))
+          .def("normal_times", &wt::normal_times,
+               (arg("x"), arg("inverse_sqrt_weights"), arg("weights"),
+                arg("observables"), arg("scale_factor"),
+                arg("grad_scale_factor_dot_x")))
           .def("is_mixed_precision", &wt::is_mixed_precision)
           .staticmethod("is_mixed_precision")
           ;
@@ -470,6 +474,23 @@ namespace smtbx { namespace refinement { namespace least_squares {
     return boost::python::make_tuple(ok, d_target);
   }
 
+  static void wrap_ml_log_likelihood() {
+    using namespace boost::python;
+    typedef ml_log_likelihood_result<double> wt;
+    class_<wt>("ml_log_likelihood_result", no_init)
+      .def_readonly("work", &wt::work)
+      .def_readonly("free", &wt::free)
+      .def_readonly("n_work", &wt::n_work)
+      .def_readonly("n_free", &wt::n_free)
+      .def_readonly("n_skipped", &wt::n_skipped)
+      .def("work_per_reflection", &wt::work_per_reflection)
+      .def("free_per_reflection", &wt::free_per_reflection)
+    ;
+    def("ml_log_likelihood", ml_log_likelihood<double>,
+        (arg("fo_sq"), arg("sigma_fo_sq"), arg("observables"), arg("ml_data"),
+         arg("free_only") = false));
+  }
+
   static void wrap_ml_functions() {
     using namespace boost::python;
     def("ml_effective_observation", ml_effective_observation_,
@@ -489,6 +510,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
 
     wrap_ml_data();
     wrap_ml_functions();
+    wrap_ml_log_likelihood();
     wrapper_t::matrix_free_accumulators::wrap();
     wrapper_t::normal_equation_building::wrap("build_normal_equations");
     wrapper_t::design_matrix_building::wrap("build_design_matrix");

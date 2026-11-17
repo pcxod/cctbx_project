@@ -28,15 +28,33 @@ namespace smtbx {
           bool anomalous_flag,
           af::const_ref<miller::index<> > const& indices,
           af::const_ref<complex_type> const& f_mask)
-          : f_mask(f_mask)
+          : f_mask(f_mask),
+            anomalous_flag(anomalous_flag)
         {
           mi_lookup = miller::lookup_utils::lookup_tensor<FloatType>(
             indices, space_group, anomalous_flag);
         }
 
+        /* The mask is computed on the measured reflections, but a twin
+           component asks for its own index: an HKLF 5 component the data
+           filter removed (COD 4003231, 1155 of them), or the Friedel mate of
+           an inversion twin with anomalous data. The solvent has no dispersion,
+           so F_mask(-h) = conj F_mask(h); an index the mask never saw adds no
+           solvent to that component rather than stopping the refinement.
+         */
         complex_type find(miller::index<> const& h) const {
           long index = mi_lookup.find_hkl(h);
-          SMTBX_ASSERT(index >= 0 && index < f_mask.size())(h.as_string());
+          if (index < 0 && anomalous_flag) {
+            index = mi_lookup.find_hkl(-h);
+            if (index >= 0) {
+              SMTBX_ASSERT(index < f_mask.size())(h.as_string());
+              return std::conj(f_mask[index]);
+            }
+          }
+          if (index < 0) {
+            return complex_type(0);
+          }
+          SMTBX_ASSERT(index < f_mask.size())(h.as_string());
           return f_mask[index];
         }
 
@@ -50,6 +68,7 @@ namespace smtbx {
 
       private:
         af::const_ref<complex_type> f_mask;
+        bool anomalous_flag = false;
         miller::lookup_utils::lookup_tensor<FloatType> mi_lookup;
       };
 

@@ -178,16 +178,50 @@ namespace smtbx { namespace structure_factors { namespace direct {
     struct scatterer_contribution_wrapper {
       typedef one_scatterer_one_h::scatterer_contribution<FloatType> wt;
 
+      /* the lookups are unchecked for the refinement loops, so Python gets an
+         IndexError here instead of a read past the end. A contribution that
+         does not implement get or get_full raises from inside it
+       */
+      static void check_index(wt const &self, std::size_t scatterer_index) {
+        std::size_t const n = self.n_scatterers();
+        if (n != ~std::size_t(0) && scatterer_index >= n) {
+          PyErr_SetString(PyExc_IndexError,
+            "scatterer_index is past the scatterers of this contribution");
+          boost::python::throw_error_already_set();
+        }
+      }
+
+      static std::complex<FloatType> get(wt const &self,
+        std::size_t scatterer_index, miller::index<> const &h)
+      {
+        check_index(self, scatterer_index);
+        return self.get(scatterer_index, h);
+      }
+
+      // the form factor of every symmetry equivalent h R_i
+      static af::shared<std::complex<FloatType> > get_full(wt const &self,
+        std::size_t scatterer_index, miller::index<> const &h)
+      {
+        check_index(self, scatterer_index);
+        std::vector<std::complex<FloatType> > const &v =
+          self.get_full(scatterer_index, h);
+        return af::shared<std::complex<FloatType> >(v.data(), v.data() + v.size());
+      }
+
       static void wrap() {
         using namespace boost::python;
         class_<wt, boost::noncopyable>("scatterer_contribution", no_init)
-          .def("get", &wt::get,
+          .def("get", get,
             (arg("scatterer_index"),
              arg("h")))
           .def("at_d_star_sq", &wt::at_d_star_sq,
             (arg("d_start_sq")), return_internal_reference<>())
           .def("is_spherical", &wt::is_spherical)
+          .def("get_full", get_full, (arg("scatterer_index"), arg("h")))
           .def("scatterers_not_in_table", &wt::scatterers_not_in_table)
+          .def("records_not_in_structure", &wt::records_not_in_structure)
+          .def("records_moved_by_symmetry", &wt::records_moved_by_symmetry)
+          .def("n_scatterers", &wt::n_scatterers)
           ;
       }
     };
@@ -234,7 +268,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
               arg("scatterers"),
               arg("file_name"),
               arg("space_group"),
-              arg("anomalous_flag")),
+              arg("anomalous_flag"),
+              arg("wanted") = af::shared<cctbx::miller::index<> >()),
             return_value_policy<manage_new_object>())
           .staticmethod("build")
           .def("build_with_fallback", &wt::build_with_fallback,
@@ -243,7 +278,12 @@ namespace smtbx { namespace structure_factors { namespace direct {
               arg("file_name"),
               arg("space_group"),
               arg("anomalous_flag"),
-              arg("scattering_type_registry")),
+              arg("scattering_type_registry"),
+              // the Miller indices that will be asked for; empty keeps every row
+              arg("wanted") = af::shared<cctbx::miller::index<> >(),
+              // a .tshb that misses atoms is an error unless this is set;
+              // tables always fall back on spherical form factors
+              arg("allow_spherical_fallback") = false),
             return_value_policy<manage_new_object>())
           .staticmethod("build_with_fallback")
           .def("build_lookup_based_for_tests", &wt::build_lookup_based_for_tests,

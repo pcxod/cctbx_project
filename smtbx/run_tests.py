@@ -10,8 +10,13 @@ tst_list = [
     ["$D/ab_initio/tests/tst_charge_flipping.py", '--fix_seed', '--on=E',
      '"hall: P 1"', '"hall: P 3"', '"hall: -P 2ybc"' ],
     "$D/masks/tests/tst_masks.py",
+    "$D/masks/tests/tst_solvent_level.py",
+    "$D/masks/tests/tst_boundary_smearing.py",
+    "$D/masks/tests/tst_mask_inputs.py",
+    "$D/masks/tests/tst_occupancy_weighting.py",
     "$D/structure_factors/direct/tests/tst_standard_xray.py",
     "$D/structure_factors/direct/tests/tst_table_based.py",
+    "$D/structure_factors/direct/tests/tst_tshb.py",
     ["$D/refinement/tests/tst_weighting_schemes.py",
      "--fix_random_seeds"],
     "$D/refinement/constraints/tests/tst_lbfgs.py",
@@ -28,6 +33,7 @@ tst_list = [
      '--normal_eqns_solving_method=levenberg-marquardt'],
      "$D/refinement/constraints/tests/tst_rigid.py",
     "$D/refinement/constraints/tests/tst_direction.py",
+    "$D/refinement/constraints/tests/tst_error_messages.py",
     "$D/refinement/restraints/tests/tst_adp_restraints.py",
     "$D/refinement/restraints/tests/tst_manager.py",
     ["$D/refinement/restraints/tests/tst_restraints.py",
@@ -40,6 +46,9 @@ tst_list = [
     # the unstable ones, which run() does not run at all
     "$D/refinement/tests/tst_scipy_minimisers.py",
     "$D/refinement/tests/tst_cgls.py",
+    # seeds its own random numbers
+    "$D/refinement/tests/tst_ml_work_statistics.py",
+    "$D/modulation/tests/tst_modulation.py",
 ]
 
 # unstable test

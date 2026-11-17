@@ -5167,8 +5167,11 @@ class array(set):
         data=result.data,
         sigmas=result.sigmas).set_observation_type(self)
     else: #HKLF 4
+      # old: no unit cell, so twin mates of non-integral laws were rounded
+      # result = observations.observations(self.space_group(),
+      #   self.indices(), self.data(), self.sigmas(), tw_cmps)
       result = observations.observations(self.space_group(),
-        self.indices(), self.data(), self.sigmas(), tw_cmps)
+        self.indices(), self.data(), self.sigmas(), tw_cmps, self.unit_cell())
       result.fo_sq = self
     # synchronise the life-time of the reference objects
     result.ref_twin_fractions = twin_fractions

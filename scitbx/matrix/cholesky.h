@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <boost_adaptbx/floating_point_exceptions.h>
 #include <fast_linalg/lapacke.h>
+#include <fast_linalg/environment.h>
 
 namespace scitbx { namespace matrix { namespace cholesky {
 
@@ -68,6 +69,29 @@ namespace scitbx { namespace matrix { namespace cholesky {
   };
 
 
+  /// How many OpenBLAS threads the inverse below runs on, given n
+  /** Not the library's default of every core: on this inverse the thread
+      pool costs more than it saves until n is in the thousands, and a
+      small-molecule refinement takes it every cycle. n/200 - 2, clamped to
+      [1, 8] and never above the caller's count, tracks the fastest count.
+      The inverse changes in its last bits with the thread count, as with any
+      change of blocking.
+   */
+  inline int inverse_of_u_transpose_u_threads(unsigned n, int available) {
+    int const t = static_cast<int>(n/200) - 2;
+    return std::max(1, std::min(std::min(8, available), t));
+  }
+
+  /// OpenBLAS held to a thread count while in scope, then put back
+  struct blas_threads_held {
+    fast_linalg::environment blas;
+    int saved;
+    explicit blas_threads_held(int threads) : saved(blas.threads()) {
+      blas.set_threads(threads);
+    }
+    ~blas_threads_held() { blas.set_threads(saved); }
+  };
+
   /// Inverse of U^T U
   /** If LAPACKE is available (through module fast_linalg), then use XPPTRI.
       Otherwise, use an implementation of the alternative method presented
@@ -84,6 +108,9 @@ namespace scitbx { namespace matrix { namespace cholesky {
       // since U is stored rowwise
       using namespace fast_linalg;
       unsigned n = u.accessor().n;
+      // old: no hold, ran on every thread the caller had set
+      blas_threads_held held(inverse_of_u_transpose_u_threads(
+        n, environment().threads()));
       af::versa<f_t, af::packed_u_accessor> result(
         n, af::init_functor_null<f_t>());
       af::shared<f_t> l_rfp(n*(n+1)/2, af::init_functor_null<f_t>());

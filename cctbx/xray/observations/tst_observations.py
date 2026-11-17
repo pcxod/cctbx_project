@@ -73,8 +73,27 @@ def excersise():
     pass
 
 
+def exercise_non_integral_twin():
+  # law h' = (h + k/2, -k, -l): an odd k puts the mate between nodes
+  from cctbx import miller
+  from cctbx.array_family import flex
+  cs = crystal.symmetry(unit_cell=(11,11,13,90,90,120), space_group_symbol="P 1")
+  fo_sq = miller.set(cs, flex.miller_index([(1,2,3), (1,1,3)])).array(
+    data=flex.double([1,1]), sigmas=flex.double([1,1]))\
+    .set_observation_type_xray_intensity()
+  tw = (xray.twin_component(sgtbx.rot_mx((2,0,0,1,-2,0,0,0,-2), 2), 0.3, False),)
+  obs = fo_sq.as_xray_observations(twin_components=tw)
+  assert obs.iterator(0).next().h == (2,-2,-3)
+  assert not obs.iterator(1).has_next()
+  # without a cell the mate is rounded as before
+  obs = observations.observations(cs.space_group(), fo_sq.indices(),
+    fo_sq.data(), fo_sq.sigmas(), tw)
+  assert obs.iterator(1).has_next()
+
+
 def run():
   excersise()
+  exercise_non_integral_twin()
   print("OK")
 
 if (__name__ == "__main__"):

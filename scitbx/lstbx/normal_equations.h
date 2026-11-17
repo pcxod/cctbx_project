@@ -636,6 +636,16 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       return sum_of_rank_1_updates_t::omp_matrix_scratch(n_parameters, threads);
     }
 
+    /// What a threaded build charges one more per-thread copy against its budget
+    /** n^2 elements whichever accumulator, the figure the smtbx builder's
+        budget was set against. A copy really holds the accumulator (packed
+        n(n+1)/2 or full n^2) plus the packed reduced_ls; charging that would
+        move the Gauss-Newton thread count wherever the budget binds.
+     */
+    static std::size_t per_thread_bytes(int n_parameters) {
+      return std::size_t(n_parameters)*n_parameters*sizeof(scalar_t);
+    }
+
 #if defined(_OPENMP)
     /* These two touch nothing but the scalar sums, so they are the same
     whichever accumulator is in use. add_equations_omp does touch the matrix and
@@ -720,6 +730,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
 
       return *this;
     }
+
+    /// The accumulator of the normal matrix, for a threaded build to attach
+    /// its workers to; c.f. matrix::rank_n_update_shared_fold
+    sum_of_rank_1_updates_t &rank_1_updates() { return grad_yc_dot_grad_yc; }
 
     /// \f$\sum w y_o^2\f$
     /** This is the normalisation that guarantees
@@ -970,6 +984,11 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       return sum_of_rank_1_updates_t::omp_matrix_scratch(n_parameters, threads);
     }
 
+    /// as in non_linear_ls_with_separable_scale_factor
+    static std::size_t per_thread_bytes(int n_parameters) {
+      return std::size_t(n_parameters)*n_parameters*sizeof(scalar_t);
+    }
+
 #if defined(_OPENMP)
     void add_residuals_omp(const int& n,
       const int& start,
@@ -1033,6 +1052,10 @@ namespace scitbx { namespace lstbx { namespace normal_equations {
       throw SCITBX_NOT_IMPLEMENTED();
     }
 #endif
+
+    /// The accumulator of the normal matrix, for a threaded build to attach
+    /// its workers to; c.f. matrix::rank_n_update_shared_fold
+    sum_of_rank_1_updates_t &rank_1_updates() { return grad_yc_dot_grad_yc; }
 
     non_linear_ls_with_fixed_scale_factor
     &operator+=(non_linear_ls_with_fixed_scale_factor const &other) {

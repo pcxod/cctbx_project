@@ -149,8 +149,10 @@ def deterministic_free_flags(f_obs, fraction=0.1):
   other consumer of randomness in the process, and the current seed cannot be
   read back to restore it. Hashing each index requires no state.
 
-  f_obs is a unique set in the asymmetric unit, so symmetry-related reflections
-  cannot be split between the work and test sets.
+  Each index is hashed in the non-anomalous asymmetric unit, so symmetry mates
+  and the two Friedel mates of anomalous data share one flag: a pair split
+  between the sets would put the test member back into the refinement and the
+  mask through its mate.
   """
   assert 0 < fraction < 1
   uc = f_obs.unit_cell().parameters()
@@ -159,7 +161,8 @@ def deterministic_free_flags(f_obs, fraction=0.1):
                tuple(round(p, 4) for p in uc),
                f_obs.indices().size())) & 0x7fffffff
   flags = flex.bool(f_obs.indices().size(), False)
-  for i, h in enumerate(f_obs.indices()):
+  keys = f_obs.as_non_anomalous_set().map_to_asu().indices()
+  for i, h in enumerate(keys):
     # a cheap integer mix; the constants are the usual odd multipliers
     x = (h[0]*73856093) ^ (h[1]*19349663) ^ (h[2]*83492791) ^ seed
     x &= 0xffffffff
