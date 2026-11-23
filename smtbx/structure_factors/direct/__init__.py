@@ -54,6 +54,12 @@ class constructed_with_xray_structure(object):
           xs.space_group(),
           not xs.space_group().is_origin_centric(),
           xs.scattering_type_registry())
+        missed = self.scatterer_contribution.scatterers_not_in_table()
+        if len(missed):
+          print("WARNING: %s covers %d of %d atoms; spherical form factors for: %s"
+                % (table_file_name, xs.scatterers().size() - len(missed),
+                   xs.scatterers().size(),
+                   " ".join(xs.scatterers()[i].label for i in missed)))
 
     args = (xs.unit_cell(),
             xs.space_group(),
