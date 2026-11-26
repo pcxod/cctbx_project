@@ -411,6 +411,8 @@ class low_density_elimination_iterator(density_modification_iterator):
     return 0.2*flex.mean(rho.select(rho >0))
 
 
+# default of f_calc_symmetrisations(max_shift_refinements=None); None there
+# and here refines every peak above the height cut, as upstream
 max_shift_refinements = 3
 
 # crystal_gridding.tags() depends only on the gridding and the space group, so
@@ -418,7 +420,10 @@ max_shift_refinements = 3
 # gets a fresh copy of the pristine one
 _tags_cache = {}
 
-def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
+def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height,
+                           max_shift_refinements=None):
+  if max_shift_refinements is None:
+    max_shift_refinements = globals()['max_shift_refinements']
   # The fast correlation map as per cctbx.translation_search.fast_nv1995
   # is computed and its peaks studied.
   # Inspiration from phenix.substructure.hyss for the parameters tuning.
@@ -494,7 +499,8 @@ def f_calc_symmetrisations(f_obs, f_calc_in_p1, min_cc_peak_height):
   # for peak in correlation_map_peaks:
   #   if peak.height < min_cc_peak_height: break
   for i, peak in enumerate(correlation_map_peaks):
-    if peak.height < min_cc_peak_height or i >= max_shift_refinements: break
+    if peak.height < min_cc_peak_height: break
+    if max_shift_refinements is not None and i >= max_shift_refinements: break
     sr = symmetry_search.shift_refinement(
       f_obs, f_calc_in_p1, peak.site)
     yield sr.f_x, sr.shift, sr.goos.correlation
@@ -528,6 +534,11 @@ class solving_iterator(object):
   min_cc_peak_height = 0.9
   # a rise of the map skewness below this is noise, not a phase transition
   min_skewness_at_phase_transition = 1.5
+  # unmeasured reflections inside the sphere take the map's value each cycle
+  # (see start()); False keeps them at zero, as upstream
+  float_unmeasured = True
+  # passed to f_calc_symmetrisations; None takes the module default
+  max_shift_refinements = None
 
   def __init__(self, flipping_iterator, f_obs, **kwds):
     self.flipping_iterator = flipping_iterator
@@ -596,6 +607,17 @@ class solving_iterator(object):
     del self.finished
 
   def _starting(self, f_obs):
+    if not self.float_unmeasured:
+      # the upstream start: unmeasured reflections stay at zero
+      f_obs = f_obs.expand_to_p1() \
+                   .merge_equivalents().array() \
+                   .discard_sigmas()
+      if self.normalisations_for is not None:
+        self.normalisations = self.normalisations_for(f_obs)
+        f_obs /= self.normalisations.data()
+      while True:
+        self.flipping_iterator.start(f_obs, self.initial_phases_for(f_obs))
+        yield self.guessing_delta
     free = f_obs.complete_set().lone_set(f_obs.map_to_asu()) \
                 .expand_to_p1().map_to_asu().unique_under_symmetry()
     f_obs = f_obs.expand_to_p1() \
@@ -760,7 +782,8 @@ class solving_iterator(object):
         for f_calc, shift, cc_peak_height\
             in f_calc_symmetrisations(original_f_obs,
                                       self.flipping_iterator.f_calc,
-                                      self.min_cc_peak_height):
+                                      self.min_cc_peak_height,
+                                      self.max_shift_refinements):
           if cc_peak_height < self.min_cc_peak_height: break
           # old: kept in peak order, without R1
           # self.f_calc_solutions.append((f_calc, shift, cc_peak_height))

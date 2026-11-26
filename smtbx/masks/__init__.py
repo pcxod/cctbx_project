@@ -14,7 +14,7 @@ def hydrogens_at_common_length(xray_structure, x_h_length, max_bond=1.3):
   """ A copy with every H moved along its bond to x_h_length from its parent.
 
   For drawing a solvent region only: the region is filled from the difference
-  map, so where a model puts its H decides its volume, and an aspherical model
+  map, so where a model puts its H decides its volume, and a non-spherical model
   (longer X-H) would otherwise get less region than IAM.
 
   x_h_length is one length, or a dict by parent element symbol (any case).
@@ -227,8 +227,9 @@ class mask(object):
     self.bias_correction = False
     # give back the solvent partial atoms wrongly exclude: around_atoms has no
     # occupancies, so a quarter-occupied side chain excludes all of its volume.
-    # See occupancy_weight_map; no effect without partial atoms
-    self.occupancy_weighting = True
+    # See occupancy_weight_map; no effect without partial atoms. Off by
+    # default: the hard mask as upstream draws it
+    self.occupancy_weighting = False
     # an atom counts as partial below 1 - this, so refined occupancies of
     # 0.999 behave as full
     self.occupancy_full_tolerance = 0.01
@@ -246,6 +247,8 @@ class mask(object):
     self.f_000_s = None
     self.f_000_cell = None
     self._electron_counts_per_void = None
+    # what structure_factors levelled with; electron_counts_per_void follows it
+    self.level_method = "clamp"
 
   def compute(self,
               solvent_radius,
@@ -258,8 +261,8 @@ class mask(object):
               use_space_group_symmetry=False,
               x_h_length=None):
     """x_h_length: draw the region with every H at this distance from its
-    parent (see hydrogens_at_common_length), so that IAM and aspherical models
-    get the same region. None uses the model's own H positions.
+    parent (see hydrogens_at_common_length), so that IAM and non-spherical
+    models get the same region. None uses the model's own H positions.
     """
     if grid_step is not None: d_min = None
     else: d_min = self.fo2.d_min()
@@ -469,6 +472,42 @@ class mask(object):
     # count read off the built map, so it is what f_mask is made of
     return m, flex.sum(m.as_1d())*dv
 
+  def _level_upstream(self, convergence):
+    """ The upstream levelling on the hard mask: a void is dropped when its
+    count, scaled to the cell, is negative before the level is restored; then
+    the kept voids are raised by f_000_s/V. None once f_000_s has converged.
+    """
+    masked_diff_map = self.diff_map.real_map_unpadded().set_selected(
+      self.mask.data.as_double() == 0, 0)
+    n_solvent_grid_points = self.n_solvent_grid_points()
+    for j in range(self.n_voids()):
+      # exclude voids with negative electron counts from the masked map
+      # set the electron density in those areas to be zero
+      selection = self.mask.data == j+2
+      if self.exclude_void_flags[j]:
+        masked_diff_map.set_selected(selection, 0)
+        continue
+      diff_map_ = masked_diff_map.deep_copy().set_selected(~selection, 0)
+      f_000 = flex.sum(diff_map_) * self.fft_scale
+      f_000_s = f_000 * (
+        self.crystal_gridding.n_grid_points() /
+        (self.crystal_gridding.n_grid_points() - n_solvent_grid_points))
+      if f_000_s < 0:
+        masked_diff_map.set_selected(selection, 0)
+        f_000_s = 0
+        self.exclude_void_flags[j] = True
+    self.f_000 = flex.sum(masked_diff_map) * self.fft_scale
+    f_000_s = self.f_000 * (masked_diff_map.size() /
+      (masked_diff_map.size() - self.n_solvent_grid_points()))
+    if (self.f_000_s is not None and
+        approx_equal_relatively(self.f_000_s, f_000_s, convergence)):
+      return None
+    self.f_000_s = f_000_s
+    masked_diff_map.add_selected(
+      self.mask.data.as_double() > 0,
+      self.f_000_s/self.xray_structure.unit_cell().volume())
+    return masked_diff_map
+
   def _difference_coefficients(self, f_obs, f_calc):
     """Fo/k - Fc, or its sigma_A weighted form when asked for."""
     if not self.bias_correction:
@@ -478,15 +517,22 @@ class mask(object):
     return bias.difference_coefficients(scaled, f_calc)
 
   def structure_factors(self, max_cycles=10, f_calc=None, scale_factor=None,
-                        convergence=0.0001):
+                        convergence=0.0001, level_method="clamp"):
     """P. van der Sluis and A. L. Spek, Acta Cryst. (1990). A46, 194-201.
 
     f_calc: the model's structure factors on the mask's set (complete_set
     with use_set_completion, fo2 otherwise). Left out, they are computed from
-    spherical atoms, which is wrong for an aspherical model: the void then
+    spherical atoms, which is wrong for a non-spherical model: the void then
     soaks up what IAM misses.
     scale_factor: a starting scale; by default sum(Fo)/sum(|Fc|).
+    level_method: "clamp" levels the weighted map first (_level_and_clamp) and
+    then drops voids negative on it; "upstream" drops a void that is negative
+    before the level is restored (_level_upstream), on the hard mask. The two
+    agree for one void; with several they differ in which voids are dropped,
+    whether F(000) counts dropped voids, and the per-void electron counts.
     """
+    assert level_method in ("clamp", "upstream")
+    self.level_method = level_method
     assert self.mask is not None
     if self.n_voids() == 0: return
     if self.use_set_completion:
@@ -515,73 +561,45 @@ class mask(object):
     solvent_weight = self.solvent_weight_map()
     mean_w = flex.sum(solvent_weight.as_1d())/solvent_weight.size()
     for i in range(max_cycles):
-      # old: tested each void's sign before the F(000) level was restored, so
-      # a void was dropped for holding less than its share of the missing
-      # F(000); replaced by the weighted, levelled map of _level_and_clamp
-      # self.diff_map = miller.fft_map(self.crystal_gridding, f_obs_minus_f_calc)
-      # self.diff_map.apply_volume_scaling()
-      # stats = self.diff_map.statistics()
-      # masked_diff_map = self.diff_map.real_map_unpadded().set_selected(
-      #   self.mask.data.as_double() == 0, 0)
-      # n_solvent_grid_points = self.n_solvent_grid_points()
-      # for j in range(self.n_voids()):
-      #   # exclude voids with negative electron counts from the masked map
-      #   # set the electron density in those areas to be zero
-      #   selection = self.mask.data == j+2
-      #   if self.exclude_void_flags[j]:
-      #     masked_diff_map.set_selected(selection, 0)
-      #     continue
-      #   diff_map_ = masked_diff_map.deep_copy().set_selected(~selection, 0)
-      #   f_000 = flex.sum(diff_map_) * self.fft_scale
-      #   f_000_s = f_000 * (
-      #     self.crystal_gridding.n_grid_points() /
-      #     (self.crystal_gridding.n_grid_points() - n_solvent_grid_points))
-      #   if f_000_s < 0:
-      #     masked_diff_map.set_selected(selection, 0)
-      #     f_000_s = 0
-      #     self.exclude_void_flags[j] = True
-      # self.f_000 = flex.sum(masked_diff_map) * self.fft_scale
-      # f_000_s = self.f_000 * (masked_diff_map.size() /
-      #   (masked_diff_map.size() - self.n_solvent_grid_points()))
-      # if (self.f_000_s is not None and
-      #     approx_equal_relatively(self.f_000_s, f_000_s, 0.0001)):
-      #   break # we have reached convergence
-      # else:
-      #   self.f_000_s = f_000_s
-      # masked_diff_map.add_selected(
-      #   self.mask.data.as_double() > 0,
-      #   self.f_000_s/self.xray_structure.unit_cell().volume())
       coefficients = f_obs_minus_f_calc
       if self.solvent_d_min is not None:
         coefficients = coefficients.resolution_filter(d_min=self.solvent_d_min)
       self.diff_map = miller.fft_map(self.crystal_gridding, coefficients)
       self.diff_map.apply_volume_scaling()
-      # a full-grid pass needed only by the void_positivity cut
-      sigma = self.diff_map.statistics().sigma() if self.void_positivity else 0.
-      # multiplied, not cut, so a smeared edge tapers; at boundary_smearing 0
-      # the weight is the 0/1 indicator and this equals set_selected(mask == 0, 0)
-      masked_diff_map = self.diff_map.real_map_unpadded()*solvent_weight
-      self.f_000 = flex.sum(masked_diff_map) * self.fft_scale
-      masked_diff_map, f_000_s = self._level_and_clamp(
-        masked_diff_map, solvent_weight, sigma, mean_w)
-      for j in range(self.n_voids()):
-        # a void with a negative count on the levelled map is not solvent
-        selection = self.void_iselection(j)
-        electrons = flex.sum(masked_diff_map.select(selection)) * self.fft_scale
-        # index selections need a 1-d array; as_1d() is a view, so zeroing
-        # through it zeroes the map. A dropped void takes its electrons out of
-        # f_000_s, which the level above counted
-        if self.exclude_void_flags[j]:
-          masked_diff_map.as_1d().set_selected(selection, 0)
-          f_000_s -= electrons
-          continue
-        if electrons < 0:
-          masked_diff_map.as_1d().set_selected(selection, 0)
-          f_000_s -= electrons
-          self.exclude_void_flags[j] = True
-      previous_f_000_s = self.f_000_s
-      self.f_000_s = f_000_s
-      self._masked_diff_map = masked_diff_map
+      if level_method == "upstream":
+        masked_diff_map = self._level_upstream(convergence)
+        if masked_diff_map is None: break # we have reached convergence
+        self._masked_diff_map = masked_diff_map
+      else:
+        # a full-grid pass needed only by the void_positivity cut
+        sigma = (self.diff_map.statistics().sigma() if self.void_positivity
+                 else 0.)
+        # multiplied, not cut, so a smeared edge tapers; at boundary_smearing
+        # 0 the weight is the 0/1 indicator and this equals
+        # set_selected(mask == 0, 0)
+        masked_diff_map = self.diff_map.real_map_unpadded()*solvent_weight
+        self.f_000 = flex.sum(masked_diff_map) * self.fft_scale
+        masked_diff_map, f_000_s = self._level_and_clamp(
+          masked_diff_map, solvent_weight, sigma, mean_w)
+        for j in range(self.n_voids()):
+          # a void with a negative count on the levelled map is not solvent
+          selection = self.void_iselection(j)
+          electrons = (flex.sum(masked_diff_map.select(selection))
+                       * self.fft_scale)
+          # index selections need a 1-d array; as_1d() is a view, so zeroing
+          # through it zeroes the map. A dropped void takes its electrons out
+          # of f_000_s, which the level above counted
+          if self.exclude_void_flags[j]:
+            masked_diff_map.as_1d().set_selected(selection, 0)
+            f_000_s -= electrons
+            continue
+          if electrons < 0:
+            masked_diff_map.as_1d().set_selected(selection, 0)
+            f_000_s -= electrons
+            self.exclude_void_flags[j] = True
+        previous_f_000_s = self.f_000_s
+        self.f_000_s = f_000_s
+        self._masked_diff_map = masked_diff_map
       if 0:
         from crys3d import wx_map_viewer
         wx_map_viewer.display(
@@ -606,7 +624,7 @@ class mask(object):
           scale_for_min_residual = scale
           epsilon_for_min_residual = epsilon
       self.scale_factor = scale_for_min_residual
-      if (previous_f_000_s is not None and
+      if (level_method == "clamp" and previous_f_000_s is not None and
           approx_equal_relatively(previous_f_000_s, f_000_s, convergence)):
         break # we have reached convergence
       f_model = self.f_model(epsilon=epsilon_for_min_residual)
@@ -679,21 +697,24 @@ class mask(object):
     if self._electron_counts_per_void is not None:
       return self._electron_counts_per_void
     self._electron_counts_per_void = []
-    # old: rebuilt the map with a hard edge and no level, whatever
-    # structure_factors had used; now counts on the map it built
-    # masked_diff_map = self.diff_map.real_map_unpadded().set_selected(
-    #   self.mask.data.as_double() == 0, 0)
-    # for i in range(self.n_voids()):
-    #   if self.exclude_void_flags[i]:
-    #     f_000_s = 0
-    #   else:
-    #     diff_map = masked_diff_map.deep_copy().set_selected(
-    #       self.mask.data != i+2, 0)
-    #     f_000 = flex.sum(diff_map) * self.fft_scale
-    #     f_000_s = f_000 * (
-    #       self.crystal_gridding.n_grid_points() /
-    #       (self.crystal_gridding.n_grid_points() - self.n_solvent_grid_points()))
-    #   self._electron_counts_per_void.append(f_000_s)
+    if self.level_method == "upstream":
+      # the hard-edged, unlevelled map, each void scaled to the cell
+      masked_diff_map = self.diff_map.real_map_unpadded().set_selected(
+        self.mask.data.as_double() == 0, 0)
+      for i in range(self.n_voids()):
+        if self.exclude_void_flags[i]:
+          f_000_s = 0
+        else:
+          diff_map = masked_diff_map.deep_copy().set_selected(
+            self.mask.data != i+2, 0)
+          f_000 = flex.sum(diff_map) * self.fft_scale
+          f_000_s = f_000 * (
+            self.crystal_gridding.n_grid_points() /
+            (self.crystal_gridding.n_grid_points()
+             - self.n_solvent_grid_points()))
+        self._electron_counts_per_void.append(f_000_s)
+      return self._electron_counts_per_void
+    # counted on the map structure_factors built, so they sum to its f_000_s
     masked_diff_map = self._masked_diff_map
     if masked_diff_map is None: return self._electron_counts_per_void
     for i in range(self.n_voids()):
