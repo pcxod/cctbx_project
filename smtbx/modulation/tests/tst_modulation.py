@@ -11,6 +11,15 @@ from cctbx.array_family import flex
 from smtbx import modulation as mod
 
 
+def _cod_sample(cid):
+  """<root>/cod_<id>/<id> under $OLEX2_SAMPLES, as COD distributes the .cif/.hkl; None when unset or absent."""
+  base = os.environ.get("OLEX2_SAMPLES")
+  if not base:
+    return None
+  root = os.path.join(base, "cod_" + cid, cid)
+  return root if os.path.exists(root + ".cif") else None
+
+
 def p21c():
   return sgtbx.space_group_info("P 1 21/c 1").group()
 
@@ -168,12 +177,11 @@ def test_gradients_aniso_occ_adp_crenel():
 
 def test_mscif_against_jana():
   """F^2 against JANA's own F^2 calc for COD 2108430 (C2/c(0b0)s0: occupational + ADP waves, Uaniso, f''),
-  when the sample is on this machine."""
-  import os
+  when the sample is under $OLEX2_SAMPLES."""
   from smtbx.modulation import mscif
-  root = r"E:\olex2-samples\cod_2108430\2108430"
-  if not os.path.exists(root + ".cif"):
-    print("  msCIF vs JANA: sample not here, skipped")
+  root = _cod_sample("2108430")
+  if root is None or not os.path.exists(root + ".fcf"):
+    print("  msCIF vs JANA: OLEX2_SAMPLES/cod_2108430 not found, skipped")
     return
   xs, d = mscif.read(root + ".cif", root + ".fcf")
   _, fc, _ = mod.calculator(d["h"], d["m"], 64).compute(xs)
@@ -1197,14 +1205,13 @@ def test_extinction():
 
 def test_xharm_against_jana():
   """COD 2108551 and 2108550 (crenels with JANA x-harmonics, Legendre terms, ADP x-harmonics) against JANA's
-  F^2calc of their refln loops, the x-harmonics read as plain and as orthonormalised, when the samples are on this
-  machine (E:\\olex2-samples\\cod_<id>\\<id>.cif and .hkl, as COD distributes them). Only m = 0 is asserted;
-  the satellite figures are reported."""
+  F^2calc of their refln loops, the x-harmonics read as plain and as orthonormalised, when the samples are under
+  $OLEX2_SAMPLES (cod_<id>/<id>.cif and .hkl). Only m = 0 is asserted; the satellite figures are reported."""
   from smtbx.modulation import mscif
   found = False
   for cid in ("2108551", "2108550"):
-    root = os.path.join("E:\\olex2-samples", "cod_" + cid, cid)
-    if not os.path.exists(root + ".cif"):
+    root = _cod_sample(cid)
+    if root is None:
       continue
     found = True
     line = []
@@ -1219,7 +1226,7 @@ def test_xharm_against_jana():
       line.append("%s: R(m=0) %.3f, R(|m|=1) %.3f" % (basis, r[0], r[1]))
     print("  COD %s against JANA's F^2calc, x-harmonics %s" % (cid, "; ".join(line)))
   if not found:
-    print("  x-harmonics vs JANA: samples not here, skipped")
+    print("  x-harmonics vs JANA: OLEX2_SAMPLES/cod_2108551, cod_2108550 not found, skipped")
 
 
 def test_commensurate_section():

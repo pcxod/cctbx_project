@@ -208,7 +208,8 @@ def combine(classical, proposals, geometry_weight=0.5, sigma=0.15,
   return out
 
 
-# Chemistry priors from plausible metal-organic structures.
+# Chemistry priors, NEIGHBOUR_COUNT to BASE_RATE below: data obtained by
+# private communication.
 # P(n heavy neighbours | element), index 6 holds six and more.
 NEIGHBOUR_COUNT = {
   'C': (0.000, 0.128, 0.525, 0.312, 0.034, 0.001, 0.001),
@@ -439,9 +440,9 @@ def heavy_neighbours(xs, slack=0.45):
 def neighbour_prior(element, neighbours, floor=0.02):
   """ p(these heavy neighbours | element), the chemistry the density read
   cannot see: a lone atom on Cl is an O, an atom with no neighbour is not a
-  C, a donor on a hard metal is O before S. Posterior tables are turned into
-  likelihoods by dividing out the element base rate (BASE_RATE); every table is floored so no one of them
-  can veto the density. """
+  C, a donor on a hard metal is O before S. Posterior tables become
+  likelihoods by dividing out the element base rate (BASE_RATE); every table
+  is floored so no one of them can veto the density. """
   import math
   neighbours = [x if isinstance(x, tuple) else (None, x) for x in neighbours]
   n, syms = len(neighbours), [e for d, e in neighbours]
