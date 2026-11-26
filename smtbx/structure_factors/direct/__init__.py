@@ -1,5 +1,6 @@
 from __future__ import absolute_import, division, print_function
 import boost_adaptbx.boost.python as bp
+import warnings
 ext = bp.import_ext("smtbx_structure_factors_direct_ext")
 
 class constructed_with_xray_structure(object):
@@ -56,7 +57,7 @@ class constructed_with_xray_structure(object):
           xs.scattering_type_registry())
         missed = self.scatterer_contribution.scatterers_not_in_table()
         if len(missed):
-          print("WARNING: %s covers %d of %d atoms; spherical form factors for: %s"
+          warnings.warn("%s covers %d of %d atoms; spherical form factors for: %s"
                 % (table_file_name, xs.scatterers().size() - len(missed),
                    xs.scatterers().size(),
                    " ".join(xs.scatterers()[i].label for i in missed)))

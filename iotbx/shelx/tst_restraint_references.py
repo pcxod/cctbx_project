@@ -1,6 +1,6 @@
 from __future__ import absolute_import, division, print_function
 
-import contextlib, io
+import contextlib, io, warnings
 
 from iotbx import shelx
 from iotbx.shelx.tst_lex_parse_build import template_ins
@@ -8,7 +8,7 @@ import iotbx.builders
 from libtbx.test_utils import Exception_expected
 
 def parse(text):
-  """ (builder, what the restraint parser printed) """
+  """ (builder, what the restraint parser printed or warned) """
   builder = iotbx.builders.restrained_crystal_structure_builder()
   stream = shelx.command_stream(file=io.StringIO(text))
   l_cs = shelx.crystal_symmetry_parser(stream, builder)
@@ -16,9 +16,12 @@ def parse(text):
   l_xs = shelx.atom_parser(l_afix.filtered_commands(), builder)
   l_r = shelx.restraint_parser(l_xs.filtered_commands(), builder)
   out = io.StringIO()
-  with contextlib.redirect_stdout(out):
+  with contextlib.redirect_stdout(out), \
+       warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
     l_r.parse()
-  return builder, out.getvalue()
+  return builder, out.getvalue() + "".join(
+    "%s\n" % w.message for w in caught)
 
 def exercise_unreadable_atom_reference():
   """ the lexer read 'C2345' as C234: an error now, not another atom """

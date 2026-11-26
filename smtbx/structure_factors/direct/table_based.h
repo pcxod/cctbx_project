@@ -10,10 +10,14 @@
 #include <smtbx/structure_factors/direct/harmonic_expansion.h>
 #include <cstdlib>
 #include <cstring>
+// gcc < 8 has no <charconv>; the reader falls back to strtod without it
+#if defined(__has_include)
+#if __has_include(<charconv>)
 #include <charconv>
+#endif
+#endif
 #include <cctbx/xray/scatterer_lookup.h>
 #include <fstream>
-#include <cstdio>
 #include <set>
 #include <stdint.h>
 
@@ -283,8 +287,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
             if (r.ec != std::errc()) return false;
             p = r.ptr;
 #else
-            // libc++ before LLVM 20 (Apple clang, the Android NDK) has no
-            // floating-point from_chars; strtod reads as the old atof did
+            // no floating-point from_chars (gcc < 11, libc++ < 20, pre-C++17):
+            // strtod reads as the old atof did
             char *e;
             v = static_cast<float_type>(std::strtod(p, &e));
             if (e == p) return false;

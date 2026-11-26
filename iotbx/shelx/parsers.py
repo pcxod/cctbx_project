@@ -18,6 +18,7 @@ from iotbx.shelx.errors import error as shelx_error
 from iotbx.shelx import tokens
 from functools import reduce
 import six
+import warnings
 from six.moves import range
 
 class parser(object):
@@ -806,11 +807,11 @@ class restraint_parser(parser):
       # these used to vanish without a word (30or: a whole class of residue references)
       ex = "; ".join("%s at line %d: %s" % (c, l + 1, " ".join(a))
                      for c, l, r, a in self.unresolved_restraints[:3])
-      print("WARNING: %d restraint(s) name atoms that are not in the model and were"
+      warnings.warn("%d restraint(s) name atoms that are not in the model and were"
             " dropped, e.g. %s" % (len(self.unresolved_restraints), ex))
     amb = sorted(getattr(self, 'ambiguous_restraint_atoms', ()), key=str)
     if amb:
-      print("WARNING: restraints name %d atom(s) whose name occurs in more than one PART"
+      warnings.warn("restraints name %d atom(s) whose name occurs in more than one PART"
             " or chain of the same residue number; each binds to the LAST such atom only,"
             " e.g. %s" % (len(amb), ", ".join(n.upper() + ("_%s" % r if r is not None else "")
                                               for r, n in amb[:5])))

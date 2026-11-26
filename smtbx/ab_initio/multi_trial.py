@@ -112,8 +112,9 @@ def solve(f_obs,
   """ n_trials seeded charge-flipping runs; the best solution found.
 
   Returns a group_args with `f_calc`, `shift`, `cc_peak_height` and `r1` of the
-  winner (the tuple `solving_iterator.f_calc_solutions` holds), `trials`, a
-  record of every run, and `n_trials_run`. `f_calc` is None if nothing solved.
+  winner (`solving_iterator.f_calc_solutions` and `f_calc_solutions_r1`),
+  `trials`, a record of every run, and `n_trials_run`. `f_calc` is None if
+  nothing solved.
 
   loop, when given, replaces `charge_flipping.loop` for one trial (Olex2 passes
   its own for the progress plot and stop button); it takes (solving_iterator,
@@ -178,7 +179,10 @@ def solve(f_obs,
       error = "%s: %s" % (type(e).__name__, str(e)[:200])
 
     # every solution the trial found, not just the first
-    solutions = list(getattr(solving, "f_calc_solutions", None) or [])
+    # as (f_calc, shift, cc_peak_height, r1)
+    solutions = [s + (r1,) for s, r1 in zip(
+      getattr(solving, "f_calc_solutions", None) or [],
+      getattr(solving, "f_calc_solutions_r1", None) or [])]
     # the unsymmetrised P1 structure factors, the only form without the
     # assumed space group imposed, which a symmetry search needs; `clean_up`
     # leaves the flipping iterator, so reading it here is safe

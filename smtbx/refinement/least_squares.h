@@ -119,6 +119,19 @@ namespace smtbx { namespace refinement { namespace least_squares {
     typename void_of<typename NE::sum_of_rank_1_updates_t>::type>
     : shared_fold_for_accumulator<typename NE::sum_of_rank_1_updates_t> {};
 
+  /// what one worker's accumulator copy costs; a type without a static
+  /// per_thread_bytes(n) is charged an n x n matrix of F
+  template <class NE, class F, class = void>
+  struct per_thread_bytes_of {
+    static std::size_t get(int n) { return std::size_t(n)*n*sizeof(F); }
+  };
+
+  template <class NE, class F>
+  struct per_thread_bytes_of<NE, F,
+    typename void_of<decltype(NE::per_thread_bytes(0))>::type> {
+    static std::size_t get(int n) { return NE::per_thread_bytes(n); }
+  };
+
   /// OpenBLAS threads set for a scope and restored after it
   struct blas_threads_scope {
 #if defined(USE_FAST_LINALG)
@@ -671,7 +684,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
           // asked of the accumulator: n^2 for a normal matrix, O(n) for the
           // conjugate gradient summaries
           std::size_t const per_thread_bytes =
-            NormalEquations::per_thread_bytes(normal_equations.n_parameters());
+            per_thread_bytes_of<NormalEquations, FloatType>::get(
+              normal_equations.n_parameters());
           /* A quarter of the budget, not all of it. The private matrices are
              not what the budget was written for -- the row buffers are -- and
              giving them the whole of it lets a *generous* budget produce a

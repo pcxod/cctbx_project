@@ -537,6 +537,7 @@ class solving_iterator(object):
     self.attempts = []
     self.normalisations = None
     self.f_calc_solutions = []
+    self.f_calc_solutions_r1 = []
     self.had_phase_transition = False
     self.max_attempts_exceeded = False
 
@@ -755,7 +756,7 @@ class solving_iterator(object):
       attempts = 0
       while attempts < self.max_attempts_to_get_sharp_correlation_map:
         attempts += 1
-        self.f_calc_solutions = []
+        found = []
         for f_calc, shift, cc_peak_height\
             in f_calc_symmetrisations(original_f_obs,
                                       self.flipping_iterator.f_calc,
@@ -765,8 +766,13 @@ class solving_iterator(object):
           # self.f_calc_solutions.append((f_calc, shift, cc_peak_height))
           fo, fc =original_f_obs.common_sets(f_calc)
           r1 = fo.r1_factor(fc, scale_factor=fo.scale_factor(fc))
-          self.f_calc_solutions.append((f_calc, shift, cc_peak_height, r1))
-        self.f_calc_solutions.sort(key=lambda s: s[3])
+          found.append(((f_calc, shift, cc_peak_height), r1))
+        # ranked by R1, which separates right from wrong where the peak
+        # height does not; the tuples stay (f_calc, shift, cc_peak_height)
+        # and f_calc_solutions_r1 holds the R1 of each
+        found.sort(key=lambda s: s[1])
+        self.f_calc_solutions = [s for s, r1 in found]
+        self.f_calc_solutions_r1 = [r1 for s, r1 in found]
         if self.f_calc_solutions: yield self.finished
         else: yield self.starting
       self.max_attempts_exceeded = True

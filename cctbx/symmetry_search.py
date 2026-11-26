@@ -72,6 +72,12 @@ class shift_refinement(object):
     del self.x
     self.f_x = miller.array(f_obs, self.f_x)
 
+  @property
+  def symmetrised_shifted_sf(self):
+    """ The former attribute, rebuilt at the final shift on access """
+    return symmetrised_shifted_structure_factors(
+      self.f_obs, self.fc_in_p1, tuple(self.shift), compute_gradient=True)
+
   def compute_functional_and_gradients(self):
     # old: rebuilt the shift-independent inputs on every evaluation
     # sssf = symmetrised_shifted_structure_factors(self.f_obs,
