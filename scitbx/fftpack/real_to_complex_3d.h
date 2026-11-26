@@ -5,7 +5,12 @@
 #include <scitbx/fftpack/real_to_complex.h>
 #include <omptbx/omp_or_stubs.h>
 
-#define SCITBX_FFTPACK_REAL_TO_COMPLEX_3D_NO_PRAGMA_OMP
+/* old: the define below switched the pragmas off; commented out so they run,
+as in complex_to_complex_2d.h. Safe as written: forward() writes map(ix,*,*)
+then map(*,iy,*), backward() map(*,*,2*iz..2*iz+1) then map(ix,*,*), each
+thread on its own scratch slice; no reduction, so the result is bit-identical
+*/
+//#define SCITBX_FFTPACK_REAL_TO_COMPLEX_3D_NO_PRAGMA_OMP
 
 namespace scitbx { namespace fftpack {
 

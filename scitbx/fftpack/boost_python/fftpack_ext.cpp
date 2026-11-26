@@ -15,6 +15,23 @@
 
 namespace scitbx { namespace fftpack { namespace {
 
+  /* releases the GIL around a whole-map transform, which charge flipping
+  otherwise serialises across threads. Pure C++ on buffers owned by the call:
+  cctbx builds a fresh transform object for every fft_map and `map` is the
+  caller's array, so no two threads share state. The 1-D overloads are too
+  short to pay for the save/restore
+  */
+  struct gil_release
+  {
+    gil_release() : state_(PyEval_SaveThread()) {}
+    ~gil_release() { PyEval_RestoreThread(state_); }
+  private:
+    PyThreadState* state_;
+    gil_release(gil_release const&);
+    gil_release& operator=(gil_release const&);
+  };
+
+
   void raise_size_error()
   {
     PyErr_SetString(PyExc_RuntimeError, "Array is too small.");
@@ -233,7 +250,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_3d_size(a, fft.n());
       ref_3d_complex_array map(a.begin(), af::c_grid<3>(fft.n()));
-      fft.forward(map);
+      { gil_release nogil; fft.forward(map); }
       return flex_complex_array(a, af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -244,7 +261,7 @@ namespace scitbx { namespace fftpack { namespace {
       assert_0_based_3d_size(a, n_real_from_n_complex(fft.n()));
       ref_3d_real_array map(
         a.begin(), af::c_grid<3>(n_real_from_n_complex(fft.n())));
-      fft.forward(map);
+      { gil_release nogil; fft.forward(map); }
       return flex_complex_array(a.handle(), af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -254,7 +271,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_3d_size(a, fft.n());
       ref_3d_complex_array map(a.begin(), af::c_grid<3>(fft.n()));
-      fft.backward(map);
+      { gil_release nogil; fft.backward(map); }
       return flex_complex_array(a, af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -265,7 +282,7 @@ namespace scitbx { namespace fftpack { namespace {
       assert_0_based_3d_size(a, n_real_from_n_complex(fft.n()));
       ref_3d_real_array map(
         a.begin(), af::c_grid<3>(n_real_from_n_complex(fft.n())));
-      fft.backward(map);
+      { gil_release nogil; fft.backward(map); }
       return flex_complex_array(a.handle(), af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -297,7 +314,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_2d_size(a, fft.n());
       ref_2d_complex_array map(a.begin(), af::c_grid<2>(fft.n()));
-      fft.forward(map);
+      { gil_release nogil; fft.forward(map); }
       return flex_complex_array(a, af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -308,7 +325,7 @@ namespace scitbx { namespace fftpack { namespace {
       assert_0_based_2d_size(a, n_real_from_n_complex(fft.n()));
       ref_2d_real_array map(
         a.begin(), af::c_grid<2>(n_real_from_n_complex(fft.n())));
-      fft.forward(map);
+      { gil_release nogil; fft.forward(map); }
       return flex_complex_array(a.handle(), af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -318,7 +335,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_2d_size(a, fft.n());
       ref_2d_complex_array map(a.begin(), af::c_grid<2>(fft.n()));
-      fft.backward(map);
+      { gil_release nogil; fft.backward(map); }
       return flex_complex_array(a, af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -329,7 +346,7 @@ namespace scitbx { namespace fftpack { namespace {
       assert_0_based_2d_size(a, n_real_from_n_complex(fft.n()));
       ref_2d_real_array map(
         a.begin(), af::c_grid<2>(n_real_from_n_complex(fft.n())));
-      fft.backward(map);
+      { gil_release nogil; fft.backward(map); }
       return flex_complex_array(a.handle(), af::flex_grid<>(af::adapt(fft.n()))
         .set_focus(af::adapt(fft.n())));
     }
@@ -360,7 +377,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_3d_size(a, fft.n_complex());
       ref_3d_complex_array map(a.begin(), af::c_grid<3>(fft.n_complex()));
-      fft.forward(map);
+      { gil_release nogil; fft.forward(map); }
       return flex_complex_array(a,
         af::flex_grid<>(af::adapt((fft.n_complex())))
         .set_focus(af::adapt(fft.n_complex())));
@@ -371,7 +388,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_3d_size(a, fft.m_real());
       ref_3d_real_array map(a.begin(), af::c_grid<3>(fft.m_real()));
-      fft.forward(map);
+      { gil_release nogil; fft.forward(map); }
       return flex_complex_array(a.handle(),
         af::flex_grid<>(af::adapt((fft.n_complex())))
         .set_focus(af::adapt(fft.n_complex())));
@@ -382,7 +399,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_3d_size(a, fft.n_complex());
       ref_3d_complex_array map(a.begin(), af::c_grid<3>(fft.n_complex()));
-      fft.backward(map);
+      { gil_release nogil; fft.backward(map); }
       return flex_real_array(a.handle(),
         af::flex_grid<>(af::adapt((fft.m_real())))
         .set_focus(af::adapt(fft.n_real())));
@@ -393,7 +410,7 @@ namespace scitbx { namespace fftpack { namespace {
     {
       assert_0_based_3d_size(a, fft.m_real());
       ref_3d_real_array map(a.begin(), af::c_grid<3>(fft.m_real()));
-      fft.backward(map);
+      { gil_release nogil; fft.backward(map); }
       return flex_real_array(a, af::flex_grid<>(af::adapt((fft.m_real())))
         .set_focus(af::adapt(fft.n_real())));
     }

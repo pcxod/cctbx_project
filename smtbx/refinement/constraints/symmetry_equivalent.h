@@ -24,10 +24,12 @@ namespace smtbx { namespace refinement { namespace constraints {
     virtual void linearise(uctbx::unit_cell const &unit_cell,
                            sparse_matrix_type *jacobian_transpose);
   private:
-    class special_position_site_parameter *special_position;
     sgtbx::rt_mx op;
+    /* old: state of the fixed local Jacobian, see symmetry_equivalent.cpp
+    class special_position_site_parameter *special_position;
     // Transpose of the Jacobian of the transform x -> op*x
     af::ref<double, af::mat_grid> local_jt;
+    */
   };
 
 

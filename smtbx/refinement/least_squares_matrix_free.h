@@ -37,7 +37,10 @@
   needs, which is the entire point: the per-thread copies of the latter are
   what force the OpenMP path in least_squares_omp.h to chunk itself against
   max_memory: a packed normal matrix grows with the square of the parameter
-  count before it is multiplied by the number of threads.
+  count before it is multiplied by the number of threads. Each says what its
+  copy costs, per_thread_bytes, which is what the threaded builder bounds its
+  worker count by; the summary's has a fixed-scale twin below, for maximum
+  likelihood.
 */
 
 #include <scitbx/array_family/shared.h>
@@ -173,6 +176,21 @@ namespace smtbx { namespace refinement { namespace least_squares {
     }
 
     int n_parameters() const { return n_params; }
+
+    /// What one more per-thread copy costs a threaded build
+    /** Two vectors, the row open_equation() lends and the preconditioner
+        blocks: O(n) for blocks of bounded size, and no normal matrix, which is
+        the point of the class. Static like omp_matrix_scratch beside it; the
+        blocks are read off pending(), the instance every per-thread copy is
+        made from, so the charge is what those copies allocate.
+     */
+    static std::size_t per_thread_bytes(int n_parameters) {
+      boost::shared_ptr<separable_scale_factor_summary> const &source
+        = context_t::pending();
+      SMTBX_ASSERT(source);
+      return (3*std::size_t(n_parameters)
+              + std::size_t(source->blocks_->data_size()))*sizeof(scalar_t);
+    }
 
     void add_residual(scalar_t yc, scalar_t yo, scalar_t w) {
       sum_w_yo_sq += w*yo*yo;
@@ -416,6 +434,15 @@ namespace smtbx { namespace refinement { namespace least_squares {
 
     int n_parameters() const { return n_params; }
 
+    /// as separable_scale_factor_summary::per_thread_bytes
+    static std::size_t per_thread_bytes(int n_parameters) {
+      boost::shared_ptr<fixed_scale_factor_summary> const &source
+        = context_t::pending();
+      SMTBX_ASSERT(source);
+      return (3*std::size_t(n_parameters)
+              + std::size_t(source->blocks_->data_size()))*sizeof(scalar_t);
+    }
+
     void add_residual(scalar_t yc, scalar_t yo, scalar_t w) {
       sum_w_yo_sq += w*yo*yo;
       sum_w_yc_sq += w*yc*yc;
@@ -628,6 +655,12 @@ namespace smtbx { namespace refinement { namespace least_squares {
     }
 
     int n_parameters() const { return n_params; }
+
+    /// What one more per-thread copy costs a threaded build: grad k, p, the
+    /// product and the row open_equation() lends
+    static std::size_t per_thread_bytes(int n_parameters) {
+      return 4*std::size_t(n_parameters)*sizeof(scalar_t);
+    }
 
     void add_residual(scalar_t, scalar_t, scalar_t) {}
 

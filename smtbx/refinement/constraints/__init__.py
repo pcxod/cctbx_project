@@ -185,7 +185,21 @@ class reparametrisation(ext.reparametrisation):
                                                    structure.scatterers()))
       else:
         self.constrained_parameters |= uniques
-        constraint.add_to(self)
+        try:
+          constraint.add_to(self)
+        except Exception as e:
+          # the bare exception named no constraint; with hundreds of AFIX groups
+          # (proteins) the culprit could only be found by bisection
+          ctx = "while adding %s" % self._constraint_context(constraint)
+          # in the message itself: callers such as Olex2 print str(e), which a
+          # note (add_note) would not reach
+          if e.args and isinstance(e.args[0], str):
+            e.args = ("%s (%s)" % (e.args[0], ctx),) + tuple(e.args[1:])
+          elif not e.args:
+            e.args = (ctx,)
+          elif hasattr(e, 'add_note'):
+            e.add_note(ctx)
+          raise
 
     for i_sc in range(len(self.asu_scatterer_parameters)):
       self.add_new_site_parameter(i_sc)
@@ -200,7 +214,9 @@ class reparametrisation(ext.reparametrisation):
           self.add_new_twin_fraction_parameter(fraction)
     if (self.fc_correction is not None and self.fc_correction.grad
         and self.thickness is not None
-        and isinstance(self.fc_correction, xray.shelx_extinction_correction)):
+        and isinstance(self.fc_correction,
+                       (xray.shelx_extinction_correction,
+                        xray.shelx_aniso_extinction_correction))):
       """EXTI must not be refined against an **N-beam (dynamical)** model.
 
       **This is not a statement about electron diffraction in general.**
@@ -248,6 +264,9 @@ class reparametrisation(ext.reparametrisation):
         p = self.add(extinction_parameter, self.fc_correction)
       elif isinstance(self.fc_correction, xray.shelx_SWAT_correction):
         p = self.add(SWAT_parameter, self.fc_correction)
+      elif isinstance(self.fc_correction,
+                      xray.shelx_aniso_extinction_correction):
+        p = self.add(aniso_extinction_parameter, self.fc_correction)
       self.independent_scalar_parameters.append(p)
     self.thickness_param = None
     if self.thickness is not None and self.thickness.grad:
@@ -329,9 +348,14 @@ class reparametrisation(ext.reparametrisation):
     return occ
 
   def add_new_site_parameter(self, i_scatterer, symm_op=None):
-    if i_scatterer in self.shared_sites:
-      return self.shared_sites[i_scatterer]
-    s = self.asu_scatterer_parameters[i_scatterer].site
+    # an EXYZ follower shares its reference's parameter; a symmetry copy of it
+    # still needs symm_op below
+    # old: returned the shared parameter before symm_op was applied
+    # if i_scatterer in self.shared_sites:
+    #   return self.shared_sites[i_scatterer]
+    # s = self.asu_scatterer_parameters[i_scatterer].site
+    s = self.shared_sites.get(i_scatterer,
+                              self.asu_scatterer_parameters[i_scatterer].site)
     if s is None:
       site_symm = self.site_symmetry_table_.get(i_scatterer)
       sc = self.structure.scatterers()[i_scatterer]
@@ -417,8 +441,31 @@ class reparametrisation(ext.reparametrisation):
     if self.directions is not None:
       res = self.directions.get(id_, None)
     if res is None:
-      raise "Undefined direction: '" + id_ + "'"
+      # raising a str is itself a TypeError in Python 3, which hid this message
+      raise InvalidConstraint("Undefined direction: '%s'" % (id_,))
     return res
+
+  def _constraint_context(self, constraint):
+    """ 'hydrogens pivot=C5(#4) constrained=H5A(#5),H5B(#6)' style description. """
+    scatterers = self.structure.scatterers()
+    def lbl(i):
+      try:
+        return "%s(#%d)" % (scatterers[i].label, i)
+      except Exception:
+        return "#%s" % (i,)
+    parts = [constraint.__class__.__name__]
+    pivot = getattr(constraint, 'pivot', None)
+    if isinstance(pivot, int):
+      parts.append("pivot=%s" % lbl(pivot))
+    for name in ('constrained_site_indices', 'indices'):
+      idx = getattr(constraint, name, None)
+      if idx:
+        try:
+          parts.append("%s=%s" % (name.split('_')[0], ",".join(lbl(i) for i in idx)))
+          break
+        except TypeError:
+          pass
+    return " ".join(parts)
 
   def format_scatter_list(self, sl):
     scatterers = self.structure.scatterers()

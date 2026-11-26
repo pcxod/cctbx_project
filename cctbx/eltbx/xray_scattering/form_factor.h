@@ -41,6 +41,30 @@ namespace xray_scattering {
         return heir().at_x_sq(stol * stol);
       }
 
+      //! Values at the points stol, given stol^2.
+      af::shared<double>
+      at_stol_sq(af::const_ref<double> const& stol_sq) const
+      {
+        af::shared<double>
+          result(stol_sq.size(), af::init_functor_null<double>());
+        for(std::size_t i=0;i<stol_sq.size();i++) {
+          result[i] = heir().at_x_sq(stol_sq[i]);
+        }
+        return result;
+      }
+
+      //! Values at the points stol (sin-theta-over-lambda).
+      af::shared<double>
+      at_stol(af::const_ref<double> const& stol) const
+      {
+        af::shared<double>
+          result(stol.size(), af::init_functor_null<double>());
+        for(std::size_t i=0;i<stol.size();i++) {
+          result[i] = heir().at_x_sq(stol[i] * stol[i]);
+        }
+        return result;
+      }
+
       /*! \brief Value at the point d_star
           (1/d), given d_star^2.
        */
@@ -80,6 +104,18 @@ namespace xray_scattering {
       at_d_star(double d_star) const
       {
         return heir().at_x_sq(d_star * d_star / 4);
+      }
+
+      //! Values at the points d_star (1/d).
+      af::shared<double>
+      at_d_star(af::const_ref<double> const& d_star) const
+      {
+        af::shared<double>
+          result(d_star.size(), af::init_functor_null<double>());
+        for(std::size_t i=0;i<d_star.size();i++) {
+          result[i] = heir().at_x_sq(d_star[i] * d_star[i] / 4);
+        }
+        return result;
       }
   };
 

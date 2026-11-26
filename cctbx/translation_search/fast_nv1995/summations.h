@@ -89,6 +89,47 @@ namespace cctbx { namespace translation_search { namespace fast_nv1995_detail {
         }
       }
 
+      // a = (-h) mod n and b = h mod n per axis. Without f_part every
+      // index of Eqs. (14) and (15) is -(hs0 - hs1 [+ hs2 - hs3]), i.e. a sum
+      // a0 + b1 [+ a2 + b3] wrapped by one conditional subtract per axis
+      // instead of the three modulos of minus() per term.
+      void
+      reduce(miller::index<> const& h, mi_v_t* a, mi_v_t* b) const
+      {
+        mi_v_t n[3] = {n_0_, n_1_, n_real_2_};
+        for (std::size_t i = 0; i < 3; i++) {
+          a[i] = (-h[i]) % n[i];
+          if (a[i] < 0) a[i] += n[i];
+          b[i] = h[i] % n[i];
+          if (b[i] < 0) b[i] += n[i];
+        }
+      }
+
+      // r = p + q wrapped into [0, n), p and q already reduced.
+      void
+      wrap(mi_v_t const* p, mi_v_t const* q, mi_v_t* r) const
+      {
+        r[0] = p[0] + q[0]; if (r[0] >= n_0_) r[0] -= n_0_;
+        r[1] = p[1] + q[1]; if (r[1] >= n_1_) r[1] -= n_1_;
+        r[2] = p[2] + q[2]; if (r[2] >= n_real_2_) r[2] -= n_real_2_;
+      }
+
+      // minus(h, lhs * rhs) with -h = p + q, p and q already reduced.
+      void
+      minus_reduced(mi_v_t const* p, mi_v_t const* q,
+                    complex_type const& lhs, complex_type const& rhs)
+      {
+        mi_v_t h2 = p[2] + q[2];
+        if (h2 >= n_real_2_) h2 -= n_real_2_;
+        if (h2 < n_complex_2_) {
+          mi_v_t h1 = p[1] + q[1];
+          if (h1 >= n_1_) h1 -= n_1_;
+          mi_v_t h0 = p[0] + q[0];
+          if (h0 >= n_0_) h0 -= n_0_;
+          begin_[(h0 * n_1_ + h1) * n_complex_2_ + h2] += lhs * rhs;
+        }
+      }
+
     protected:
       complex_type* begin_;
       mi_v_t n_0_, n_1_, n_real_2_, n_complex_2_;
@@ -147,6 +188,37 @@ namespace cctbx { namespace translation_search { namespace fast_nv1995_detail {
     mi_t* hs = hs_buffer.get();
     boost::scoped_array<cx_t> fts_buffer(new cx_t[order_p]);
     cx_t* fts = fts_buffer.get();
+    if (!have_f_part) {
+      typedef miller::index<>::value_type mi_v_t;
+      boost::scoped_array<mi_v_t> ab_buffer(new mi_v_t[6*order_p]);
+      mi_v_t* a = ab_buffer.get();
+      mi_v_t* b = a + 3*order_p;
+      for (std::size_t ih = 0; ih < miller_indices.size(); ih++) {
+        FloatType mh = m[ih];
+        set_ftilde(space_group, p1_f_calc, miller_indices[ih], hs, fts);
+        for (std::size_t i = 0; i < order_p; i++) {
+          sum.reduce(hs[i], a+3*i, b+3*i);
+        }
+        for (std::size_t is0 = 0; is0 < order_p; is0++) {
+          cx_t mh_ftil0c = mh * std::conj(fts[is0]);
+          for (std::size_t is1 = 0; is1 < order_p; is1++) {
+            mi_v_t p[3];
+            sum.wrap(a+3*is0, b+3*is1, p);
+            cx_t mh_ftil0c_ftil1(mh_ftil0c * fts[is1]);
+            for (std::size_t is2 = 0; is2 < order_p; is2++) {
+              mi_v_t q[3];
+              sum.wrap(p, a+3*is2, q);
+              cx_t mh_ftil0c_ftil1_ftil2c(
+                mul_conj(mh_ftil0c_ftil1, fts[is2]));
+              for (std::size_t is3 = 0; is3 < order_p; is3++) {
+                sum.minus_reduced(q, b+3*is3, mh_ftil0c_ftil1_ftil2c, fts[is3]);
+              }
+            }
+          }
+        }
+      }
+      return;
+    }
     cx_t fpi(0);
     cx_t fpi_sq(0);
     cx_t two_fpi_sq_conj_fpi(0);
@@ -223,6 +295,26 @@ namespace cctbx { namespace translation_search { namespace fast_nv1995_detail {
     mi_t* hs = hs_buffer.get();
     boost::scoped_array<cx_t> fts_buffer(new cx_t[order_p]);
     cx_t* fts = fts_buffer.get();
+    if (!have_f_part) {
+      typedef miller::index<>::value_type mi_v_t;
+      boost::scoped_array<mi_v_t> ab_buffer(new mi_v_t[6*order_p]);
+      mi_v_t* a = ab_buffer.get();
+      mi_v_t* b = a + 3*order_p;
+      for (std::size_t ih = 0; ih < miller_indices.size(); ih++) {
+        FloatType mh = m[ih];
+        set_ftilde(space_group, p1_f_calc, miller_indices[ih], hs, fts);
+        for (std::size_t i = 0; i < order_p; i++) {
+          sum.reduce(hs[i], a+3*i, b+3*i);
+        }
+        for (std::size_t is0 = 0; is0 < order_p; is0++) {
+          cx_t mh_ftil0c = mh * std::conj(fts[is0]);
+          for (std::size_t is1 = 0; is1 < order_p; is1++) {
+            sum.minus_reduced(a+3*is0, b+3*is1, mh_ftil0c, fts[is1]);
+          }
+        }
+      }
+      return;
+    }
     cx_t fpi(0);
     for (std::size_t ih = 0; ih < miller_indices.size(); ih++) {
       mi_t h = miller_indices[ih];

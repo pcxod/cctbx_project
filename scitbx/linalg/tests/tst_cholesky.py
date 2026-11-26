@@ -161,9 +161,42 @@ def exercise_gill_murray_wright_cholesky_decomposition():
          0.0, 1.8257418583505538, 0.0,
          0.0, 0.0, 1.2263767773404712])
 
+def exercise_inverse_of_u_transpose_u_threads():
+  """ The inverse holds OpenBLAS to fewer threads for small n and must hand the
+  caller's count back afterwards, whatever n and whatever that count was. """
+  try:
+    from fast_linalg import env
+  except ImportError:
+    return
+  if not env.initialised:
+    return
+  saved = env.threads
+  try:
+    for threads in (1, 3, saved):
+      env.threads = threads
+      for n in (5, 300, 2000):
+        # U^T U with U = 2 I + strictly upper ones: well conditioned
+        u = flex.double(n*(n + 1)//2, 1.)
+        k = 0
+        for i in range(n):
+          u[k] = 2.
+          k += n - i
+        inverse = scitbx.linalg.inverse_of_u_transpose_u(u)
+        assert env.threads == threads, (n, threads, env.threads)
+      # the result is still the inverse: (U^T U)^-1 U^T U = I
+      a = flex.double(5*6//2, 1.)
+      for i, k in enumerate((0, 5, 9, 12, 14)):
+        a[k] = 2.
+      inv = scitbx.linalg.inverse_of_u_transpose_u(a).matrix_packed_u_as_symmetric()
+      um = matrix.sqr(a.matrix_packed_u_as_upper_triangle())
+      assert approx_equal(matrix.sqr(inv)*(um.transpose()*um), matrix.identity(5))
+  finally:
+    env.threads = saved
+
 def run():
   exercise_cholesky_decomposition()
   exercise_gill_murray_wright_cholesky_decomposition()
+  exercise_inverse_of_u_transpose_u_threads()
   print('OK')
 
 if __name__ == '__main__':

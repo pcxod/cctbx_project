@@ -885,6 +885,21 @@ namespace smtbx { namespace structure_factors { namespace direct {
         return af::shared<std::size_t>();
       }
 
+      // .tshb entries that match no scatterer; empty for everything else
+      virtual af::shared<std::string> records_not_in_structure() const {
+        return af::shared<std::string>();
+      }
+
+      // .tshb entries found on a symmetry image of their site (move, compaq,
+      // inv) and rotated there, with the operation
+      virtual af::shared<std::string> records_moved_by_symmetry() const {
+        return af::shared<std::string>();
+      }
+
+      // upper bound for get/get_full indices, checked by the Python wrappers;
+      // ~0 if unknown
+      virtual std::size_t n_scatterers() const { return ~std::size_t(0); }
+
       virtual scatterer_contribution *raw_fork() const = 0;
     };
 
@@ -1009,6 +1024,8 @@ namespace smtbx { namespace structure_factors { namespace direct {
       virtual bool is_spherical() const {
         return true;
       }
+
+      virtual std::size_t n_scatterers() const { return scatterers.size(); }
 
       virtual base_type *raw_fork() const {
         return new isotropic_scatterer_contribution(*this);
