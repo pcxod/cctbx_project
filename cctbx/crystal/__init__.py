@@ -1339,6 +1339,9 @@ class calculate_dihedrals(object):
                         self.conformer_indices[j_seq] !=
                         self.conformer_indices[l_seq]):
                       continue
+                    # also found from the l end, keep one direction
+                    if (l_seq, k_seq) < (i_seq, j_seq):
+                      continue
                     for l_sym_group in l_sym_groups:
                       for l_sym_idx, l_sym in enumerate(l_sym_group):
                         rt_mx_l = rt_mx_lk.multiply(asu_mappings.get_rt_mx(l_seq, l_sym))
