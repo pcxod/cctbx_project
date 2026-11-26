@@ -13,6 +13,7 @@ working residual keeps falling while the model fits noise.
 """
 from __future__ import absolute_import, division, print_function
 
+# share held out for the free score, the usual R_free fraction
 DEFAULT_FREE_FRACTION = 0.10
 DEFAULT_CYCLES = 8
 # peaks per expected atom: a missing atom leaves a hole the next map must
@@ -125,6 +126,8 @@ def _normalised(amplitudes):
     return None
 
 
+# about the strongest third: the reflections direct methods phase from,
+# enough of them for a stable correlation (see strongest_e)
 STRONG_E_FRACTION = 0.35
 
 
@@ -288,6 +291,8 @@ def free_r1(f_free, model):
     return None
 
 
+# fraction: share of atoms dropped per trial. 0.3 and 3 trials are starting
+# values, not tuned
 def omit_trial(working, free, model, fraction=0.3, trials=3, seed=0, strong=True):
   """ SHELXD's peak-list optimisation: drop atoms at random, keep it if better.
 

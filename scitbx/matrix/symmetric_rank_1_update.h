@@ -498,6 +498,9 @@ namespace scitbx { namespace matrix {
       target_.prepare_shared();
       // rows of equal work: row i of the upper triangle has n - i elements
       int const n = cols_;
+      // about four tiles a worker (at least 8), so a worker finding a tile
+      // busy has others to fold into; none thinner than 32 rows, below which
+      // a syrk/gemm call costs more in overhead than it does work
       int const n_tiles = std::max(1, std::min(n/32, std::max(8, 4*n_workers)));
       double const total = 0.5*double(n)*(n + 1);
       tile_start_.push_back(0);

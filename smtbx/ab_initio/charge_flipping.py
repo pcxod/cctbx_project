@@ -532,7 +532,9 @@ class solving_iterator(object):
   map_skewness_stability_threshold = 0.01
   polishing_iterations = 5
   min_cc_peak_height = 0.9
-  # a rise of the map skewness below this is noise, not a phase transition
+  # a rise of the map skewness that ends below this is noise, not a phase
+  # transition; looser than the disabled upstream gate at 3 in _solving.
+  # float("-inf") turns it off, as upstream
   min_skewness_at_phase_transition = 1.5
   # unmeasured reflections inside the sphere take the map's value each cycle
   # (see start()); False keeps them at zero, as upstream

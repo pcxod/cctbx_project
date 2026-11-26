@@ -546,7 +546,9 @@ namespace smtbx { namespace refinement { namespace least_squares {
     // far from the model's mean the posterior sits in both factors' tails
     bool const outlier =
       std::abs(fo_sq - mean_p) >= 4*std::sqrt(s*s + var_p)
-      && s*s >= 0.09*var_p;  // a narrow measurement is still the posterior
+      // sigma under 0.3 of the model's spread: the posterior is then the
+      // measurement's narrow peak and the centred Hermite rule still fits it
+      && s*s >= 0.09*var_p;
     if (mu - 6*tau > 0 && !outlier) {
       n = n_w = mli_quadrature::n_hermite();
       double const *x = mli_quadrature::hermite_nodes();

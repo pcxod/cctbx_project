@@ -166,6 +166,10 @@ def combine(classical, proposals, geometry_weight=0.5, sigma=0.15,
   `geometry_weight` is the exponent on the classifier term: 0 is density
   alone, a large value geometry alone; 0.5 is the measured optimum.
 
+  `sigma` is the relative width of density_likelihood: 0.15 is about the
+  step between neighbouring light elements (N/C, O/N), so density alone
+  leaves them some one sd apart and the geometry can tip the call.
+
   An atom whose density call is outside the classifier's element set keeps
   the density answer.
   """
@@ -204,8 +208,8 @@ def combine(classical, proposals, geometry_weight=0.5, sigma=0.15,
   return out
 
 
-# Chemistry priors measured on the CSD. P(n heavy neighbours | element),
-# index 6 holds six and more.
+# Chemistry priors from plausible metal-organic structures.
+# P(n heavy neighbours | element), index 6 holds six and more.
 NEIGHBOUR_COUNT = {
   'C': (0.000, 0.128, 0.525, 0.312, 0.034, 0.001, 0.001),
   'N': (0.001, 0.111, 0.332, 0.520, 0.035, 0.000, 0.000),
@@ -303,7 +307,7 @@ METAL_DONOR = {
   'Cm': {'O': 0.608, 'N': 0.304, 'S': 0.082, 'Cl': 0.006},
   'Bk': {'C': 0.474, 'O': 0.437, 'N': 0.089},
 }
-# metal -> donor -> (CSD median bond length, robust sd, count), bonded meaning
+# metal -> donor -> (median bond length, robust sd, count), bonded meaning
 # within the covalent radii sum + 0.45 A; pairs with under 50 entries omitted
 BOND_WINDOW = {
   'Ag': {'N': (2.243, 0.141, 16780), 'As': (2.67, 0.101, 207), 'O': (2.388, 0.131, 10713), 'P': (2.431, 0.061, 2915), 'C': (2.269, 0.245, 8036), 'Cl': (2.64, 0.145, 824), 'Br': (2.735, 0.11, 1501), 'S': (2.536, 0.091, 8386), 'Se': (2.628, 0.05, 978), 'I': (2.864, 0.08, 3378)},
@@ -450,7 +454,7 @@ def neighbour_prior(element, neighbours, floor=0.02):
   for e in set(syms):
     if e in METAL_DONOR:
       p *= (max(METAL_DONOR[e].get(element, 0.0), floor)/base)**0.5
-  # ponytail: a Gaussian on the CSD metal-donor bond length, its spread
+  # ponytail: a Gaussian on the tabulated metal-donor bond length, its spread
   # widened by 0.08 A for raw-solution error, floored and damped like the
   # tables; a pair missing from BOND_WINDOW carries no opinion
   for d, e in neighbours:

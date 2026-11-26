@@ -14,6 +14,8 @@ from cctbx.array_family import flex
 import scitbx.math
 
 
+# about 500 reflections a shell, so each shell moment is stable, and 5 to 25
+# shells so alpha and beta can still follow the resolution
 def n_bins_for(n_reflections, per_bin=500, lo=5, hi=25):
   return max(lo, min(hi, int(n_reflections//per_bin) or lo))
 

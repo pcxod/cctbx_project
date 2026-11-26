@@ -20,6 +20,7 @@ import os
 
 # residual-peak cut in robust sigma; lower adds more atoms and more spurious ones
 SIGMA_CUT = float(os.environ.get("COMPLETION_SIGMA", "7.0"))
+# a peak nearer an atom than this is ripple: below the shortest non-H bond
 MIN_BOND = float(os.environ.get("COMPLETION_MIN_BOND", "1.0"))
 
 # Element-aware floor on how close an addition may sit:
@@ -85,7 +86,10 @@ def min_bond_to(symbol):
     out = MIN_BOND
   _COV_CACHE[key] = out
   return out
+# a peak farther than this from every atom is more likely noise than a bonded
+# atom; long enough for most metal-donor bonds
 MAX_BOND = float(os.environ.get("COMPLETION_MAX_BOND", "2.6"))
+# map-and-add rounds; the loop also stops when no peak clears the cut
 MAX_ROUNDS = int(os.environ.get("COMPLETION_ROUNDS", "5"))
 # Peak cut scaled by how full the model is: `cut*max(ADAPT_FLOOR,
 # occupancy**ADAPT)`, occupancy = model size over one atom per ADAPT_VOLUME
@@ -99,6 +103,8 @@ ADAPT_FLOOR = float(os.environ.get("COMPLETION_ADAPT_FLOOR", "0.5"))
 LAST_ADAPT_WANT = 0
 LAST_ADAPT_CUT = 0.0
 _ADAPT_ANNOUNCED = False
+# strongest first, so the map is re-phased before a much-changed model adds
+# more
 MAX_ADD_PER_ROUND = 8
 # starting u_iso before the structure's own median is known
 DEFAULT_U = float(os.environ.get("COMPLETION_DEFAULT_U", "0.05"))
@@ -576,6 +582,8 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
 
 # The staged heavy-atom build.
 
+# more than MAX_ROUNDS: the staged build starts from a few heavy atoms and
+# adds at most MAX_ADD_PER_ROUND a round
 STAGE_ROUNDS = int(os.environ.get("STAGE_ROUNDS", "12"))
 # Peak cut for the staged path only: light atoms in a map from a heavy-atom
 # model do not clear SIGMA_CUT. 0 = use SIGMA_CUT.

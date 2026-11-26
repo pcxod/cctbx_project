@@ -868,6 +868,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
       {}
     };
     struct Scheduler {
+      // reflections a chunk; next() and at() must cut the same partition
+      enum { chunk_size = 256 };
       int count, current;
       boost::mutex mtx;
       Scheduler(int count)
@@ -880,7 +882,7 @@ namespace smtbx { namespace refinement { namespace least_squares {
         if (left == 0) {
           return chunk();
         }
-        int sz = std::min(left, 256);
+        int sz = std::min(left, int(chunk_size));
         chunk rv(current, sz);
         current += sz;
         return rv;
@@ -890,11 +892,11 @@ namespace smtbx { namespace refinement { namespace least_squares {
       }
       /// chunk k of the same partition, for a worker that takes every n-th
       chunk at(int k) const {
-        int first = k*256;
+        int first = k*chunk_size;
         if (first >= count) {
           return chunk();
         }
-        return chunk(first, std::min(count - first, 256));
+        return chunk(first, std::min(count - first, int(chunk_size)));
       }
     };
 
