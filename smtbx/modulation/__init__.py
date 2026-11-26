@@ -1040,7 +1040,7 @@ class calculator(object):
   The crenel gradients are those of the x4 quadrature as computed: its nodes sit at fixed local coordinates
   (x4 - c) / w, so c and w move the nodes and scale the weights, and the Legendre and x-harmonic terms, which
   depend on the local coordinate alone, do not change with them.
-  table: a form_factor_table replacing the WK1995 f0 by aspherical f_j(S R) for each operation R.
+  table: a form_factor_table replacing the WK1995 f0 by non-spherical f_j(S R) for each operation R.
   radiation: "xray" or "electron" (kinematical electron diffraction, ITC electron f0 and no f', f'').
   """
 
@@ -2010,12 +2010,9 @@ RAISE_BLAS_THREADS = True    # False: _blas_threads leaves the process's BLAS th
 
 
 class _blas_threads(object):
-  """with _blas_threads(n): OpenBLAS (the library numpy and scipy call) runs at least n threads inside the block
-  (a higher count is left alone), its own count again after it. The libtbx dispatchers export
-  OPENBLAS_NUM_THREADS=1 (libtbx/env_config.py), which would make every dsyrk / potrf single-threaded; the J^T J build and the damped solve run while the atom pool is idle and take the
-  calculator's thread count instead. threadpoolctl when it is installed, else the OpenBLAS libraries
-  _openblas_libs finds (loaded ones on Linux, Windows and macOS, and the wheels' copies) through their
-  {,scipy_}openblas_{get,set}_num_threads{,64_} symbols; otherwise nothing changes."""
+  """with _blas_threads(n): BLAS runs at least n threads inside the block, its own count after it.
+  The libtbx dispatchers export OPENBLAS_NUM_THREADS=1, which leaves dsyrk / potrf single-threaded while the
+  atom pool is idle. threadpoolctl if installed, else the OpenBLAS thread-count symbols; otherwise a no-op."""
 
   def __init__(self, n):
     self.n, self.undo = n, None
@@ -2054,9 +2051,7 @@ class _blas_threads(object):
 
 _openblas_cache = []
 
-# the thread-count entry points under the names the OpenBLAS builds export: plain (distributions, older wheels),
-# "scipy_" + "64_" (scipy-openblas64, numpy >= 2 wheels: ILP64 symbol suffix) and "scipy_" alone
-# (scipy-openblas32, scipy wheels)
+# thread-count symbol names: plain (distribution builds), "scipy_" prefix and "64_" ILP64 suffix (wheels)
 _OPENBLAS_NAMES = [(p + "openblas_get_num_threads" + s, p + "openblas_set_num_threads" + s)
                    for p in ("", "scipy_") for s in ("", "64_", "_64")]
 
@@ -2119,10 +2114,7 @@ def _loaded_library_paths():
 
 
 def _openblas_wheel_paths():
-  """OpenBLAS libraries shipped inside the numpy and scipy wheels: numpy.libs / scipy.libs (Windows, Linux
-  manylinux), numpy/.libs, numpy/.dylibs and scipy/.dylibs (macOS), numpy/_core next to the extension. Whether
-  one is loaded does not matter for Windows, where loading a DLL already in the process returns that one, and
-  numpy and scipy are imported here."""
+  """OpenBLAS libraries shipped inside the numpy and scipy wheels (*.libs, .libs, .dylibs, _core)."""
   import glob
   out = []
   for name in ("numpy", "scipy"):
@@ -2147,9 +2139,7 @@ def _openblas_load(path):
 
 
 def _openblas_libs():
-  """The OpenBLAS libraries of this process, found once per process (the list never changes while it runs):
-  every loaded library whose file name holds "openblas", then the wheels' copies (_openblas_wheel_paths); each
-  wrapped under the names it exports (_OPENBLAS_NAMES), one entry per distinct library file."""
+  """The OpenBLAS libraries of this process, loaded and wheel copies, one per file; found once."""
   if not _openblas_cache:
     seen, libs = set(), []
     for p in _loaded_library_paths() + _openblas_wheel_paths():
@@ -2238,7 +2228,7 @@ def _rows_per_slice(xs, flags, max_memory_mb):
 def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", damping=1e-3, log=None, verbose=True,
            table=None, radiation="xray", average=None, max_memory_mb=512, commensurate=None, twins=None):
   """Levenberg-Marquardt on F^2 with weights 1/sigma^2. Returns per-cycle dicts (wR2, R1 by |m|, max shift).
-  table: a form_factor_table for aspherical form factors (IAM without); radiation as for calculator.
+  table: a form_factor_table for non-spherical form factors (IAM without); radiation as for calculator.
   commensurate: (t0, N) refines the commensurate structure of that section (commensurate_section): F^2 and
   gradients of the expanded images, the gradients folded back onto the parameters of xs (_commensurate_fold).
   Crenel centres and widths, and extinction, cannot be refined then (a finite sum has no gradient with respect
@@ -2415,7 +2405,7 @@ def refine(xs, h, m, f_obs_sq, sigmas, flags=None, cycles=10, n_x4="auto", dampi
       line = "  cycle %2d  wR2 %.4f  R1 %.4f  %s  max shift %.2e" % (
         rec["cycle"], wr2, rec["R1"]["all"],
         "  ".join("R1(%s) %.4f" % (k, v) for k, v in rec["R1"].items() if k != "all"), rec["max_shift"])
-      print(line, file=log) if log is not None else print(line)
+      print(line, file=log)
     if not accepted or rec["max_shift"] < 1e-8:
       break
   if tc is not None:

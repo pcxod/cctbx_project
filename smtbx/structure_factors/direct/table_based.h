@@ -25,8 +25,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
 
   // utf8_to_wide, open_for_reading, open_stream: in harmonic_expansion.h
 
-  /* read-only C stdio handle: fread moves a multi-GB .tscb about twice as fast
-     as std::ifstream, chunked or not. Only the seek is platform code, since
+  /* read-only C stdio handle: fread moves a multi-GB .tscb faster than
+     std::ifstream, chunked or not. Only the seek is platform code, since
      fseek takes a long, which is 32 bits on Windows
    */
   class c_file {
@@ -360,8 +360,8 @@ namespace smtbx { namespace structure_factors { namespace table_based {
         return;
       }
       if (width == legacy) {
-        throw SMTBX_ERROR(("'" + file_name + "' holds 8-byte scatterer ids, the format"
-          " written between 12 and 29 July 2026; this build reads the 16-byte format."
+        throw SMTBX_ERROR(("'" + file_name + "' holds 8-byte scatterer ids, an older"
+          " format; this build reads the 16-byte format."
           " Recalculate the table.").c_str());
       }
       if (width == 0) {

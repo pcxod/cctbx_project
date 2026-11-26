@@ -3,9 +3,8 @@
 
 /// Form factors from atomic densities expanded in Gaussians and real
 /// spherical harmonics: the .tshb file.
-/** A .tsc/.tscb table stores the form factor of every atom at every
-    reflection and every symmetry equivalent of it. A .tshb stores instead the
-    density each form factor is the transform of, in the form
+/** Instead of a .tsc/.tscb table of form factors per reflection, a .tshb
+    stores the density each form factor is the transform of:
 
     \f[ \rho_j(\mathbf r) = \sum_{\mathrm{shells}\ s} r^{l_s}
           e^{-\alpha_s r^2} \sum_{m=-l_s}^{l_s} c_{s,m}\, Y_{l_s m}(\hat{\mathbf r}) \f]
@@ -22,16 +21,11 @@
 
     with \f$ f(\mathbf s) = \int \rho(\mathbf r) e^{2\pi i \mathbf s\cdot\mathbf r}
     d^3r \f$, the convention of cctbx's structure factors, and
-    \f$ \mathbf s \f$ the Cartesian reciprocal vector of h. So the file holds
-    a few numbers per atom, which do not depend on the reflections, and any
-    reflection can be evaluated - including ones a table would not have held.
-    Like the tables, the values exclude f' and f'', which are added
-    downstream, and the atomic displacement, which is applied downstream too.
-
-    The symmetry equivalent of an atom under a rotation R has form factor
-    \f$ f(\mathbf h R) \f$, which is what get_full returns per operator, so an
-    improper rotation is handled by the parity of the harmonics without
-    special cases.
+    \f$ \mathbf s \f$ the Cartesian reciprocal vector of h, so any reflection
+    can be evaluated. As in the tables, f', f'' and the displacement are
+    applied downstream. The equivalent under a rotation R has form factor
+    \f$ f(\mathbf h R) \f$ (get_full, per operator); an improper rotation is
+    the parity of the harmonics.
 
     File layout (little endian):
 
@@ -76,29 +70,23 @@
         (tag 1) 16 bytes, the scatterer id as in SCATTERER_IDS
                (cctbx::xray::scatterer_id_big: element, PART, coordinate)
         int32  PART
-      An id is matched through scatterer_ID_lookup, by identity and, after the
-      structure has moved, by position, as for a .tscb; a label by name, as in
-      versions 1-3. All records of a file are keyed the same way, label or
-      id. A key may occur once in a file, and two records may not
-      resolve to the same atom: either is an error naming them. Records that
-      match no atom are kept in unmatched for the caller to report.
+      An id is matched through scatterer_ID_lookup (identity, then position),
+      a label by name. All records of a file are keyed the same way. A
+      repeated key, or two records resolving to one atom, is an error naming
+      them; records matching no atom go to unmatched.
 
-      An atom that move, compaq, sgen -m or inv has put on a symmetry image
-      (R, t) of the site its id records is found there too - over the space
-      group's operations and, in a group without a centre, each composed with
-      the inversion, as inv -f does. As Olex2 matches a table's columns, an
-      atom within 0.1 A of the site is in place, and otherwise the nearest of
-      the site and its images wins. The shells are rotated with the atom:
-      the density becomes rho(Q^-1 r) with Q = O R O^-1, so that its form
-      factor at h is the record's at h R, which is what a table recomputed
-      for the moved model would hold. See rotate_shells; such records are
-      listed in moved. (The table reader has no such fallback; for a table
-      Olex2 rewrites the moved columns before refining,
-      tsc_scatterer_resync.reorient_moved_columns.)
+      An atom moved onto a symmetry image (R, t) of its recorded site (move,
+      compaq, sgen -m, inv) is found there too: over the space group's
+      operations and, without a centre, each composed with the inversion.
+      Within 0.1 A of the site is in place, else the nearest image wins. The
+      shells are rotated with it, rho(Q^-1 r) with Q = O R O^-1, so its form
+      factor at h is the record's at h R (rotate_shells; listed in moved). The
+      table reader has no such fallback: Olex2 rewrites moved table columns
+      before refining.
 
-    Reading a damaged file is an error, never a crash: every count is checked
-    against the bytes left before anything is allocated for it, and every
-    number must be finite (alpha, zeta > 0; b >= 0; -2 < n <= 60).
+    A damaged file is an error, never a crash: every count is checked against
+    the bytes left before allocating, every number must be finite
+    (alpha, zeta > 0; b >= 0; -2 < n <= 60).
 
     The Slater terms transform analytically too, for any real n > -2 (Gamma
     replacing the factorial when n is not an integer):

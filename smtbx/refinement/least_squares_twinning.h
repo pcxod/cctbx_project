@@ -37,7 +37,7 @@ namespace smtbx {
 
         /* The mask is computed on the measured reflections, but a twin
            component asks for its own index: an HKLF 5 component the data
-           filter removed (COD 4003231, 1155 of them), or the Friedel mate of
+           filter removed, or the Friedel mate of
            an inversion twin with anomalous data. The solvent has no dispersion,
            so F_mask(-h) = conj F_mask(h); an index the mask never saw adds no
            solvent to that component rather than stopping the refinement.

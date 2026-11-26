@@ -240,10 +240,8 @@ namespace smtbx { namespace refinement { namespace least_squares {
     /* Into F^2 space; see the header comment for why this is exact.
 
        The division is by the *calculated* intensity, and a reflection the
-       model puts at zero makes it enormous: measured on a small molecule, 193 of 6819
-       reflections have |Fc|^2 below 1e-6 and the smallest is 6e-31, which
-       turned the largest weight into 6e29 and the objective into 2.5e22
-       against least squares' 4e-3.
+       model puts at zero makes it enormous: weights and objective then run
+       to dozens of orders of magnitude above the least-squares values.
 
        Zero is the right weight there, not infinity. The conversion exists
        because du/dp = 2|Fc| d|Fc|/dp, so as |Fc| goes to zero the row of the

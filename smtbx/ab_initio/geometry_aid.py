@@ -440,7 +440,7 @@ def neighbour_prior(element, neighbours, floor=0.02):
   """ p(these heavy neighbours | element), the chemistry the density read
   cannot see: a lone atom on Cl is an O, an atom with no neighbour is not a
   C, a donor on a hard metal is O before S. Posterior tables are turned into
-  likelihoods by the COD base rate; every table is floored so no one of them
+  likelihoods by dividing out the element base rate (BASE_RATE); every table is floored so no one of them
   can veto the density. """
   import math
   neighbours = [x if isinstance(x, tuple) else (None, x) for x in neighbours]

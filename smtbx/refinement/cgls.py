@@ -345,9 +345,9 @@ class linearised_problem(object):
         for j, i in enumerate(indices):
           block[j, j] += self.damping*diagonal[int(i)]
       try:
-        # scipy rather than numpy.linalg.inv: numpy pays an OpenBLAS
-        # thread-pool entry per call, which dominates on blocks this small;
-        # the rounding difference only touches the preconditioner
+        # scipy: numpy.linalg.inv enters the BLAS thread pool on every call,
+        # too costly for blocks this small; only the preconditioner rounds
+        # differently
         # old: replaced for that per-call cost
         # inverse = numpy.linalg.inv(block)
         # except numpy.linalg.LinAlgError:

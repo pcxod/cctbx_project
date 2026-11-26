@@ -804,7 +804,7 @@ class restraint_parser(parser):
           except (TypeError, AssertionError):
             raise shelx_error("Invalid %s instruction" %cmd, line)
     if self.unresolved_restraints:
-      # these used to vanish without a word (30or: a whole class of residue references)
+      # a restraint on a missing atom is dropped, but never silently
       ex = "; ".join("%s at line %d: %s" % (c, l + 1, " ".join(a))
                      for c, l, r, a in self.unresolved_restraints[:3])
       warnings.warn("%d restraint(s) name atoms that are not in the model and were"

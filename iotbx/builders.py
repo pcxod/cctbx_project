@@ -139,7 +139,7 @@ class crystal_structure_builder(crystal_symmetry_builder):
     if key in self.index_of_scatterer_named:
       # same name in another PART or chain: the later atom wins the name, so a
       # restraint naming it binds to that one only (see ambiguous_names)
-      self.__dict__.setdefault('ambiguous_names', set()).add(key)
+      self.ambiguous_names.add(key)
     self.index_of_scatterer_named[key] = scatterer_index
 
 

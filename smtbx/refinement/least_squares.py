@@ -712,9 +712,9 @@ def crystallographic_ls_class(non_linear_ls_with_separable_scale_factor=None,
       Gauss-Newton curvature of -logL, 2a^2/(epsilon b), in absolute units, so
       the inverse matrix is already an inverse information and the goodness of
       fit is not a correction to anything - it is a quantity with no reason to
-      approach one, measured at 0.08 on a protein and 11.8 on the same structure
-      without restraints. Applying it scaled every s.u. by between 1/140 and
-      140 depending on which, which in turn is what ShelXL's DAMP divides the
+      approach one, and it moves by orders of magnitude with the restraints.
+      Applying it rescales every s.u. by that factor, which in turn is what
+      ShelXL's DAMP divides the
       shifts by, so the step limiter was working in units that moved under it.
 
       The curvature retained is the positive part only, the term

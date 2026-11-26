@@ -7,11 +7,11 @@ tshb_block merges files as NoSpherA2 merges tables: records are keyed by
 scatterer id, else by label, and the first record of a key wins, so PART 0
 atoms come from the first per-part file.
 
-Units are Angstrom and e/A^3 in the unit cell's Cartesian frame; from_bohr()
-converts atomic units.
+Units are Angstrom and e/A^3 in the unit cell's Cartesian frame.
 """
 from __future__ import absolute_import, division, print_function
 
+import math
 import struct
 from collections import namedtuple
 
@@ -41,32 +41,21 @@ def record_key(record):
     return ("id", bytes(record.key))
   return ("label", record.label.upper())
 
-BOHR = 0.529177210903     # Angstrom
 
-
-def from_bohr(l, alpha, c):
-  """ A shell n exp(-alpha r^2) r^l sum_m c_m Y_lm in bohr and e/bohr^3,
-  re-expressed in Angstrom and e/A^3. Fold any normalisation n into c first.
-  """
-  scale = 1/BOHR**(l + 3)
-  return shell(l, alpha/BOHR**2, [x*scale for x in c])
-
-
-def write(file_name, atoms, header=None, version_override=None):
+def write(file_name, atoms, header=None, min_version=1):
   """ atoms: a sequence of atom(label, [shell(l, alpha, c), ...]).
   header: extra "key: value" lines, a dict; "AD: false" is honoured by the
-  reader as in a .tsc.
+  reader as in a .tsc. The lowest version that holds the records is written,
+  never below min_version.
   """
   lines = ["FRAME: cartesian", "UNITS: angstrom"]
   for k, v in (header or {}).items():
     lines.append("%s: %s" % (k, v))
   text = ("\n".join(lines)).encode("utf-8")
-  version = 4 if any(a.key is not None or a.part for a in atoms) else \
-    3 if any(a.z for a in atoms) else \
-    2 if any(a.gaussians or a.slaters or a.exponentials for a in atoms) else 1
-  if version_override is not None:
-    assert version_override >= version, (version_override, version)
-    version = version_override
+  version = max(min_version,
+    4 if any(a.key is not None or a.part for a in atoms) else
+    3 if any(a.z for a in atoms) else
+    2 if any(a.gaussians or a.slaters or a.exponentials for a in atoms) else 1)
   with open(file_name, "wb") as f:
     f.write(b"TSHB")
     f.write(struct.pack("<II", version, len(text)))
@@ -202,7 +191,7 @@ class tshb_block(object):
     header = dict(self.header)
     for k in ("FRAME", "UNITS"):
       header.pop(k, None)      # write() puts these first
-    write(file_name, self.records, header=header, version_override=4)
+    write(file_name, self.records, header=header, min_version=4)
 
   @staticmethod
   def read(file_name):
@@ -223,7 +212,6 @@ def spherical_atom(label, gaussian):
   a exp(-b s^2/4) is the transform of an l = 0 shell of exponent 4 pi^2/b; the
   constant c, a point charge, becomes a very narrow one.
   """
-  import math
   y00 = 1/math.sqrt(4*math.pi)
   shells = []
   terms = list(zip(gaussian.array_of_a(), gaussian.array_of_b()))

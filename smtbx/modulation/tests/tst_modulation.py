@@ -363,7 +363,7 @@ def _write_tsc(path, ids, idx, f, binary):
         o.write("%d %d %d %s\n" % (k[0], k[1], k[2], " ".join("%.17e,%.17e" % (v.real, v.imag) for v in row)))
 
 
-def test_aspherical_table():
+def test_nonspherical_table():
   """A table of f0(|S|) exp(2 pi i S.d), a density offset by d from its nucleus (d perpendicular to q, so the wave
   argument q.x stays), reproduces F and gradients of the IAM structure with the sites moved by d: f_j(S R) per
   operation, the +-S folding and the scaled rows, from a binary and a text table whose scatterer ids sit 0.002
@@ -417,7 +417,7 @@ def test_aspherical_table():
     pass
   else:
     raise AssertionError("a label table must be refused")
-  print("  aspherical table (%d rows, +-S folded): F and %d gradients = IAM with moved sites to %.1e, tscb and text"
+  print("  non-spherical table (%d rows, +-S folded): F and %d gradients = IAM with moved sites to %.1e, tscb and text"
         % (len(rows), d_ref.shape[1], worst))
 
 
@@ -1583,7 +1583,7 @@ def run():
   test_rank_by_absences_equivalence()
   test_recovery()
   test_average_constraints_and_restraints()
-  test_aspherical_table()
+  test_nonspherical_table()
   test_electron()
   print("OK")
 

@@ -48,7 +48,7 @@ def exercise_residue_references_not_bound_to_another_atom():
       assert "not in the model" in out and not b.proxies().get("bond"), (ins, out)
 
 def exercise_unresolved_restraint_reported():
-  """ an explicit restraint naming a missing atom used to vanish silently """
+  """ an explicit restraint naming a missing atom is reported, not dropped silently """
   b, out = parse(template_ins("DFIX 1.5 C1 C9\nDFIX 1.5 C1 C2"))
   assert "1 restraint(s) name atoms that are not in the model" in out, out
   assert "C9" in out, out

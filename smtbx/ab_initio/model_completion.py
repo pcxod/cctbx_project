@@ -12,7 +12,7 @@ shows one.
     is more likely noise.
   * The loop stops when the strongest residual peak falls below `SIGMA_CUT`
     sigma.
-  * Only additions are pruned; the original sites are kept unless `SWAP`.
+  * Only additions are pruned; the original sites are kept.
 """
 from __future__ import absolute_import, division, print_function
 
@@ -22,113 +22,29 @@ import os
 SIGMA_CUT = float(os.environ.get("COMPLETION_SIGMA", "7.0"))
 # a peak nearer an atom than this is ripple: below the shortest non-H bond
 MIN_BOND = float(os.environ.get("COMPLETION_MIN_BOND", "1.0"))
-
-# Element-aware floor on how close an addition may sit:
-# COV_FACTOR*(r_cov(neighbour) + r_cov(C)), floored at MIN_BOND. The 1.2-1.6 A
-# shell is mostly ripple beside a heavy atom and mostly real bonds in an
-# organic; with carbon's sum of 1.52 A the floor leaves organics untouched and
-# only rises next to large atoms. 0 = off.
-COV_FACTOR = float(os.environ.get("COMPLETION_COV_FACTOR", "0"))
-
-# Batched numpy nearest-image distances in `candidates` instead of one
-# `min_distance` call per pair. Never a 2-D `.dot` there: numpy routes it
-# through OpenBLAS, and loading that DLL after this cctbx build's aborts the
-# process (0xC06D007F); `einsum` avoids BLAS.
-FAST_DIST = os.environ.get("COMPLETION_FAST_DIST", "0") != "0"
-
-
-def _fast_ctx(uc, sg, sites):
-  """ Precompute the metric tensor, symmetry ops and site array once. """
-  import numpy as np
-  from smtbx.ab_initio.assemble import _SHIFTS
-
-  g = uc.metrical_matrix()
-  G = np.array([[g[0], g[3], g[4]], [g[3], g[1], g[5]], [g[4], g[5], g[2]]])
-  SH = np.array(_SHIFTS, dtype=float)
-  OPS = [(np.array(o.as_double_array()[:9]).reshape(3, 3),
-          np.array(o.as_double_array()[9:])) for o in sg.all_ops()]
-  return G, SH, OPS, np.asarray(list(sites))
-
-
-def _fast_dists(target, ctx):
-  """ Nearest-image distance from `target` to every site, as an array. """
-  import numpy as np
-
-  G, SH, OPS, S = ctx
-  t = np.asarray(target)
-  best = None
-  for R, T in OPS:
-    s = np.einsum("ni,ji->nj", S, R) + T          # never .dot -- see above
-    base = s - np.round(s - t)
-    dv = base[:, None, :] + SH[None, :, :] - t
-    d2 = np.einsum("nsi,ij,nsj->ns", dv, G, dv).min(axis=1)
-    best = d2 if best is None else np.minimum(best, d2)
-  return np.sqrt(best)
-_COV_CACHE = {}
-
-
-def min_bond_to(symbol):
-  """ How close an addition may come to an atom of this element.
-
-  MIN_BOND for an element unknown to the table, never a radius of zero.
-  """
-  if COV_FACTOR <= 0:
-    return MIN_BOND
-  key = (symbol or "C").strip().capitalize()
-  if key in _COV_CACHE:
-    return _COV_CACHE[key]
-  try:
-    from cctbx.eltbx import covalent_radii
-    r = covalent_radii.table(key).radius()
-    c = covalent_radii.table("C").radius()
-    out = max(MIN_BOND, COV_FACTOR*(r + c))
-  except Exception:
-    out = MIN_BOND
-  _COV_CACHE[key] = out
-  return out
 # a peak farther than this from every atom is more likely noise than a bonded
 # atom; long enough for most metal-donor bonds
 MAX_BOND = float(os.environ.get("COMPLETION_MAX_BOND", "2.6"))
 # map-and-add rounds; the loop also stops when no peak clears the cut
 MAX_ROUNDS = int(os.environ.get("COMPLETION_ROUNDS", "5"))
-# Peak cut scaled by how full the model is: `cut*max(ADAPT_FLOOR,
-# occupancy**ADAPT)`, occupancy = model size over one atom per ADAPT_VOLUME
-# A^3 (the median of real compositions). A short model admits weaker residual
-# peaks; recomputed every round, so the leniency closes as the model fills.
-# A weight, not a switch. 0 = off.
-ADAPT = float(os.environ.get("COMPLETION_ADAPT", "0"))
+# A^3 per non-H atom of a typical model (the median of real compositions);
+# `expected_atoms` reads it as the size a model should reach
 ADAPT_VOLUME = float(os.environ.get("COMPLETION_ADAPT_VOLUME", "17.2"))
-ADAPT_FLOOR = float(os.environ.get("COMPLETION_ADAPT_FLOOR", "0.5"))
-# what the last structure ran with, so "off" and "ran, changed nothing" differ
-LAST_ADAPT_WANT = 0
-LAST_ADAPT_CUT = 0.0
-_ADAPT_ANNOUNCED = False
 # strongest first, so the map is re-phased before a much-changed model adds
 # more
 MAX_ADD_PER_ROUND = 8
 # starting u_iso before the structure's own median is known
 DEFAULT_U = float(os.environ.get("COMPLETION_DEFAULT_U", "0.05"))
-# per-atom prune thresholds relative to the structure's own refined atoms;
-# only used with BUDGET_MODE off
+# refinement cycles before the prune reads the additions' ADPs
 PRUNE_CYCLES = int(os.environ.get("COMPLETION_PRUNE_CYCLES", "3"))
-U_RATIO = float(os.environ.get("COMPLETION_U_RATIO", "3.0"))
-MAX_SHIFT = float(os.environ.get("COMPLETION_MAX_SHIFT", "0.7"))
-MIN_OCC = float(os.environ.get("COMPLETION_MIN_OCC", "0.3"))
-# weighted contest (`_by_budget`) instead of the per-atom thresholds above;
-# shift and occupancy do not separate real from spurious additions
-BUDGET_MODE = os.environ.get("COMPLETION_BUDGET", "1") != "0"
-BUDGET_BETA = float(os.environ.get("COMPLETION_BETA", "1.0"))
 # A^3 per non-H atom for the completion ceiling; tighter than the typical 17
 # because a surviving addition goes straight into the model
 BUDGET_VOLUME = float(os.environ.get("COMPLETION_VOLUME", "13.0"))
 # Every addition is kept while
-#     log(U_MAX) - log(uratio) + SIGMA_W*log(sigma/SIGMA_REF) > 0
-# with uratio = u_iso over the originals' median: a strong peak buys tolerance
-# for a worse ADP. SIGMA_W = 0 because peak strength has not been shown to
-# help here.
+#     log(U_MAX) - log(uratio) > 0
+# with uratio = u_iso over the originals' median: shift, occupancy and peak
+# height do not separate real from spurious additions, the ADP does.
 U_MAX = float(os.environ.get("COMPLETION_UMAX", "2.0"))
-SIGMA_W = float(os.environ.get("COMPLETION_SIGMA_W", "0.0"))
-SIGMA_REF = float(os.environ.get("COMPLETION_SIGMA_REF", "3.0"))
 
 # The bar moves with how full the model is: the score above gains
 #     PRUNE_ADAPT*min(log(PRUNE_ADAPT_CEIL), -log(occupancy))
@@ -137,12 +53,6 @@ SIGMA_REF = float(os.environ.get("COMPLETION_SIGMA_REF", "3.0"))
 # a two-atom model from keeping everything the map offered.
 PRUNE_ADAPT = float(os.environ.get("COMPLETION_PRUNE_ADAPT", "2.0"))
 PRUNE_ADAPT_CEIL = float(os.environ.get("COMPLETION_PRUNE_ADAPT_CEIL", "4.0"))
-
-# Originals compete with the additions for the same cell budget, so an
-# original that fits nothing can lose its slot to a better-supported atom.
-SWAP = os.environ.get("COMPLETION_SWAP", "0") != "0"
-# never fewer atoms than this after a swap contest: thin rather than empty
-SWAP_FLOOR = int(os.environ.get("COMPLETION_SWAP_FLOOR", "4"))
 
 
 def build_model(placed, sites, calls, u_values=None):
@@ -274,10 +184,10 @@ def map_sigma(real):
 def candidates(fft, placed, sites, sigma_cut=SIGMA_CUT, calls=None):
   """ Residual maxima that could be atoms: strong, and at a bonding distance.
 
-  Returns [(site, height_in_sigma)], strongest first.
+  Returns [(site, height_in_sigma, nearest_atom_distance)], strongest first.
+  `calls` is accepted for the callers' signature and not read.
   """
   from cctbx import maptbx
-  from cctbx.array_family import flex
 
   real = fft.real_map_unpadded()
   sigma = map_sigma(real)
@@ -293,25 +203,15 @@ def candidates(fft, placed, sites, sigma_cut=SIGMA_CUT, calls=None):
   uc = placed.unit_cell()
   sg = placed.space_group()
 
-  ctx = _fast_ctx(uc, sg, sites) if (FAST_DIST and sites.size()) else None
   out = []
   for site, height in zip(peak_list.sites(), peak_list.heights()):
     if height < sigma_cut*sigma:
       continue
-    # nearest existing atom over symmetry images; the floor is that atom's own
-    if ctx is not None:
-      ds = _fast_dists(site, ctx)
-      k = int(ds.argmin())
-      best = float(ds[k])
-      best_floor = min_bond_to(calls[k] if calls and k < len(calls) else "C")
-    else:
-      best, best_floor = 1e9, MIN_BOND
-      for k, s in enumerate(sites):
-        dd = min_distance(uc, sg, site, s)
-        if dd < best:
-          best = dd
-          best_floor = min_bond_to(calls[k] if calls and k < len(calls) else "C")
-    if best < best_floor or best > MAX_BOND:
+    # nearest existing atom over symmetry images
+    best = 1e9
+    for s in sites:
+      best = min(best, min_distance(uc, sg, site, s))
+    if best < MIN_BOND or best > MAX_BOND:
       continue
     # carried on: an addition close to a heavy atom integrates part of it and
     # reads heavier than it is
@@ -329,29 +229,21 @@ LAST_EVIDENCE = []
 SG_P1_CACHE = [None]
 # additions the cell cap removed although their own evidence supported them
 LAST_CAPPED = 0
-# Surviving originals. With swap an original can be dropped, and a caller
-# that assumes its first n atoms are the trusted ones would fit the carbon
-# scale on additions.
-LAST_N_ORIGINAL = 0
 
 
 def prune_added(f_obs, placed, sites, calls, n_original,
-                u_values=None, mode="on", strengths=None, budget=None,
-                dists=None, orig_strengths=None, swap=False):
+                u_values=None, strengths=None, budget=None, dists=None):
   """ Refine once, then drop added atoms the refinement will not support.
 
   An atom placed on noise inflates its u_iso to absorb the absent density
   and drifts; a real one keeps a u_iso like its neighbours'. Judged relative
   to the median of the original atoms, since absolute u_iso varies by an
-  order of magnitude between structures. Only additions can be removed,
-  unless `swap`.
+  order of magnitude between structures. Only additions can be removed.
   """
   import numpy as np
-  from cctbx.array_family import flex
   from smtbx.ab_initio import dual_space
 
-  # with swap the originals contest each other even when nothing was added
-  if sites.size() <= n_original and not swap:
+  if sites.size() <= n_original:
     return sites, calls, 0
 
   model = build_model(placed, sites, calls, u_values)
@@ -370,26 +262,7 @@ def prune_added(f_obs, placed, sites, calls, n_original,
   ref_u = float(np.median(orig_u))
 
   del LAST_EVIDENCE[:]
-  # without peak strengths for the originals the contest would be unfair, so
-  # swap turns itself off
-  swap = bool(swap and orig_strengths is not None
-              and len(orig_strengths) >= n_original)
-  keep_sites, keep_calls, dropped = flex.vec3_double(), [], 0
-  for i in range(sites.size()):
-    if i < n_original and not swap:
-      keep_sites.append(sites[i])
-      keep_calls.append(calls[i] if calls and i < len(calls) else "C")
-      continue
-    if i < n_original:
-      u = scat[i].u_iso if scat[i].u_iso is not None else 0.0
-      d = [x - y for x, y in zip(scat[i].site, sites[i])]
-      LAST_EVIDENCE.append(
-        (i, u/ref_u if ref_u > 0 else 0.0,
-         uc.length([x - round(x) for x in d]), scat[i].occupancy,
-         orig_strengths[i], -1.0))
-      keep_sites.append(sites[i])
-      keep_calls.append(calls[i] if calls and i < len(calls) else "C")
-      continue
+  for i in range(n_original, sites.size()):
     u = scat[i].u_iso if scat[i].u_iso is not None else 0.0
     # wrapped: a refining atom can cross a cell boundary
     d = [x - y for x, y in zip(scat[i].site, sites[i])]
@@ -400,56 +273,17 @@ def prune_added(f_obs, placed, sites, calls, n_original,
     dst = dists[k] if dists and k < len(dists) else -1.0
     LAST_EVIDENCE.append((i, u/ref_u if ref_u > 0 else 0.0, shift, occ, sig,
                           dst))
-    # old: drop computed from the thresholds, then reset to False if BUDGET_MODE
-    # with BUDGET_MODE the contest below decides, not the per-atom thresholds
-    drop = not BUDGET_MODE and (u > U_RATIO*ref_u or u <= 0.0
-                                or shift > MAX_SHIFT or occ < MIN_OCC)
-    # `mark` keeps everything and only records the evidence
-    if drop and mode != "mark":
-      dropped += 1
-      continue
-    keep_sites.append(sites[i])
-    keep_calls.append(calls[i] if calls and i < len(calls) else "C")
 
-  if BUDGET_MODE and mode != "mark":
-    # `_by_budget` reads strengths[k] for the k-th contestant, so with swap the
-    # originals' strengths come first, in site order
-    contest = (list(orig_strengths[:n_original]) + list(strengths or [])
-               if swap else strengths)
-    keep_sites, keep_calls, dropped = _by_budget(
-      sites, calls, 0 if swap else n_original, contest, budget,
-      floor=SWAP_FLOOR if swap else 0, n_expect=expected_atoms(placed))
-    global LAST_N_ORIGINAL
-    LAST_N_ORIGINAL = (_count_originals(sites, keep_sites, n_original)
-                       if swap else n_original)
-    if os.environ.get("COMPLETION_DEBUG"):
-      # requested != active when the originals' peak heights did not arrive
-      print("SWAPDIAG requested=%d active=%d orig=%d added=%d kept=%d "
-            "budget=%s room_binds=%d"
-            % (int(SWAP), int(swap), n_original, sites.size() - n_original,
-               keep_sites.size(), budget,
-               int((budget or 0) < sites.size())))
-  return keep_sites, keep_calls, dropped
+  return _by_budget(sites, calls, n_original, budget,
+                    n_expect=expected_atoms(placed))
 
 
-def _count_originals(sites, keep_sites, n_original):
-  """ How many of the first `n_original` sites survived the contest.
-
-  By coordinate, since `_by_budget` rebuilds the list and indices shift.
-  """
-  originals = set(tuple(sites[i]) for i in range(n_original))
-  return sum(1 for s in keep_sites if tuple(s) in originals)
-
-
-def _by_budget(sites, calls, n_original, strengths, budget, floor=0,
-               n_expect=None):
+def _by_budget(sites, calls, n_original, budget, n_expect=None):
   """ Keep the additions the cell has room for, best evidence first.
 
-  No single quantity vetoes an atom: peak strength (sigma) and the u_iso
-  ratio to the originals' median (a real atom refines near 1, a spurious one
-  inflates) are combined in log space, so a strong peak with a mediocre ADP
-  can outvote a weak peak with a good one. At most `budget - n_original`
-  additions are kept, the room the cell leaves.
+  The score is the u_iso ratio to the originals' median (a real atom refines
+  near 1, a spurious one inflates), in log space. At most
+  `budget - n_original` additions are kept, the room the cell leaves.
   """
   import numpy as np
   from cctbx.array_family import flex
@@ -461,20 +295,16 @@ def _by_budget(sites, calls, n_original, strengths, budget, floor=0,
 
   score, by_i = [], dict((e[0], e) for e in LAST_EVIDENCE)
   for k in range(n_add):
-    i = n_original + k
-    sig = strengths[k] if strengths and k < len(strengths) else SIGMA_REF
-    ev = by_i.get(i)
+    ev = by_i.get(n_original + k)
     uratio = ev[1] if ev else 1.0
     # positive = the evidence supports the atom
-    score.append(np.log(U_MAX) - np.log(max(uratio, 1e-3))
-                 + SIGMA_W*np.log(max(sig, 1e-3)/SIGMA_REF))
+    score.append(np.log(U_MAX) - np.log(max(uratio, 1e-3)))
 
   # kept: positive evidence and inside the room the cell leaves
   ranked = sorted(range(n_add), key=lambda k: -score[k])
   if PRUNE_ADAPT > 0 and n_expect:
     # Best evidence first, so a sparse model's leniency goes to its strongest
-    # candidates and closes as it fills. With swap n_original is 0 and the
-    # originals are counted inside `keep`.
+    # candidates and closes as it fills.
     keep = set()
     for k in ranked[:room]:
       occ = (n_original + len(keep))/float(n_expect)
@@ -486,9 +316,6 @@ def _by_budget(sites, calls, n_original, strengths, budget, floor=0,
         keep.add(k)
   else:
     keep = set(k for k in ranked[:room] if score[k] > 0.0)
-  # swap only (floor is 0 otherwise): the contest may not empty the model
-  if floor and len(keep) < floor:
-    keep = set(ranked[:min(floor, n_add)])
   # which limit did the work: cell cap against own evidence
   global LAST_CAPPED
   LAST_CAPPED = sum(1 for k in ranked[room:] if score[k] > 0.0)
@@ -508,7 +335,7 @@ def _by_budget(sites, calls, n_original, strengths, budget, floor=0,
 
 
 def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
-             sigma_cut=SIGMA_CUT, orig_strengths=None):
+             sigma_cut=SIGMA_CUT):
   """ Add atoms where the difference map says one is missing.
 
   Returns (sites, calls, n_added). The sites are extended in place order, so a
@@ -519,15 +346,6 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
   sites = flex.vec3_double(sites)
   calls = list(calls) if calls else ["C"]*sites.size()
   n_original = sites.size()
-  # reset before anything can fail, so no stale value from the last structure
-  global LAST_N_ORIGINAL, LAST_ADAPT_WANT, LAST_ADAPT_CUT
-  LAST_N_ORIGINAL = n_original
-  LAST_ADAPT_WANT, LAST_ADAPT_CUT = 0, 0.0
-  global _ADAPT_ANNOUNCED
-  if not _ADAPT_ANNOUNCED:
-    _ADAPT_ANNOUNCED = True
-    print("ADAPTDIAG requested=%g active=%d volume=%.1f floor=%.2f"
-          % (ADAPT, 1 if ADAPT > 0 else 0, ADAPT_VOLUME, ADAPT_FLOOR))
   added = 0
   u_values = None
   strengths, dists = [], []
@@ -539,15 +357,7 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
     med = None
     if _refined is not None and _refined.scatterers().size() == sites.size():
       u_values, med = refined_u_values(_refined, sites.size())
-    cut = sigma_cut
-    if ADAPT > 0:
-      want = expected_atoms(placed)
-      occ = sites.size()/float(want) if want else 1.0
-      if occ < 1.0:
-        cut = sigma_cut*max(ADAPT_FLOOR, occ**ADAPT)
-      if _round == 0:
-        LAST_ADAPT_WANT, LAST_ADAPT_CUT = want, cut
-    found = candidates(fft, placed, sites, cut, calls)
+    found = candidates(fft, placed, sites, sigma_cut, calls)
     if not found:
       break
     for site, _sig, _dst in found[:MAX_ADD_PER_ROUND]:
@@ -559,24 +369,16 @@ def complete(f_obs, placed, sites, calls, rounds=MAX_ROUNDS,
       # carbon; the geometry aid retypes everything afterwards
       calls.append("C")
       added += 1
-    # old: if len(found) <= 0: break  (unreachable, `if not found` above)
 
   # refine once more and drop the additions the refinement will not support,
-  # before anything is typed; with swap even when nothing was added
-  mode = os.environ.get("COMPLETION_PRUNE", "1")
-  if (added or (SWAP and orig_strengths is not None)) and mode != "0":
-    n_before = sites.size()
+  # before anything is typed
+  if added:
     sites, calls, dropped = prune_added(f_obs, placed, sites, calls,
                                         n_original, u_values,
-                                        mode=("mark" if mode == "mark"
-                                              else "on"),
                                         strengths=strengths,
                                         budget=budget_atoms(placed),
-                                        dists=dists,
-                                        orig_strengths=orig_strengths,
-                                        swap=SWAP)
-    # describes the model handed back; with swap a drop can hit an original
-    added = max(0, sites.size() - (n_before - added))
+                                        dists=dists)
+    added -= dropped
   return sites, calls, added
 
 
@@ -661,9 +463,3 @@ def heavy_seed(sites, heights, n_seed):
   n_seed = max(1, min(int(n_seed), sites.size()))
   order = sorted(range(sites.size()), key=lambda i: -heights[i])
   return flex.vec3_double([sites[i] for i in sorted(order[:n_seed])])
-
-
-if __name__ == "__main__":
-  print(__doc__)
-  print("sigma cut %.1f, bond window %.1f-%.1f A, max %d rounds"
-        % (SIGMA_CUT, MIN_BOND, MAX_BOND, MAX_ROUNDS))

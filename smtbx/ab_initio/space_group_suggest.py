@@ -79,12 +79,11 @@ COVERAGE_SURE_MARGIN = 0.9
 # the other centricity.
 CENTRIC_AMBIGUOUS = (0.78, 0.92)
 
-# Z' tie-break (see `zprime_loglik`). Fitted on the even-CRC half of a 10k COD
-# replay (16 Nov 2026): prior over the Z' crystallographers deposit, and the
-# log offset (median) and robust spread of V/(18 A^3 * non-H atoms) against the
-# deposited Z. The margin was chosen on that half too; on the other 5019
-# structures it moved top-1 from 0.861 to 0.872 (+100/-47, McNemar p 1.5e-5),
-# while switching on any gain lost as much as it won.
+# Z' tie-break (see `zprime_loglik`): prior over the Z' crystallographers
+# deposit, and the log offset (median) and robust spread of
+# V/(18 A^3 * non-H atoms) against the deposited Z, fitted with the margin on
+# one half of deposited structures and checked on the other. Only a tie-break:
+# weighting it into every score lost as much as it won.
 ZPRIME_PRIOR = {0.125: 0.005, 0.25: 0.0151, 0.5: 0.1909, 1: 0.7011,
                 1.5: 0.0012, 2: 0.0788, 3: 0.0052, 4: 0.0021, 6: 0.0006}
 ZPRIME_MU = 0.01347
@@ -102,18 +101,8 @@ COVERAGE_DOMINANCE_MAX_RATIO = 0.15
 
 # Decimals the absence ratio is rounded to before candidates are compared on
 # it, before the absence count. One decimal would let C2/c (glide leaking to
-# 0.01) beat C2/m but ranks worse overall. Env override for A/B only.
+# 0.01) beat C2/m but ranks worse overall.
 ABSENCE_BUCKET_DECIMALS = 2
-
-
-def _absence_bucket_decimals():
-  import os
-
-  try:
-    return int(os.environ.get("SMTBX_ABSENCE_BUCKET_DECIMALS",
-                              ABSENCE_BUCKET_DECIMALS))
-  except ValueError:
-    return ABSENCE_BUCKET_DECIMALS
 
 # Refute a group when its predicted absences carry more than this fraction of
 # the mean intensity of everything else; true absent classes sit near 0.05-0.1,
@@ -238,17 +227,7 @@ def _discriminating_ranking(f_obs=None):
   demotes the right answer. On unmerged data the true group's absences were
   measured at noise level, so it is the one making a claim. Hence decided per
   file from its redundancy.
-
-  `SMTBX_DISCRIMINATING_ABSENCES` overrides for A/B: 0 never, 1 always, unset
-  or `auto` decides per file.
   """
-  import os
-
-  override = os.environ.get("SMTBX_DISCRIMINATING_ABSENCES", "auto")
-  if override == "0":
-    return False
-  if override == "1":
-    return True
   if f_obs is None:
     return False
   try:
@@ -259,22 +238,6 @@ def _discriminating_ranking(f_obs=None):
   except Exception:
     # cannot tell: keep the merged-data behaviour
     return False
-
-
-# Worst phase disagreement a candidate's rotations may show before it is
-# refuted; cctbx's `structure_factor_symmetry` accepts an operator at 0.25 and
-# rejects at 0.5.
-MAX_POINT_GROUP_DISAGREEMENT = 0.5
-
-# The same statistic as a weight instead of a veto (the veto refutes the true
-# group too often, hence off). The weight is the candidate's phi margin over
-# the runner-up scaled by PHI_MARGIN_SCALE, so a phi that cannot separate the
-# leaders contributes nothing and a sharp one can outvote the absence order.
-# Applied before the discriminating run-off, which keeps the last word among
-# the leaders.
-import os
-PHI_RERANK = os.environ.get("SG_PHI_RERANK", "0") != "0"
-PHI_MARGIN_SCALE = float(os.environ.get("SG_PHI_MARGIN_SCALE", "0.16"))
 
 
 # leading candidates alpha may not reorder
@@ -293,72 +256,6 @@ def _alpha_shortlist():
   import os
   return os.environ.get("SMTBX_ALPHA_SHORTLIST", "0") not in ("", "0", "false",
                                                               "False")
-
-
-def _coverage_refutes():
-  """ Whether the coverage test may remove a candidate outright.
-
-  Off by default: it demotes instead. `SMTBX_COVERAGE_REFUTES=1` restores
-  refutation.
-  """
-  import os
-
-  return os.environ.get("SMTBX_COVERAGE_REFUTES", "0") == "1"
-
-
-def _point_group_compute():
-  """ Compute the phase agreement without letting it refute anything. """
-  import os
-
-  return os.environ.get("SMTBX_POINT_GROUP_COMPUTE", "0") == "1"
-
-
-def _point_group_filter():
-  """ Whether the phase-based point-group refutation is on. Off by default.
-
-  On merged data it refutes the true group in most structures, for reasons
-  not yet understood. `SMTBX_POINT_GROUP_PHASES=1` re-enables it.
-  """
-  import os
-
-  return os.environ.get("SMTBX_POINT_GROUP_PHASES", "0") == "1"
-
-
-def point_group_agreement(f_calc_in_p1, space_group, cache=None):
-  """ Worst phase disagreement over a candidate's distinct rotations.
-
-  Whether the phases of the P1 solution satisfy the candidate's rotations
-  over every reflection (SHELXT's alpha, Sheldrick 2015).
-
-  Rotations only: a c-glide and a mirror share a rotation and score alike, so
-  glide versus mirror is left to the absence test.
-
-  `cache` maps a rotation to its factor across candidates; the candidates of
-  a Laue class share few distinct rotations.
-
-  None when it cannot be computed, treated as no evidence.
-  """
-  from cctbx import sgtbx
-
-  if f_calc_in_p1 is None:
-    return None
-  if cache is None:
-    cache = {}
-  worst = 0.0
-  try:
-    for op in space_group:
-      r = op.r()
-      if r.is_unit_mx():
-        continue
-      key = tuple(r.num())
-      if key not in cache:
-        cache[key] = f_calc_in_p1.symmetry_agreement_factor(
-          sgtbx.change_of_basis_op(sgtbx.rt_mx(r)),
-          assert_is_similar_symmetry=False)
-      worst = max(worst, cache[key])
-  except Exception:
-    return None
-  return worst
 
 
 def pairwise_absence_winner(f_obs_p1, group_a, group_b, max_ratio=None):
@@ -496,15 +393,8 @@ def completeness_reference(f_obs_p1):
   Returns (complete indices, present flags, baseline missing fraction), or None
   if no usable sphere can be built.
   """
-  import os
-
   from cctbx import miller
   from cctbx.array_family import flex
-
-  # A/B switch: None disables the coverage test, candidates fall back to the
-  # intensity test
-  if os.environ.get("SMTBX_ABSENCE_COVERAGE") == "0":
-    return None
 
   try:
     d_min = f_obs_p1.d_min()
@@ -665,11 +555,8 @@ def laue_from_data(i_obs, max_delta=3.0, tau=0.15, min_pairs=10, n_bins=20):
   both widened by `tau`. A rotation without `min_pairs` pairs abstains: data
   merged in a group cannot test that group's own rotations, so `determined`
   is False then and the input class must stand. Equal scores go to the lower
-  order.
-
-  COD, 3000 deposits (16 Nov 2026): determined on 93.5 %, and then agrees
-  with the deposited Laue class on 98.5 %; the disagreements are mostly
-  upwards (pseudo-merohedral twins, pseudo-symmetry).
+  order. Where it disagrees with a deposited class it is mostly higher
+  (pseudo-merohedral twins, pseudo-symmetry).
 
   Returns group_args(laue_group_info, determined, cc_ref, n_unknown,
   candidates): `laue_group_info` is the centring-free derived Laue group in
@@ -734,8 +621,8 @@ def laue_from_data(i_obs, max_delta=3.0, tau=0.15, min_pairs=10, n_bins=20):
         ref.append((v[0]/m, v[1]/m))
   cc_ref = cc(ref)
   z_true = fz(min(cc_ref, 0.95)) if cc_ref is not None else fz(0.9)
-  # ponytail: pure-Python pair loop, ~0.3 s on a typical COD set; vectorise
-  # with flex if 10^5-reflection files make it noticeable
+  # ponytail: pure-Python pair loop; vectorise with flex if 10^5-reflection
+  # files make it noticeable
   llr, n_unknown = {}, 0
   for r in proper(ms.lattice_group_info().group()):
     pairs = []
@@ -873,25 +760,11 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   # Decided once per file, not per candidate: see `_discriminating_ranking`.
   discriminating = _discriminating_ranking(f_obs)
 
-  # Phases shared across candidates (see `point_group_agreement`). Needs
-  # Friedel mates: rotated indices otherwise leave the stored hemisphere and
-  # silently yield nothing. Computing the metric and refuting on it are
-  # separate switches, so the metric can be recorded without the filter.
-  phase_cache = {}
-  f_calc_for_phases = None
-  if (_point_group_filter() or _point_group_compute()) and f_calc_in_p1 is not None:
-    try:
-      f_calc_for_phases = f_calc_in_p1.generate_bijvoet_mates()
-    except Exception:
-      f_calc_for_phases = None
-
   scored, refuted = [], []
   for sgi in candidates:
     group = sgi.group()
     ratio, n_absent = absence_ratio(f_obs_p1, group)
     own_ratio, n_own = discriminating_absence_ratio(f_obs_p1, group, shared)
-    phi_point_group = point_group_agreement(f_calc_for_phases, group,
-                                            cache=phase_cache)
     number = sgi.type().number()
     coverage, n_coverage = ((None, 0) if reference is None
                             else absence_coverage(reference, group))
@@ -908,9 +781,7 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
       # over the absences only this group predicts
       own_absence_ratio=own_ratio,
       n_own_absent=n_own,
-      # Phase evidence about the rotations, independent of the absences.
-      phi_point_group=phi_point_group,
-      own_absence_bucket=(round(own_ratio, _absence_bucket_decimals())
+      own_absence_bucket=(round(own_ratio, ABSENCE_BUCKET_DECIMALS)
                           if n_own >= MIN_ABSENCES_TO_JUDGE else None),
       coverage_margin=coverage,
       n_coverage_absent=n_coverage,
@@ -955,19 +826,6 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   # never judged on them.
   survivors = []
   for entry in scored:
-    # Phases refute point groups, absences refute glides and screws. Checked
-    # first because it also reaches candidates the absence test cannot judge
-    # (Pmmm, P222). Gated on the filter switch, not on the value existing:
-    # computing the metric must not turn the refutation on.
-    if (_point_group_filter()
-        and entry.phi_point_group is not None
-        and entry.phi_point_group > MAX_POINT_GROUP_DISAGREEMENT):
-      entry.reason = (
-        "the solution's phases do not obey its rotations (phi_sym %.2f, "
-        "refuted above %.2f)"
-        % (entry.phi_point_group, MAX_POINT_GROUP_DISAGREEMENT))
-      refuted.append(entry)
-      continue
     if (entry.n_predicted_absent >= STRONG_ABSENCE_MIN
         and entry.absence_ratio > STRONG_ABSENCE_RATIO):
       entry.reason = (
@@ -1003,11 +861,8 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
       # fallback only fires when every candidate is refuted), and the truth
       # can fail here with perfectly weak measured absences. Demoted entries
       # rank behind the other survivors.
-      if _coverage_refutes():
-        refuted.append(entry)
-      else:
-        entry.coverage_demoted = True
-        survivors.append(entry)
+      entry.coverage_demoted = True
+      survivors.append(entry)
     else:
       survivors.append(entry)
   scored = survivors
@@ -1047,7 +902,7 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
       # rivals so the tie falls through to evidence_fraction.
       entry.absence_bucket = (0.0 if entry.coverage_dominant
                               else round(entry.absence_ratio,
-                                         _absence_bucket_decimals()))
+                                         ABSENCE_BUCKET_DECIMALS))
     else:
       entry.absence_bucket = 0.0
 
@@ -1097,21 +952,6 @@ def suggest(f_obs, f_calc_in_p1, laue_group_info=None, n_suggestions=3,
   else:
     scored.sort(key=lambda e: ((0 if e.centric_agrees is not False else 1),)
                 + order(e))
-
-  if PHI_RERANK and len(scored) > 1:
-    _phi = [getattr(e, "phi_point_group", None) for e in scored]
-    # All or nothing: a partial column would let a candidate win on having
-    # been skipped.
-    if all(p is not None for p in _phi):
-      _by_phi = sorted(range(len(scored)), key=lambda i: -_phi[i])
-      _phi_rank = [0]*len(scored)
-      for _pos, _i in enumerate(_by_phi):
-        _phi_rank[_i] = _pos
-      _sorted_phi = sorted(_phi, reverse=True)
-      _w = min((_sorted_phi[0] - _sorted_phi[1])/PHI_MARGIN_SCALE, 4.0)
-      _fused = sorted(range(len(scored)),
-                      key=lambda i: (i + _w*_phi_rank[i], i))
-      scored = [scored[i] for i in _fused]
 
   # Run-off among the leaders on the reflections that separate them (two
   # groups differing by one glide). Limited to the leading few: O(k^2)

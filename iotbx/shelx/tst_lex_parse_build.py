@@ -303,8 +303,8 @@ def exercise_special_positions():
 
 def exercise_symmetry_implied_fixes():
   # K1 sits on the 3-fold axis of P6(3): x, y, U13, U23 are fixed by symmetry
-  # (and U22, U12 follow from U11). A ShelXL fix on such a component used to
-  # freeze the whole site or U, since one grad flag covers all components.
+  # (and U22, U12 follow from U11). A ShelXL fix on such a component must not
+  # freeze the whole site or U, though one grad flag covers all components.
   def k1_flags(xyz, uij):
     ins = ins_special_positions.replace(
       "K1    4    0.000000    0.000000   -0.001950    10.33333    0.02427    0.02427 =\n"
